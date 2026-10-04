@@ -1,0 +1,28 @@
+# Function pointers (v0.40.0): a function used as a value, called
+# indirectly. `cb = twice` yields the address of `twice`; `cb(21)` calls
+# through it. `to_int(cb)` is the raw address, the escape hatch a FFI
+# binding needs (a COM vtable slot, a Win32 callback).
+
+def twice(x: int) -> int:
+    return x * 2
+
+def add(a: int, b: int) -> int:
+    return a + b
+
+def noop(x: int) -> int:
+    return x
+
+def main() -> int:
+    f = twice
+    print(f(21))
+    g = add
+    print(g(20, 22))
+    # a pointer is an ordinary value: copy it, keep it in a struct
+    h = f
+    print(h(5))
+    print(to_int(twice) != 0)
+    print(to_int(f) == to_int(h))
+    # taking the address of an extern declaration works too
+    p = noop
+    print(p(f(3)))
+    return 0

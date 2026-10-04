@@ -55,6 +55,10 @@ pub struct Tc<'a> {
     pub cur_file: u32,
     /// AST node address of a generic call -> mangled instance name
     pub call_map: HashMap<usize, String>,
+    /// variables currently narrowed by `is None` (v0.40.0): name -> the
+    /// DECLARED (nullable) type, kept so an assignment inside the branch can
+    /// re-narrow (or unwind) the view against the real slot type
+    narrowed: HashMap<String, Type>,
     /// instances pending body checking (FIFO: instance order must match the
     /// order codegen emits, so a VecDeque, never a `Vec::remove(0)`)
     queue: VecDeque<FnDecl>,
@@ -100,6 +104,21 @@ pub fn check(program: &Program) -> Result<CheckOutput, Diag> {
             resolve_ty(&p.ty, &structs).map_err(|m| Diag::at("type", p.pos.file, p.pos.line, p.pos.col, m))?;
             if p.ty == Type::Void {
                 return Err(Diag::at("type", p.pos.file, p.pos.line, p.pos.col, format!("parameter '{}' cannot have type void", p.name)));
+            }
+            // v0.40.0: an `extern def` is a C declaration, and the surface has
+            // no way to spell a C function-pointer parameter. Function
+            // pointers live in Aoxn values; cross the FFI boundary through
+            // `to_int` + `store_i64` instead.
+            if f.is_extern {
+                if let Type::FnPtr { .. } = p.ty {
+                    return Err(Diag::at(
+                        "type",
+                        p.pos.file,
+                        p.pos.line,
+                        p.pos.col,
+                        format!("extern function '{}' cannot take a function-pointer parameter; pass its address as an int", f.name),
+                    ));
+                }
             }
         }
         resolve_ty(&f.ret, &structs).map_err(|m| Diag::at("type", f.pos.file, f.pos.line, f.pos.col, m))?;
@@ -150,6 +169,7 @@ pub fn check(program: &Program) -> Result<CheckOutput, Diag> {
         generics: &generics,
         cur_file: 0,
         call_map: HashMap::new(),
+        narrowed: HashMap::new(),
         queue: VecDeque::new(),
         done: HashSet::new(),
         instances: Vec::new(),
@@ -244,28 +264,43 @@ impl<'a> Tc<'a> {
                 }
                 match scopes.get(name) {
                     Some(dt) => {
-                        // re-assignment: type is fixed at first binding
+                        // re-assignment: type is fixed at first binding. The
+                        // comparison uses the DECLARED type when the view is
+                        // narrowed (a `x: int | None = None` inside an
+                        // `is not None` branch re-binds the real slot)
+                        let declared = self.narrowed.get(name).cloned();
+                        let real = declared.as_ref().unwrap_or(dt);
                         if let Some(ann) = ty {
-                            if *ann != *dt {
+                            if *ann != *real {
                                 return Err(self.err(pos.line, pos.col, format!(
-                                        "cannot re-declare '{name}' as {ann}: it is already {dt}"
+                                        "cannot re-declare '{name}' as {ann}: it is already {real}"
                                     )));
                             }
                         }
-                        if t != *dt {
-                            return Err(self.err(pos.line, pos.col, format!("cannot assign a value of type {t} to '{name}: {dt}'")));
+                        if !assignable(real, &t) {
+                            return Err(self.err(pos.line, pos.col, format!("cannot assign a value of type {t} to '{name}: {real}'")));
+                        }
+                        // re-narrow the view (v0.40.0): `x = e` on a narrowed
+                        // variable is a Let, and the branch now sees `t`
+                        if self.narrowed.contains_key(name) {
+                            if t == self.narrowed[name] {
+                                self.narrowed.remove(name);
+                            }
+                            scopes.insert(name.clone(), t);
                         }
                     }
                     None => {
                         // first binding: annotation (if present) must match the initializer
                         if let Some(ann) = ty {
-                            if *ann != t {
+                            if !assignable(ann, &t) {
                                 return Err(self.err(pos.line, pos.col, format!(
                                         "cannot initialize '{name}: {ann}' with an expression of type {t}"
                                     )));
                             }
+                            scopes.insert(name.clone(), ann.clone());
+                        } else {
+                            scopes.insert(name.clone(), t);
                         }
-                        scopes.insert(name.clone(), t);
                     }
                 }
                 Ok(())
@@ -274,10 +309,25 @@ impl<'a> Tc<'a> {
                 if !target.is_lvalue() {
                     return Err(self.err(pos.line, pos.col, "invalid assignment target"));
                 }
-                let dt = self.lvalue_type(target, scopes)?;
+                // a write goes to the DECLARED slot: a narrowed view must not
+                // turn `x = None` inside `if x is not None:` into an error
+                let dt = match target {
+                    Expr::Var { name, .. } => self.narrowed.get(name).cloned().unwrap_or_else(|| scopes.get(name).cloned().unwrap_or(Type::Void)),
+                    _ => self.lvalue_type(target, scopes)?,
+                };
                 let t = self.check_expr(expr, scopes)?;
-                if t != dt {
+                if !assignable(&dt, &t) {
                     return Err(self.err(pos.line, pos.col, format!("cannot assign a value of type {t} to a target of type {dt}")));
+                }
+                // re-narrow the view (v0.40.0): the variable now provably
+                // holds a value of type t, so the branch sees exactly that
+                if let Expr::Var { name, .. } = target {
+                    if self.narrowed.contains_key(name) {
+                        if t == self.narrowed[name] {
+                            self.narrowed.remove(name);
+                        }
+                        scopes.insert(name.clone(), t);
+                    }
                 }
                 Ok(())
             }
@@ -286,9 +336,48 @@ impl<'a> Tc<'a> {
                 if t != Type::Bool {
                     return Err(self.err(pos.line, pos.col, format!("'if' condition must be bool, found {t}")));
                 }
-                self.check_block(then_block, f, scopes, loop_depth)?;
-                if let Some(eb) = else_block {
-                    self.check_block(eb, f, scopes, loop_depth)?;
+                // nullable narrowing (v0.40.0): `if x is None:` gives the
+                // then-branch `None` and the else-branch `T` (swapped for
+                // `is not None`). Only a bare variable narrows — anything
+                // else keeps its declared type and the test is just a bool.
+                match narrow_target(cond, scopes) {
+                    Some((var, then_ty, else_ty)) => {
+                        // remember the DECLARED (nullable) slot type so an
+                        // assignment inside the branch can re-narrow against it
+                        self.narrowed.entry(var.clone()).or_insert_with(|| scopes.get(&var).cloned().unwrap_or(Type::Void));
+                        let saved = scopes.get(&var).cloned();
+                        self.narrow_scope(scopes, &var, &then_ty);
+                        let r = self.check_block(then_block, f, scopes, loop_depth);
+                        self.restore_scope(scopes, &var, saved.clone());
+                        r?;
+                        // a then-branch that always exits (return/raise) makes
+                        // the code after the `if` the else-branch (v0.40.0)
+                        let then_exits = block_returns_all(then_block);
+                        match else_block {
+                            Some(eb) => {
+                                self.narrow_scope(scopes, &var, &else_ty);
+                                let r = self.check_block(eb, f, scopes, loop_depth);
+                                self.restore_scope(scopes, &var, saved);
+                                r?;
+                                if then_exits && !block_returns_all(eb) {
+                                    self.narrow_scope(scopes, &var, &else_ty);
+                                } else if block_returns_all(eb) && !then_exits {
+                                    self.narrow_scope(scopes, &var, &then_ty);
+                                }
+                            }
+                            None => {
+                                if then_exits {
+                                    self.narrow_scope(scopes, &var, &else_ty);
+                                }
+                            }
+                        }
+                    }
+                    None => {
+                        self.check_block(then_block, f, scopes, loop_depth)?;
+                        if let Some(eb) = else_block {
+                            self.check_block(eb, f, scopes, loop_depth)?;
+                        }
+                    }
                 }
                 Ok(())
             }
@@ -372,6 +461,21 @@ impl<'a> Tc<'a> {
     }
 
     /// type of an assignment target (already validated as lvalue by the parser)
+    fn narrow_scope(&mut self, scopes: &mut Scopes, var: &str, ty: &Type) {
+        scopes.insert(var.to_string(), ty.clone());
+    }
+
+    fn restore_scope(&mut self, scopes: &mut Scopes, var: &str, saved: Option<Type>) {
+        match saved {
+            Some(t) => {
+                scopes.insert(var.to_string(), t);
+            }
+            None => {
+                scopes.remove(var);
+            }
+        }
+    }
+
     fn lvalue_type(&mut self, target: &Expr, scopes: &mut Scopes) -> Result<Type, Diag> {
         match target {
             Expr::Var { name, pos } => scopes.get(name).cloned().ok_or_else(|| self.err(pos.line, pos.col, format!("assignment to undeclared variable '{name}'"))),
@@ -414,6 +518,11 @@ impl<'a> Tc<'a> {
                         | (Type::Str, Type::Str)
                         | (Type::Bool, Type::Int)
                         | (Type::Int, Type::Bool)
+                        // v0.40.0: `as` is also the re-interpretation escape
+                        // hatch — an int address becomes a callable function
+                        // pointer and back (a COM vtable slot, a Win32 thunk)
+                        | (Type::Int, Type::FnPtr { .. })
+                        | (Type::FnPtr { .. }, Type::Int)
                 );
                 if !ok {
                     return Err(self.err(pos.line, pos.col, format!("invalid cast from {from} to {to}")));
@@ -424,7 +533,21 @@ impl<'a> Tc<'a> {
             Expr::Float(..) => Ok(Type::Float),
             Expr::Str(..) => Ok(Type::Str),
             Expr::Bool(..) => Ok(Type::Bool),
-            Expr::Var { name, pos } => scopes.get(name).cloned().ok_or_else(|| self.err(pos.line, pos.col, format!("unknown variable '{name}'"))),
+            Expr::NoneLit(..) => Ok(Type::None),
+            Expr::Var { name, pos } => match scopes.get(name).cloned() {
+                Some(t) => Ok(t),
+                // a bare function name in value position is its address
+                // (v0.40.0): `cb = handler` yields a function pointer typed by
+                // the declaration. Locals shadow globals because `scopes` is
+                // consulted first.
+                None => match self.sigs.get(name) {
+                    Some(sig) => Ok(Type::FnPtr {
+                        ret: Box::new(sig.ret.clone()),
+                        params: sig.params.clone(),
+                    }),
+                    None => Err(self.err(pos.line, pos.col, format!("unknown variable '{name}'"))),
+                },
+            },
             Expr::Index { arr, idx, pos } => {
                 let at = self.check_expr(arr, scopes)?;
                 let it = self.check_expr(idx, scopes)?;
@@ -447,12 +570,32 @@ impl<'a> Tc<'a> {
                 if elems.is_empty() {
                     return Err(self.err(pos.line, pos.col, "empty array literals are not allowed"));
                 }
-                let elem = self.check_expr(&elems[0], scopes)?;
-                for e in &elems[1..] {
-                    let t = self.check_expr(e, scopes)?;
-                    if t != elem {
-                        return Err(self.err(e.pos().line, e.pos().col, format!("array literal elements must share one type: found {elem} and {t}")));
+                let first = self.check_expr(&elems[0], scopes)?;
+                let mut elem = first.clone();
+                // v0.40.0: `[1, None, 3]` infers `[int | None; 3]` — the one
+                // nullable join the language makes implicitly, because a
+                // literal is where absence shows up in practice
+                if elems.len() > 1 {
+                    let mut saw_none = first == Type::None;
+                    let mut inner: Option<Type> = if first == Type::None { None } else { Some(first) };
+                    for e in &elems[1..] {
+                        let t = self.check_expr(e, scopes)?;
+                        if t == Type::None {
+                            saw_none = true;
+                        } else if let Some(prev) = &inner {
+                            if *prev != t {
+                                return Err(self.err(e.pos().line, e.pos().col, format!("array literal elements must share one type: found {prev} and {t}")));
+                            }
+                        } else {
+                            inner = Some(t);
+                        }
                     }
+                    elem = match (saw_none, inner) {
+                        (true, Some(t)) => Type::Opt(Box::new(t)),
+                        (true, None) => Type::None,
+                        (false, Some(t)) => t,
+                        (false, None) => unreachable!(),
+                    };
                 }
                 Ok(Type::Array { elem: Box::new(elem), len: elems.len() })
             }
@@ -471,7 +614,7 @@ impl<'a> Tc<'a> {
                         .field_type(fname)
                         .ok_or_else(|| self.err(fexpr.pos().line, fexpr.pos().col, format!("struct '{name}' has no field '{fname}'")))?;
                     let t = self.check_expr(fexpr, scopes)?;
-                    if t != *fty {
+                    if !assignable(fty, &t) {
                         return Err(self.err(fexpr.pos().line, fexpr.pos().col, format!(
                                 "field '{fname}' of '{name}' must be {fty}, found {t}"
                             )));
@@ -544,6 +687,12 @@ impl<'a> Tc<'a> {
                         return Err(self.err(pos.line, pos.col, format!("{name} expects exactly 1 positional argument")));
                     }
                     let t = self.check_expr(&args[0].value, scopes)?;
+                    // to_int on a function pointer yields its raw address
+                    // (v0.40.0) — the escape hatch that feeds a COM vtable or
+                    // any other runtime-resolved call slot.
+                    if name == "to_int" && matches!(t, Type::FnPtr { .. }) {
+                        return Ok(Type::Int);
+                    }
                     if !matches!(t, Type::Int | Type::Float | Type::Bool) {
                         return Err(self.err(pos.line, pos.col, format!("{name}() requires int, float, or bool, found {t}")));
                     }
@@ -638,6 +787,32 @@ impl<'a> Tc<'a> {
                         // lifetime — the layout borrow is independent of `self`
                         return self.check_struct_construction(name, layout, args, *pos, scopes);
                     }
+                    // indirect call through a function pointer (v0.40.0)
+                    if let Some(Type::FnPtr { ret, params }) = scopes.get(name).cloned() {
+                        if args.iter().any(|a| a.name.is_some()) {
+                            return Err(self.err(pos.line, pos.col, format!("function pointer '{name}' takes positional arguments only")));
+                        }
+                        if args.len() != params.len() {
+                            return Err(self.err(pos.line, pos.col, format!(
+                                    "function pointer '{name}' expects {} argument(s), found {}",
+                                    params.len(),
+                                    args.len()
+                                )));
+                        }
+                        for (i, a) in args.iter().enumerate() {
+                            let t = self.check_expr(&a.value, scopes)?;
+                            if !assignable(&params[i], &t) {
+                                return Err(self.err(a.value.pos().line, a.value.pos().col, format!(
+                                        "argument {} of '{}' must be {}, found {}",
+                                        i + 1,
+                                        name,
+                                        params[i],
+                                        t
+                                    )));
+                            }
+                        }
+                        return Ok(*ret);
+                    }
                     return Err(self.err(pos.line, pos.col, format!("call to undefined function or struct '{name}'")));
                 }
                 // borrow the signature piecewise: params/ret are read between
@@ -656,7 +831,7 @@ impl<'a> Tc<'a> {
                 }
                 for (i, a) in args.iter().enumerate() {
                     let t = self.check_expr(&a.value, scopes)?;
-                    if t != self.sigs[name].params[i] {
+                    if !assignable(&self.sigs[name].params[i], &t) {
                         return Err(self.err(a.value.pos().line, a.value.pos().col, format!(
                                 "argument {} of '{}' must be {}, found {}",
                                 i + 1,
@@ -683,8 +858,34 @@ impl<'a> Tc<'a> {
             Expr::Binary { op, lhs, rhs, pos } => {
                 let lt = self.check_expr(lhs, scopes)?;
                 let rt = self.check_expr(rhs, scopes)?;
+                // a nullable value has no operators: point at the narrowing
+                // that unlocks it instead of "cannot compare X with Y"
+                if matches!(lt, Type::Opt(_)) || matches!(rt, Type::Opt(_)) {
+                    let none_test = matches!(op, Is | IsNot) && (lt == Type::None || rt == Type::None);
+                    if !none_test {
+                        let side = if matches!(lt, Type::Opt(_)) { "left" } else { "right" };
+                        let t = if matches!(lt, Type::Opt(_)) { &lt } else { &rt };
+                        return Err(self.err(pos.line, pos.col, format!(
+                                "the {side} operand is {t}: a nullable value cannot be used here — test it with `is None` / `is not None` first"
+                            )));
+                    }
+                }
                 use BinOp::*;
                 match op {
+                    // `is` / `is not` exist for the nullable test (v0.40.0):
+                    // one side must be the `None` literal. Anything else is a
+                    // type error rather than a silent `==`, because identity on
+                    // a value type has no meaning worth guessing at.
+                    Is | IsNot => {
+                        let nullable = matches!(lt, Type::None | Type::Opt(_)) || matches!(rt, Type::None | Type::Opt(_));
+                        if !nullable {
+                            return Err(self.err(pos.line, pos.col, format!(
+                                    "'{}' compares against None; found ({lt}, {rt})",
+                                    op_str(*op)
+                                )));
+                        }
+                        Ok(Type::Bool)
+                    }
                     And | Or => {
                         if lt == Type::Bool && rt == Type::Bool {
                             Ok(Type::Bool)
@@ -848,7 +1049,7 @@ impl<'a> Tc<'a> {
                 .field_type(fname)
                 .ok_or_else(|| self.err(a.value.pos().line, a.value.pos().col, format!("struct '{name}' has no field '{fname}'")))?;
             let t = self.check_expr(&a.value, scopes)?;
-            if t != *fty {
+            if !assignable(fty, &t) {
                 return Err(self.err(a.value.pos().line, a.value.pos().col, format!("field '{fname}' of '{name}' must be {fty}, found {t}")));
             }
         }
@@ -939,6 +1140,46 @@ fn subst_type(t: &Type, subst_t: &HashMap<String, Type>, n: Option<usize>) -> Re
         }
         other => Ok(other.clone()),
     }
+}
+
+/// may a value of type `actual` be stored where `declared` is expected?
+///
+/// v0.40.0 added exactly one widening: a `T` (or `None`) goes into a
+/// `T | None` slot. Nothing else is implicit — in particular an `int` never
+/// becomes a `float`, and a `T | None` never becomes a bare `T` (narrow it
+/// with `is None` first).
+fn assignable(declared: &Type, actual: &Type) -> bool {
+    if declared == actual {
+        return true;
+    }
+    match declared {
+        Type::Opt(inner) => matches!(actual, Type::None) || **inner == *actual,
+        _ => false,
+    }
+}
+
+/// `None` on one side, a nullable variable on the other: yields the name and
+/// the type each branch sees. `None` for either side of the tuple means "no
+/// narrowing here" is impossible — the caller only uses the Some case.
+fn narrow_target(cond: &Expr, scopes: &Scopes) -> Option<(String, Type, Type)> {
+    let Expr::Binary { op, lhs, rhs, .. } = cond else { return None };
+    let is_not = match op {
+        crate::ast::BinOp::Is => false,
+        crate::ast::BinOp::IsNot => true,
+        _ => return None,
+    };
+    let (var_expr, other) = (lhs.as_ref(), rhs.as_ref());
+    let (var_expr, _other) = if matches!(other, Expr::NoneLit(_)) {
+        (var_expr, other)
+    } else if matches!(var_expr, Expr::NoneLit(_)) {
+        (other, var_expr)
+    } else {
+        return None;
+    };
+    let Expr::Var { name, .. } = var_expr else { return None };
+    let Type::Opt(inner) = scopes.get(name)?.clone() else { return None };
+    let (then_ty, else_ty) = if is_not { ((*inner).clone(), Type::None) } else { (Type::None, (*inner).clone()) };
+    Some((name.clone(), then_ty, else_ty))
 }
 
 fn has_generic_len(t: &Type) -> bool {
@@ -1076,8 +1317,21 @@ fn type_slug(t: &Type) -> String {
         Type::Bool => "b".into(),
         Type::Str => "s".into(),
         Type::Void => "v".into(),
+        Type::None => "z".into(),
+        Type::Opt(inner) => format!("n{}", type_slug(inner)),
         Type::Array { elem, len } => format!("a{}x{}", type_slug(elem), len),
         Type::Struct(n) => format!("s_{n}"),
+        // a function pointer is part of a generic instance's identity: two
+        // instances differing only in a callback's signature are different
+        // functions (v0.40.0)
+        Type::FnPtr { ret, params } => {
+            let mut slug = format!("fn_{}", type_slug(ret));
+            for p in params {
+                slug.push('_');
+                slug.push_str(&type_slug(p));
+            }
+            slug
+        }
     }
 }
 
@@ -1152,8 +1406,15 @@ fn collect_structs(decls: &[StructDecl]) -> Result<StructTable, Diag> {
 /// validate a type annotation: struct names must exist, arrays recurse
 fn resolve_ty(ty: &Type, structs: &StructTable) -> Result<(), String> {
     match ty {
-        Type::Int | Type::Float | Type::Bool | Type::Str | Type::Void => Ok(()),
+        Type::Int | Type::Float | Type::Bool | Type::Str | Type::Void | Type::None => Ok(()),
         Type::Array { elem, .. } => resolve_ty(elem, structs),
+        Type::Opt(inner) => {
+            if **inner == Type::Void {
+                Err("void cannot be nullable".into())
+            } else {
+                resolve_ty(inner, structs)
+            }
+        }
         Type::Struct(name) => {
             if structs.contains_key(name) {
                 Ok(())
@@ -1161,6 +1422,10 @@ fn resolve_ty(ty: &Type, structs: &StructTable) -> Result<(), String> {
                 Err(format!("unknown type '{name}'"))
             }
         }
+        // function-pointer types are never spelled in an annotation (the
+        // surface grammar has no `fn` type yet), so they can only arrive here
+        // synthesized — and there is nothing to resolve.
+        Type::FnPtr { .. } => Ok(()),
     }
 }
 
@@ -1219,6 +1484,8 @@ fn op_str(op: BinOp) -> &'static str {
         BitXor => "^",
         Eq => "==",
         Ne => "!=",
+        Is => "is",
+        IsNot => "is not",
         Lt => "<",
         Le => "<=",
         Gt => ">",

@@ -29,6 +29,10 @@ pub enum Tok {
     Pass,
     True,
     False,
+    /// `None` / `none` — the absence of a value (v0.40.0). A real keyword:
+    /// nothing in the tree spells an identifier this way, and leaving it as a
+    /// context-sensitive `Ident` would make `x is none` ambiguous.
+    None,
     TyInt,
     TyFloat,
     TyBool,
@@ -376,6 +380,7 @@ impl<'c> Lexer<'c> {
             "not" => Tok::Bang,
             "true" | "True" => Tok::True,
             "false" | "False" => Tok::False,
+            "none" | "None" => Tok::None,
             "int" => Tok::TyInt,
             "float" => Tok::TyFloat,
             "bool" => Tok::TyBool,

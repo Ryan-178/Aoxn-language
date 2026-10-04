@@ -1,0 +1,58 @@
+# None / `T | None` (v0.40.0): absence as a first-class value. A nullable
+# carries a tag; `is None` / `is not None` narrow it so the branch sees the
+# plain value (or the absence), no assertions needed.
+
+struct Slot:
+    label: string
+    reading: int | None
+
+def describe(x: int | None) -> string:
+    if x is None:
+        return "absent"
+    # x is int here
+    return "value " + str(x)
+
+def bump(x: int | None) -> int | None:
+    if x is not None:
+        # writing back through the narrowed view re-tags the slot
+        x = x + 1
+    return x
+
+def main() -> int:
+    print(describe(None))
+    print(describe(7))
+    a: int | None = None
+    print(a is None)
+    a = 5
+    print(a is not None)
+    print(describe(bump(a)))
+    print(describe(bump(None)))
+    print(bump(None) is None)
+    s = Slot(label="t1", reading=None)
+    if s.reading is None:
+        print("slot empty")
+    s.reading = 42
+    r = s.reading
+    if r is not None:
+        print(r + 1)
+    xs: [int | None; 3] = [1, None, 3]
+    n = 0
+    for i in range(3):
+        if xs[i] is not None:
+            n = n + 1
+    print(n)
+    # re-narrowing: assigning inside the branch updates the view
+    b: int | None = 1
+    if b is not None:
+        b = None
+        print(b is None)
+        b = 9
+        print(b + 1)
+    print(b is not None)
+    # `as` re-interprets an address as a callable function pointer
+    cb: fn(int) -> int = twice
+    print(cb(11))
+    return 0
+
+def twice(x: int) -> int:
+    return x * 2

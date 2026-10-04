@@ -58,6 +58,9 @@ const RUNTIME_NAMES: &[&str] = &[
 struct FnSig {
     c_name: String,
     ret: Type,
+    /// parameter types, kept so a function used as a VALUE can be typed
+    /// (`Type::FnPtr`) without re-reading the AST (v0.40.0)
+    params: Vec<Type>,
 }
 
 /// Compile the typechecked program to a native object file through C text +
@@ -135,11 +138,19 @@ struct GenC<'a> {
     struct_names: HashSet<String>,
     /// array wrapper typedefs: name -> (elem, len)
     typedefs: BTreeMap<String, (Type, usize)>,
+    /// `T | None` carrier structs: name -> T (v0.40.0). Registered lazily by
+    /// `c_type`, emitted with the rest of the type graph in `assemble`
+    opt_structs: BTreeMap<String, Type>,
     /// user `extern def` declarations, deduped by C name
     extern_decls: BTreeMap<String, String>,
     /// per-replication-site fill helper: node address -> rendered text
     rep_helpers: BTreeMap<usize, String>,
     reserved: HashSet<String>,
+    /// variables narrowed by `is None` (v0.40.0): name -> the type the CURRENT
+    /// branch sees. Latched while a branch is emitted, popped after it.
+    narrowed: HashMap<String, Type>,
+    /// return type of the function being emitted (for nullable coercion)
+    cur_ret: Type,
     // per-function emission state
     out: String,
     decls: Vec<String>,
@@ -160,8 +171,11 @@ impl<'a> GenC<'a> {
             struct_fields: HashMap::default(),
             struct_names: HashSet::new(),
             typedefs: BTreeMap::new(),
+            opt_structs: BTreeMap::new(),
             extern_decls: BTreeMap::new(),
             rep_helpers: BTreeMap::new(),
+            narrowed: HashMap::default(),
+            cur_ret: Type::Void,
             reserved: HashSet::new(),
             out: String::new(),
             decls: Vec::new(),
@@ -218,7 +232,7 @@ impl<'a> GenC<'a> {
             } else {
                 g.c_ident(&f.name)
             };
-            g.sigs.insert(f.name.clone(), FnSig { c_name, ret: f.ret.clone() });
+            g.sigs.insert(f.name.clone(), FnSig { c_name, ret: f.ret.clone(), params: f.params.iter().map(|p| p.ty.clone()).collect() });
         }
         // struct field types register their array typedefs up front so the
         // type graph is complete for the topological assembly
@@ -259,8 +273,20 @@ impl<'a> GenC<'a> {
             Type::Float => "f".to_string(),
             Type::Str => "s".to_string(),
             Type::Void => "v".to_string(),
+            Type::None => "z".to_string(),
+            Type::Opt(inner) => format!("o{}", Self::type_token(inner)),
             Type::Struct(n) => n.clone(),
             Type::Array { elem, len } => format!("a{}_{}", Self::type_token(elem), len),
+            // the signature is part of the token: two arrays of differently
+            // typed function pointers must not share a typedef
+            Type::FnPtr { ret, params } => {
+                let mut tok = format!("fn{}", Self::type_token(ret));
+                for p in params {
+                    tok.push('_');
+                    tok.push_str(&Self::type_token(p));
+                }
+                tok
+            }
         }
     }
 
@@ -289,7 +315,22 @@ impl<'a> GenC<'a> {
             Type::Bool => "int".to_string(),
             Type::Str => "char*".to_string(),
             Type::Void => "void".to_string(),
+            // a None VALUE is just the integer 0 on the wire; the tag lives in
+            // the Opt struct that holds it (v0.40.0)
+            Type::None => "long long".to_string(),
+            Type::Opt(inner) => {
+                let name = format!("ax_opt_{}", Self::type_token(inner));
+                self.opt_structs.insert(name.clone(), (**inner).clone());
+                format!("struct {name}")
+            }
             Type::Struct(n) => format!("struct {}", self.c_ident(n)),
+            Type::FnPtr { ret, params } => {
+                // a function-pointer TYPE is spelled with the parenthesised
+                // declarator, so `c_decl` renders `long long (*)(long long) cb`
+                let ps: Vec<String> = params.iter().map(|p| self.c_type(p)).collect();
+                let args = if ps.is_empty() { "void".to_string() } else { ps.join(", ") };
+                format!("{} (*)({})", self.c_type(ret), args)
+            }
             Type::Array { elem, len } => {
                 if *len == GENERIC_LEN {
                     return "void*".to_string(); // unreachable post-monomorphization
@@ -307,6 +348,13 @@ impl<'a> GenC<'a> {
 
     /// `<type> <ident>` declaration text
     fn c_decl(&mut self, t: &Type, ident: &str) -> String {
+        // a function pointer needs the parenthesised NAME inside the
+        // declarator: `long long (*cb)(long long)`, not `long long (*)(…) cb`
+        if let Type::FnPtr { ret, params } = t {
+            let ps: Vec<String> = params.iter().map(|p| self.c_type(p)).collect();
+            let args = if ps.is_empty() { "void".to_string() } else { ps.join(", ") };
+            return format!("{} (*{})({})", self.c_type(ret), ident, args);
+        }
         format!("{} {}", self.c_type(t), ident)
     }
 
@@ -461,6 +509,9 @@ impl<'a> GenC<'a> {
         for name in self.typedefs.keys() {
             roots.push(format!("t:{name}"));
         }
+        for name in self.opt_structs.keys() {
+            roots.push(format!("o:{name}"));
+        }
         roots.sort();
 
         for root in roots {
@@ -474,6 +525,12 @@ impl<'a> GenC<'a> {
             Type::Array { elem, len } if *len != GENERIC_LEN => {
                 out.push(format!("t:{}", Self::typedef_name(elem, *len)));
                 Self::type_dep_ids(elem, out);
+            }
+            // a nullable carries its own struct; it must exist before any
+            // typedef or field that mentions it (v0.40.0)
+            Type::Opt(inner) => {
+                out.push(format!("o:ax_opt_{}", Self::type_token(inner)));
+                Self::type_dep_ids(inner, out);
             }
             Type::Struct(n) => out.push(format!("s:{n}")),
             _ => {}
@@ -520,6 +577,21 @@ impl<'a> GenC<'a> {
             }
             let decl = self.c_decl(&elem, &format!("data[{len}]"));
             out.push_str(&format!("typedef struct {{\n    {decl};\n}} {tname};\n"));
+        } else if let Some(oname) = id.strip_prefix("o:") {
+            // `T | None` (v0.40.0): the value plus a presence tag. Structs
+            // are laid out the same way the language copies them — by value.
+            let inner = self
+                .opt_structs
+                .get(oname)
+                .cloned()
+                .ok_or_else(|| format!("internal error: nullable '{oname}' referenced but never registered"))?;
+            let mut deps = Vec::new();
+            Self::type_dep_ids(&inner, &mut deps);
+            for d in deps {
+                self.visit_type_node(&d, done, visiting, out)?;
+            }
+            let decl = self.c_decl(&inner, "value");
+            out.push_str(&format!("struct {oname} {{\n    {decl};\n    int has;\n}};\n"));
         }
         visiting.remove(id);
         done.insert(id.to_string());
@@ -536,10 +608,12 @@ impl<'a> GenC<'a> {
         self.out.clear();
         self.decls.clear();
         self.locals.clear();
+        self.narrowed.clear();
         self.tmpn = 0;
         for p in &f.params {
             self.locals.insert(p.name.clone(), p.ty.clone());
         }
+        self.cur_ret = f.ret.clone();
         self.emit_block(&f.body, 1)?;
         let decls = std::mem::take(&mut self.decls);
         let body = std::mem::take(&mut self.out);
@@ -576,6 +650,109 @@ impl<'a> GenC<'a> {
         }
     }
 
+    /// emit `e` so it initializes a slot of type `want` (v0.40.0): a plain
+    /// `T` widens into `T | None` (tag set), a `None` literal into the same
+    /// struct (tag clear). Everything else passes through untouched.
+    fn emit_coerced(&mut self, e: &Expr, want: &Type) -> Result<Type, String> {
+        let t = self.hint(e)?;
+        if let Type::Opt(inner) = want {
+            if t == **inner {
+                let name = format!("ax_opt_{}", Self::type_token(inner));
+                self.out.push_str(&format!("(struct {name}){{ .value = "));
+                self.emit_expr_inner(e)?;
+                self.out.push_str(", .has = 1 }");
+                return Ok(want.clone());
+            }
+            if t == Type::None {
+                let name = format!("ax_opt_{}", Self::type_token(inner));
+                let z = self.zero_value(inner);
+                self.out.push_str(&format!("(struct {name}){{ .value = {z}, .has = 0 }}"));
+                return Ok(want.clone());
+            }
+        }
+        self.emit_expr_inner(e)
+    }
+
+    /// `emit_coerced` with the emitted text split off (the `emit_expr` shape)
+    fn emit_coerced_expr(&mut self, e: &Expr, want: &Type) -> Result<(String, Type), String> {
+        let start = self.out.len();
+        let t = self.emit_coerced(e, want)?;
+        let text = self.out.split_off(start);
+        Ok((text, t))
+    }
+
+    /// zero value of a type, for the `.value` slot of a `None` carrier
+    fn zero_value(&mut self, t: &Type) -> String {
+        match t {
+            Type::Struct(n) => format!("(struct {}){{0}}", self.c_ident(n)),
+            Type::Array { .. } => format!("({}){{0}}", self.c_type(t)),
+            _ => "0".to_string(),
+        }
+    }
+
+/// the element type of an array literal, mirroring the checker's join:
+/// `[1, None, 3]` is `[int | None; 3]` (v0.40.0)
+    fn array_elem_type(g: &mut GenC, elems: &[Expr]) -> Result<Type, String> {
+        let first = g.hint(&elems[0])?;
+        if elems.len() == 1 {
+            return Ok(first);
+        }
+        let mut saw_none = first == Type::None;
+        let mut inner: Option<Type> = if first == Type::None { None } else { Some(first) };
+        for e in &elems[1..] {
+            let t = g.hint(e)?;
+            if t == Type::None {
+                saw_none = true;
+            } else if let Some(prev) = &inner {
+                if *prev != t {
+                    return Err("internal error: mixed element types in array literal".into());
+                }
+            } else {
+                inner = Some(t);
+            }
+        }
+        Ok(match (saw_none, inner) {
+            (true, Some(t)) => Type::Opt(Box::new(t)),
+            (true, None) => Type::None,
+            (false, Some(t)) => t,
+            (false, None) => unreachable!(),
+        })
+    }
+
+    /// the codegen mirror of the checker's `block_returns_all`: did every path
+/// through this block leave it? (Only `return` matters for the nullable
+/// narrowing's exit rule; `raise` joins later, in v0.40.0's exception work.)
+fn block_returns_all(block: &Block) -> bool {
+    block.stmts.iter().any(|s| matches!(s, Stmt::Return { .. }))
+}
+
+/// the codegen mirror of the checker's `narrow_target`: does this
+/// condition narrow a variable, and what does each branch see?
+    fn narrow_target(&self, cond: &Expr) -> Option<(String, Type, Type)> {
+        let Expr::Binary { op, lhs, rhs, .. } = cond else { return None };
+        let is_not = match op {
+            BinOp::Is => false,
+            BinOp::IsNot => true,
+            _ => return None,
+        };
+        let (var_expr, other) = (lhs.as_ref(), rhs.as_ref());
+        let (var_expr, _other) = if matches!(other, Expr::NoneLit(_)) {
+            (var_expr, other)
+        } else if matches!(var_expr, Expr::NoneLit(_)) {
+            (other, var_expr)
+        } else {
+            return None;
+        };
+        let Expr::Var { name, .. } = var_expr else { return None };
+        let Type::Opt(inner) = self.locals.get(name)?.clone() else { return None };
+        let (then_ty, else_ty) = if is_not {
+            ((*inner).clone(), Type::None)
+        } else {
+            (Type::None, (*inner).clone())
+        };
+        Some((name.clone(), then_ty, else_ty))
+    }
+
     fn emit_block(&mut self, block: &Block, indent: usize) -> Result<(), String> {
         for stmt in &block.stmts {
             self.emit_stmt(stmt, indent)?;
@@ -589,32 +766,100 @@ impl<'a> GenC<'a> {
                 let hint = self.hint(expr)?;
                 let bind_ty = match self.locals.get(name) {
                     Some(t) => t.clone(),
-                    None => ty.clone().unwrap_or(hint),
+                    None => ty.clone().unwrap_or_else(|| hint.clone()),
                 };
                 self.declare(name, &bind_ty);
-                let (rhs, t) = self.emit_expr(expr)?;
+                let (rhs, t) = self.emit_coerced_expr(expr, &bind_ty)?;
                 debug_assert_eq!(t, bind_ty, "let binding type drift");
                 self.line(indent, &format!("{} = {rhs};", self.c_ident(name)));
+                // re-narrow the view after a (re-)binding (mirror of the
+                // checker): `b = None` is a Let, and the branch now sees None
+                if self.narrowed.contains_key(name) {
+                    if hint == Type::None || matches!(&bind_ty, Type::Opt(inner) if **inner == hint) {
+                        self.narrowed.insert(name.clone(), hint);
+                    } else {
+                        self.narrowed.remove(name);
+                    }
+                }
             }
             Stmt::Assign { target, expr, .. } => {
                 // lvalue text first, then the RHS (same order the LLVM
                 // backend evaluates them in)
+                let assigned = self.hint(expr)?;
                 let (lhs, t) = self.emit_lvalue_text(target)?;
-                let (rhs, t2) = self.emit_expr(expr)?;
+                let (rhs, t2) = self.emit_coerced_expr(expr, &t)?;
                 debug_assert_eq!(t, t2, "assignment type drift");
                 self.line(indent, &format!("{lhs} = {rhs};"));
+                // re-narrow the view after a write (mirror of the checker):
+                // the variable now provably holds a value of type `assigned`
+                if let Expr::Var { name, .. } = target {
+                    if self.narrowed.contains_key(name) {
+                        if assigned == Type::None || matches!(&t, Type::Opt(inner) if **inner == assigned) {
+                            self.narrowed.insert(name.clone(), assigned);
+                        } else {
+                            self.narrowed.remove(name);
+                        }
+                    }
+                }
             }
             Stmt::If { cond, then_block, else_block, .. } => {
+                // nullable narrowing (v0.40.0), mirroring the checker's
+                // narrow_target: latch the branch type while each block is
+                // emitted so reads yield `.value`, then restore. A then-branch
+                // that always returns keeps the else narrowing latched after
+                // the `if`, exactly like the checker.
+                let narrow = self.narrow_target(cond);
                 let (c, _) = self.emit_expr(cond)?;
                 self.line(indent, &format!("if ({c}) {{"));
-                self.emit_block(then_block, indent + 1)?;
+                match &narrow {
+                    Some((var, then_ty, _)) => {
+                        let saved = self.narrowed.get(var).cloned();
+                        self.narrowed.insert(var.clone(), then_ty.clone());
+                        self.emit_block(then_block, indent + 1)?;
+                        match saved {
+                            Some(t) => {
+                                self.narrowed.insert(var.clone(), t);
+                            }
+                            None => {
+                                self.narrowed.remove(var);
+                            }
+                        }
+                    }
+                    None => self.emit_block(then_block, indent + 1)?,
+                }
+                let then_exits = Self::block_returns_all(then_block);
                 match else_block {
                     Some(eb) => {
                         self.line(indent, "} else {");
-                        self.emit_block(eb, indent + 1)?;
+                        match &narrow {
+                            Some((var, _, else_ty)) => {
+                                let saved = self.narrowed.get(var).cloned();
+                                self.narrowed.insert(var.clone(), else_ty.clone());
+                                self.emit_block(eb, indent + 1)?;
+                                match saved {
+                                    Some(t) => {
+                                        self.narrowed.insert(var.clone(), t);
+                                    }
+                                    None => {
+                                        self.narrowed.remove(var);
+                                    }
+                                }
+                                if then_exits {
+                                    self.narrowed.insert(var.clone(), else_ty.clone());
+                                }
+                            }
+                            None => self.emit_block(eb, indent + 1)?,
+                        }
                         self.line(indent, "}");
                     }
-                    None => self.line(indent, "}"),
+                    None => {
+                        self.line(indent, "}");
+                        if let Some((var, _, else_ty)) = &narrow {
+                            if then_exits {
+                                self.narrowed.insert(var.clone(), else_ty.clone());
+                            }
+                        }
+                    }
                 }
             }
             Stmt::While { cond, body, .. } => {
@@ -629,7 +874,9 @@ impl<'a> GenC<'a> {
             Stmt::Return { expr, .. } => match expr {
                 None => self.line(indent, "return;"),
                 Some(e) => {
-                    let (r, _) = self.emit_expr(e)?;
+                    // the function's return type decides the coercion
+                    let want = self.cur_ret.clone();
+                    let (r, _) = self.emit_coerced_expr(e, &want)?;
                     self.line(indent, &format!("return {r};"));
                 }
             },
@@ -826,6 +1073,23 @@ impl<'a> GenC<'a> {
                         self.emit_expr_inner(inner)?;
                         self.out.push_str("))");
                     }
+                    // v0.40.0: re-interpret an address as a callable function
+                    // pointer (`addr as fn(int, int) -> int`) and back. The
+                    // cast spells the exact signature, so the C is valid and
+                    // the call is checked.
+                    (Type::Int, Type::FnPtr { ret, params }) => {
+                        let ps: Vec<String> = params.iter().map(|p| self.c_type(p)).collect();
+                        let args = if ps.is_empty() { "void".to_string() } else { ps.join(", ") };
+                        let rt = self.c_type(ret);
+                        self.out.push_str(&format!("(({rt} (*)({args}))("));
+                        self.emit_expr_inner(inner)?;
+                        self.out.push_str("))");
+                    }
+                    (Type::FnPtr { .. }, Type::Int) => {
+                        self.out.push_str("((long long)(");
+                        self.emit_expr_inner(inner)?;
+                        self.out.push_str("))");
+                    }
                     _ => return Err(format!("internal error: invalid cast from {from} to {to}")),
                 }
                 Ok(to.clone())
@@ -842,21 +1106,49 @@ impl<'a> GenC<'a> {
                 self.out.push_str(if *v { "1" } else { "0" });
                 Ok(Type::Bool)
             }
+            Expr::NoneLit(_) => {
+                self.out.push_str("0LL");
+                Ok(Type::None)
+            }
             Expr::Str(s, _) => {
                 let lit = Self::c_string_lit(s);
                 self.out.push_str(&lit);
                 Ok(Type::Str)
             }
-            Expr::Var { name, .. } => {
-                let t = self
-                    .locals
-                    .get(name)
-                    .cloned()
-                    .ok_or_else(|| format!("internal error: unknown variable '{name}' at codegen"))?;
-                let n = self.c_ident(name);
-                self.out.push_str(&n);
-                Ok(t)
-            }
+            Expr::Var { name, .. } => match self.locals.get(name).cloned() {
+                Some(t) => {
+                    // narrowed by `is None` (v0.40.0): the read yields the
+                    // inner value (or the absence), never the tagged struct.
+                    // The map stores the type the branch SEES (None or T).
+                    match self.narrowed.get(name).cloned() {
+                        Some(nt) if matches!(t, Type::Opt(_)) => {
+                            if nt == Type::None {
+                                self.out.push_str("0LL");
+                                Ok(Type::None)
+                            } else {
+                                let n = self.c_ident(name);
+                                self.out.push_str(&format!("{n}.value"));
+                                Ok(nt)
+                            }
+                        }
+                        _ => {
+                            let n = self.c_ident(name);
+                            self.out.push_str(&n);
+                            Ok(t)
+                        }
+                    }
+                }
+                None => match self.sigs.get(name) {
+                    Some(sig) => {
+                        self.out.push_str(&sig.c_name);
+                        Ok(Type::FnPtr {
+                            ret: Box::new(sig.ret.clone()),
+                            params: sig.params.clone(),
+                        })
+                    }
+                    None => Err(format!("internal error: unknown variable '{name}' at codegen")),
+                },
+            },
             Expr::Index { arr, idx, .. } => {
                 let base_ty = if arr.is_lvalue() {
                     self.emit_lvalue(arr)?
@@ -897,7 +1189,7 @@ impl<'a> GenC<'a> {
                 if elems.is_empty() {
                     return Err("internal error: empty array literal at codegen".into());
                 }
-                let elem_ty = self.hint(&elems[0])?;
+                let elem_ty = Self::array_elem_type(self, elems)?;
                 let arr_ty = Type::Array { elem: Box::new(elem_ty.clone()), len: elems.len() };
                 let ct = self.c_type(&arr_ty);
                 self.out.push_str(&format!("({ct}){{.data = {{"));
@@ -905,7 +1197,7 @@ impl<'a> GenC<'a> {
                     if i > 0 {
                         self.out.push_str(", ");
                     }
-                    let t = self.emit_expr_inner(e)?;
+                    let t = self.emit_coerced(e, &elem_ty)?;
                     if t != elem_ty {
                         return Err("internal error: mixed element types in array literal".into());
                     }
@@ -983,7 +1275,20 @@ impl<'a> GenC<'a> {
             }
             let n = self.c_ident(fname);
             self.out.push_str(&format!(".{n} = "));
-            self.emit_expr_inner(fexpr)?;
+            // a nullable field takes a plain T (or None) and tags it
+            let want = self
+                .struct_fields
+                .get(name)
+                .and_then(|fs| fs.iter().find(|(n2, _)| n2 == fname))
+                .map(|(_, t)| t.clone());
+            match want {
+                Some(w) => {
+                    self.emit_coerced(fexpr, &w)?;
+                }
+                None => {
+                    self.emit_expr_inner(fexpr)?;
+                }
+            }
         }
         self.out.push('}');
         Ok(Type::Struct(name.to_string()))
@@ -1035,6 +1340,14 @@ impl<'a> GenC<'a> {
             let want = if name == "to_int" { Type::Int } else { Type::Float };
             if t == want {
                 return self.emit_expr_inner(&args[0].value);
+            }
+            if matches!(t, Type::FnPtr { .. }) {
+                // the raw address of the function (v0.40.0); the explicit
+                // cast is what keeps clang quiet about pointer-to-integer
+                self.out.push_str("((long long)(");
+                self.emit_expr_inner(&args[0].value)?;
+                self.out.push_str("))");
+                return Ok(Type::Int);
             }
             match (&t, &want) {
                 (Type::Int, Type::Float) => {
@@ -1209,11 +1522,29 @@ impl<'a> GenC<'a> {
                 }
                 return self.emit_struct_construction(name, kws.into_iter());
             }
+            // indirect call through a function pointer (v0.40.0): the callee
+            // is always an identifier (call syntax carries a name, not an
+            // arbitrary expression), so the cast is the whole trick
+            if let Some(Type::FnPtr { ret, params }) = self.locals.get(name).cloned() {
+                let ps: Vec<String> = params.iter().map(|p| self.c_type(p)).collect();
+                let cast_args = if ps.is_empty() { "void".to_string() } else { ps.join(", ") };
+                let rt = self.c_type(&ret);
+                // `((T)callee)(args...)`: the cast parentheses are the whole trick
+                self.out.push_str(&format!("(({rt} (*)({cast_args})){})(", self.c_ident(name)));
+                for (i, a) in args.iter().enumerate() {
+                    if i > 0 {
+                        self.out.push_str(", ");
+                    }
+                    self.emit_expr_inner(&a.value)?;
+                }
+                self.out.push(')');
+                return Ok(*ret);
+            }
             return Err(format!("internal error: unknown callable '{name}' at codegen"));
         }
-        let (c_name, ret) = {
+        let (c_name, ret, params) = {
             let sig = &self.sigs[name];
-            (sig.c_name.clone(), sig.ret.clone())
+            (sig.c_name.clone(), sig.ret.clone(), sig.params.clone())
         };
         self.out.push_str(&c_name);
         self.out.push('(');
@@ -1221,7 +1552,15 @@ impl<'a> GenC<'a> {
             if i > 0 {
                 self.out.push_str(", ");
             }
-            self.emit_expr_inner(&a.value)?;
+            let want = params.get(i).cloned();
+            match want {
+                Some(w) => {
+                    self.emit_coerced(&a.value, &w)?;
+                }
+                None => {
+                    self.emit_expr_inner(&a.value)?;
+                }
+            }
         }
         self.out.push(')');
         Ok(ret)
@@ -1229,6 +1568,37 @@ impl<'a> GenC<'a> {
 
     fn emit_binary(&mut self, op: BinOp, lhs: &Expr, rhs: &Expr) -> Result<Type, String> {
         use BinOp::*;
+if matches!(op, Is | IsNot) {
+            // nullable identity (v0.40.0). The checker guarantees exactly one
+            // side is the `None` literal, so the test reduces to the presence
+            // tag of the other side.
+            let lt = self.hint(lhs)?;
+            let rt = self.hint(rhs)?;
+            let (probe, absent) = if lt == Type::None { (rhs, true) } else { (lhs, false) };
+            let cmp = if matches!(op, Is) { "==" } else { "!=" };
+            self.out.push('(');
+            // the probe is the None literal on both sides of `None is None`,
+            // which degenerates to `0 == 0`
+            let probe_is_none = matches!(probe, Expr::NoneLit(_));
+            let absent_side_first = absent;
+            for side in 0..2 {
+                if side == 1 {
+                    self.out.push_str(&format!(" {cmp} "));
+                }
+                let this_is_absent = if side == 0 { absent_side_first } else { !absent_side_first };
+                if this_is_absent {
+                    self.out.push_str("0LL");
+                } else if probe_is_none {
+                    self.out.push_str("0LL");
+                } else {
+                    self.emit_expr_inner(probe)?;
+                    self.out.push_str(".has");
+                }
+            }
+            self.out.push(')');
+            let _ = rt;
+            return Ok(Type::Bool);
+        }
         if matches!(op, And | Or) {
             self.out.push('(');
             let t = self.emit_expr_inner(lhs)?;
@@ -1276,6 +1646,7 @@ impl<'a> GenC<'a> {
             }
         }
         let arith = match op {
+            // `is`/`is not` return before this point (nullable identity)
             Add => "+",
             Sub => "-",
             Mul => "*",
@@ -1298,6 +1669,7 @@ impl<'a> GenC<'a> {
             Gt => ">",
             Ge => ">=",
             And | Or => return Err("internal error: boolean operator reached arithmetic codegen".into()),
+            Is | IsNot => return Err("internal error: nullable identity reached arithmetic codegen".into()),
         };
         self.out.push_str("((");
         self.emit_expr_inner(lhs)?;
@@ -1319,11 +1691,23 @@ impl<'a> GenC<'a> {
             Expr::Float(..) => Ok(Type::Float),
             Expr::Bool(..) => Ok(Type::Bool),
             Expr::Str(..) => Ok(Type::Str),
-            Expr::Var { name, .. } => self
-                .locals
-                .get(name)
-                .cloned()
-                .ok_or_else(|| format!("internal error: unknown variable '{name}' in type hint")),
+            Expr::Var { name, .. } => match self.locals.get(name).cloned() {
+                Some(t) => {
+                    // a narrowed read is the inner type (v0.40.0)
+                    match self.narrowed.get(name) {
+                        Some(nt) if matches!(t, Type::Opt(_)) => Ok(nt.clone()),
+                        _ => Ok(t),
+                    }
+                }
+                None => match self.sigs.get(name) {
+                    Some(sig) => Ok(Type::FnPtr {
+                        ret: Box::new(sig.ret.clone()),
+                        params: sig.params.clone(),
+                    }),
+                    None => Err(format!("internal error: unknown variable '{name}' in type hint")),
+                },
+            },
+            Expr::NoneLit(_) => Ok(Type::None),
             Expr::Call { name, .. } => {
                 let node = expr as *const Expr as usize;
                 let eff: &str = self
@@ -1333,6 +1717,10 @@ impl<'a> GenC<'a> {
                     .unwrap_or(name.as_str());
                 if let Some(sig) = self.sigs.get(eff) {
                     return Ok(sig.ret.clone());
+                }
+                // indirect call through a local function pointer (v0.40.0)
+                if let Some(Type::FnPtr { ret, .. }) = self.locals.get(eff) {
+                    return Ok((**ret).clone());
                 }
                 if self.struct_names.contains(eff) {
                     return Ok(Type::Struct(eff.to_string()));
@@ -1365,7 +1753,7 @@ impl<'a> GenC<'a> {
             }
             Expr::Unary { expr, .. } => self.hint(expr),
             Expr::Binary { op, lhs, rhs, .. } => match op {
-                BinOp::Eq | BinOp::Ne | BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge | BinOp::And | BinOp::Or => {
+                BinOp::Eq | BinOp::Ne | BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge | BinOp::And | BinOp::Or | BinOp::Is | BinOp::IsNot => {
                     Ok(Type::Bool)
                 }
                 _ => self.hint(lhs).or_else(|_| self.hint(rhs)),

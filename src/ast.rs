@@ -7,8 +7,18 @@ pub enum Type {
     Bool,
     Str,
     Void,
+    /// the type of the `None` literal (v0.40.0)
+    None,
+    /// `T | None` — a value that may be absent (v0.40.0). Carries a tag at
+    /// runtime; `is None` / `is not None` narrow it to `None` or `T`.
+    Opt(Box<Type>),
     Array { elem: Box<Type>, len: usize },
     Struct(String),
+    /// A function type (v0.40.0): the address of a top-level `def`/`extern
+    /// def` used as a value, or the type of a variable holding one. Written
+    /// `fn(int, string) -> int` in diagnostics — the surface grammar has no
+    /// `fn` type annotation yet, so the type is inferred, never spelled.
+    FnPtr { ret: Box<Type>, params: Vec<Type> },
 }
 
 impl std::fmt::Display for Type {
@@ -19,9 +29,21 @@ impl std::fmt::Display for Type {
             Type::Bool => write!(f, "bool"),
             Type::Str => write!(f, "string"),
             Type::Void => write!(f, "void"),
+            Type::None => write!(f, "None"),
+            Type::Opt(inner) => write!(f, "{inner} | None"),
             Type::Array { elem, len } if *len == GENERIC_LEN => write!(f, "[{elem}; N]"),
             Type::Array { elem, len } => write!(f, "[{elem}; {len}]"),
             Type::Struct(name) => write!(f, "{name}"),
+            Type::FnPtr { ret, params } => {
+                write!(f, "fn(")?;
+                for (i, p) in params.iter().enumerate() {
+                    if i > 0 {
+                        write!(f, ", ")?;
+                    }
+                    write!(f, "{p}")?;
+                }
+                write!(f, ") -> {ret}")
+            }
         }
     }
 }
@@ -176,6 +198,10 @@ pub enum BinOp {
     BitXor,
     Eq,
     Ne,
+    /// `is` / `is not` (v0.40.0) — identity against `None`, which also drives
+    /// the nullable narrowing. Outside `None` comparisons they mean `==`/`!=`.
+    Is,
+    IsNot,
     Lt,
     Le,
     Gt,
@@ -203,6 +229,8 @@ pub enum Expr {
     Float(f64, Pos),
     Str(String, Pos),
     Bool(bool, Pos),
+    /// the `None` literal (v0.40.0)
+    NoneLit(Pos),
     Var { name: String, pos: Pos },
     Call { name: String, args: Vec<Arg>, pos: Pos, lit_id: usize },
     Unary { op: UnOp, expr: Box<Expr>, pos: Pos },
@@ -223,6 +251,7 @@ impl Expr {
     pub fn pos(&self) -> Pos {
         match self {
             Expr::Int(_, p) | Expr::Float(_, p) | Expr::Str(_, p) | Expr::Bool(_, p) => *p,
+            Expr::NoneLit(p) => *p,
             Expr::Var { pos, .. }
             | Expr::Call { pos, .. }
             | Expr::Unary { pos, .. }

@@ -274,12 +274,39 @@ impl Parser {
     }
 
     fn ty(&mut self) -> Result<Type, Diag> {
+        // `fn(int, string) -> int` — a function-pointer type (v0.40.0). `fn`
+        // is identifier-led so that `fn = node` in the self-hosted compiler
+        // keeps parsing as an assignment.
+        if matches!(self.peek(), Tok::Ident(n) if n == "fn") && matches!(self.peek2(), Tok::LParen) {
+            self.bump();
+            self.bump(); // '('
+            let mut params = Vec::new();
+            if *self.peek() != Tok::RParen {
+                loop {
+                    params.push(self.ty()?);
+                    match self.peek() {
+                        Tok::Comma => {
+                            self.bump();
+                            if *self.peek() == Tok::RParen {
+                                break;
+                            }
+                        }
+                        _ => break,
+                    }
+                }
+            }
+            self.eat(&Tok::RParen)?;
+            self.eat(&Tok::Arrow)?;
+            let ret = self.ty()?;
+            return Ok(Type::FnPtr { ret: Box::new(ret), params });
+        }
         let t = match self.bump() {
             Tok::TyInt => Type::Int,
             Tok::TyFloat => Type::Float,
             Tok::TyBool => Type::Bool,
             Tok::TyString => Type::Str,
             Tok::TyVoid => Type::Void,
+            Tok::None => Type::None,
             Tok::Ident(n) => Type::Struct(n),
             Tok::LBracket => {
                 let elem = Box::new(self.ty()?);
@@ -307,9 +334,27 @@ impl Parser {
                 Type::Array { elem, len }
             }
             _ => {
-                return Err(self.perr(self.pos().line, self.pos().col, "expected a type: int | float | bool | string | void | name | [T; N]"))
+                return Err(self.perr(self.pos().line, self.pos().col, "expected a type: int | float | bool | string | void | none | name | [T; N] | fn(...) -> T | T | None"))
             }
         };
+        // `T | None` — nullable (v0.40.0). Only None may be unioned in: a
+        // genuine multi-type union is a different feature with different
+        // rules, and half of one is worse than none.
+        let mut t = t;
+        while *self.peek() == Tok::Pipe {
+            if !matches!(self.peek2(), Tok::None) {
+                return Err(self.perr(self.pos().line, self.pos().col, "only '| None' is supported in a type (a multi-type union is not)"));
+            }
+            self.bump();
+            self.bump();
+            t = match t {
+                Type::None => continue, // `None | None` is just None
+                Type::Opt(_) => {
+                    return Err(self.perr(self.pos().line, self.pos().col, "type is already nullable"))
+                }
+                inner => Type::Opt(Box::new(inner)),
+            };
+        }
         Ok(t)
     }
 
@@ -604,10 +649,25 @@ impl Parser {
             let op = match self.peek() {
                 Tok::Eq => BinOp::Eq,
                 Tok::Ne => BinOp::Ne,
+                // `is` / `is not` stay identifier-led so a program that uses
+                // `is` as an ordinary variable name keeps compiling; the pair
+                // compares like ==/!= and additionally drives None narrowing
+                Tok::Ident(n) if n == "is" => {
+                    // `not` lexes as Tok::Bang (the keyword maps there), so
+                    // `is not` is spelled Ident("is") + Bang in the stream
+                    if matches!(self.peek2(), Tok::Bang) {
+                        BinOp::IsNot
+                    } else {
+                        BinOp::Is
+                    }
+                }
                 _ => break,
             };
             let pos = self.pos();
-            self.bump();
+            self.bump(); // 'is' [+ 'not']
+            if matches!(op, BinOp::IsNot) {
+                self.bump();
+            }
             let rhs = self.rel_expr()?;
             lhs = Expr::Binary { op, lhs: Box::new(lhs), rhs: Box::new(rhs), pos };
         }
@@ -796,6 +856,15 @@ impl Parser {
                     let pos = e.pos();
                     e = Expr::Field { obj: Box::new(e), name, pos };
                 }
+                // `expr as T` — an explicit conversion (v0.40.0). Identifier-
+                // led for the same reason as `is`: `as` is ordinary in prose
+                // and must stay usable as a name.
+                Tok::Ident(n) if n == "as" => {
+                    self.bump();
+                    let to = self.ty()?;
+                    let pos = e.pos();
+                    e = Expr::Cast { expr: Box::new(e), to, pos };
+                }
                 _ => break,
             }
         }
@@ -844,6 +913,7 @@ impl Parser {
                 | Tok::Str(_)
                 | Tok::True
                 | Tok::False
+                | Tok::None
                 | Tok::Ident(_)
                 | Tok::FStr(_)
                 | Tok::LParen
@@ -857,6 +927,7 @@ impl Parser {
             Tok::Str(s) => Ok(Expr::Str(s, pos)),
             Tok::True => Ok(Expr::Bool(true, pos)),
             Tok::False => Ok(Expr::Bool(false, pos)),
+            Tok::None => Ok(Expr::NoneLit(pos)),
             Tok::Ident(name) => Ok(Expr::Var { name, pos }),
             Tok::FStr(parts) => self.desugar_fstring(parts, pos),
             Tok::LParen => {
