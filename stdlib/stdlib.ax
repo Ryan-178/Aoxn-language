@@ -240,6 +240,34 @@ def buf_new(cap: int) -> int:
 def str_get(s: string, i: int) -> int:
     return load_u8(s, i)
 
+# ---- text editing primitives (pure; malloc-per-edit, like concat) ----
+# These moved here from stdlib/ui.ax in v0.40.1 so non-UI code (the OpenAI
+# client's JSON/SSE layers) does not pull the UI toolkit to get a substring.
+# Caret movement stayed in ui.ax: it is a UTF-8 UI concern.
+
+# bytes [from, to) of s as a fresh NUL-terminated string
+def str_sub(s: string, from: int, to: int) -> string:
+    if from < 0:
+        from = 0
+    if to > len(s):
+        to = len(s)
+    if to < from:
+        to = from
+    n = to - from
+    p = malloc(n + 1)
+    i = 0
+    while i < n:
+        store_u8(p, i, load_u8(s, from + i))
+        i = i + 1
+    store_u8(p, n, 0)
+    return as_string(p)
+
+def str_remove(s: string, from: int, to: int) -> string:
+    return str_sub(s, 0, from) + str_sub(s, to, len(s))
+
+def str_insert(s: string, at: int, ins: string) -> string:
+    return str_sub(s, 0, at) + ins + str_sub(s, at, len(s))
+
 # char classification (bytes as int)
 def is_digit(c: int) -> bool:
     return c >= 48 and c <= 57

@@ -1,0 +1,207 @@
+# Aoxn OpenAI SDK — codecs (v0.40.1).
+#
+# Three encoders the SDK needs that the language does not ship:
+#   - base64 (RFC 4648, with `=` padding) — audio/image bodies, Basic auth
+#   - percent-encoding (RFC 3986 unreserved kept, everything else `%XX`)
+#   - UTF-8 <-> UTF-16LE  (WinHTTP speaks wide strings; Aoxn strings are UTF-8)
+#
+# Everything is plain Aoxn over the raw-memory builtins (`load_u8`/`store_u8`/
+# `malloc`). The UTF-16 round-trip mirrors `utf16_write`/`utf16z_utf8` in
+# stdlib/ui.ax; it is duplicated here on purpose so the SDK does not pull the
+# UI toolkit (and its 1024-slot heap block) just to talk to WinHTTP.
+#
+# Naming: SDK-internal helpers use the `oa_` prefix; user-facing struct types
+# use the `Oa` prefix. This is the Aoxn flat-namespace convention (cf. `bb_`
+# in web/http_buf.ax, `ui_` in stdlib/ui.ax) — `import *` merges everything
+# into one scope, so distinctive prefixes are how a library stays collision-free.
+
+import * from "../stdlib.ax"
+
+# ---- codepoints <-> UTF-8 bytes (needed by the UTF-16 reader) ----
+
+# write one codepoint as UTF-8 at p, return the byte count
+def oa_cp_utf8(cp: int, p: int) -> int:
+    if cp < 128:
+        store_u8(p, 0, cp)
+        return 1
+    if cp < 2048:
+        store_u8(p, 0, 192 + cp / 64)
+        store_u8(p, 1, 128 + cp % 64)
+        return 2
+    if cp < 65536:
+        store_u8(p, 0, 224 + cp / 4096)
+        store_u8(p, 1, 128 + (cp / 64) % 64)
+        store_u8(p, 2, 128 + cp % 64)
+        return 3
+    store_u8(p, 0, 240 + cp / 262144)
+    store_u8(p, 1, 128 + (cp / 4096) % 64)
+    store_u8(p, 2, 128 + (cp / 64) % 64)
+    store_u8(p, 3, 128 + cp % 64)
+    return 4
+
+# ---- UTF-8 -> UTF-16LE ----
+
+# write s as UTF-16LE (surrogate pairs included) at p; return BYTE count
+def oa_utf16_write(s: string, p: int) -> int:
+    i = 0
+    n = 0
+    while i < len(s):
+        b = load_u8(s, i)
+        if b < 128:
+            cp = b
+            i = i + 1
+        elif b < 224:
+            cp = (b % 32) * 64 + load_u8(s, i + 1) % 64
+            i = i + 2
+        elif b < 240:
+            cp = (b % 16) * 4096 + (load_u8(s, i + 1) % 64) * 64 + load_u8(s, i + 2) % 64
+            i = i + 3
+        else:
+            cp = (b % 8) * 262144 + (load_u8(s, i + 1) % 64) * 4096 + (load_u8(s, i + 2) % 64) * 64 + load_u8(s, i + 3) % 64
+            i = i + 4
+        if cp >= 65536:
+            v = cp - 65536
+            hi = v / 1024 + 55296
+            lo = v % 1024 + 56320
+            store_u8(p, n, hi % 256)
+            store_u8(p, n + 1, hi / 256)
+            store_u8(p, n + 2, lo % 256)
+            store_u8(p, n + 3, lo / 256)
+            n = n + 4
+        else:
+            store_u8(p, n, cp % 256)
+            store_u8(p, n + 1, cp / 256)
+            n = n + 2
+    return n
+
+# one-shot UTF-16LE NUL-terminated buffer (caller frees). Used for every
+# wide-string parameter WinHTTP takes.
+def oa_to_wide(s: string) -> int:
+    p = malloc(len(s) * 2 + 2)
+    n = oa_utf16_write(s, p)
+    store_u8(p, n, 0)
+    store_u8(p, n + 1, 0)
+    return p
+
+# ---- UTF-16LE (NUL-terminated) -> UTF-8 ----
+
+# read a NUL-terminated UTF-16LE buffer at p into a fresh UTF-8 string.
+# WinHTTP returns wide strings for queried headers.
+def oa_from_wide(p: int) -> string:
+    n = 0
+    more = True
+    while more and n < 65535:
+        u = load_u8(p, n * 2) + load_u8(p, n * 2 + 1) * 256
+        if u == 0:
+            more = False
+        else:
+            n = n + 1
+    out = malloc(n * 4 + 1)
+    m = 0
+    i = 0
+    while i < n:
+        u = load_u8(p, i * 2) + load_u8(p, i * 2 + 1) * 256
+        cp = u
+        if u >= 55296 and u < 56320 and i + 1 < n:
+            u2 = load_u8(p, (i + 1) * 2) + load_u8(p, (i + 1) * 2 + 1) * 256
+            if u2 >= 56320 and u2 < 57344:
+                cp = 65536 + (u - 55296) * 1024 + (u2 - 56320)
+                i = i + 1
+        m = m + oa_cp_utf8(cp, out + m)
+        i = i + 1
+    store_u8(out, m, 0)
+    return as_string(out)
+
+# ---- base64 (RFC 4648) ----
+
+# the standard alphabet as a literal; indexed with load_u8
+def oa_b64_table() -> string:
+    return "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
+
+# encode `len` bytes at `data` into a fresh NUL-terminated string
+def oa_b64_encode(data: int, length: int) -> string:
+    tbl = oa_b64_table()
+    out = malloc((length + 2) / 3 * 4 + 1)
+    oi = 0
+    i = 0
+    while i + 2 < length:
+        b0 = load_u8(data, i)
+        b1 = load_u8(data, i + 1)
+        b2 = load_u8(data, i + 2)
+        triple = b0 * 65536 + b1 * 256 + b2
+        store_u8(out, oi, load_u8(tbl, triple / 262144))
+        store_u8(out, oi + 1, load_u8(tbl, (triple / 4096) % 64))
+        store_u8(out, oi + 2, load_u8(tbl, (triple / 64) % 64))
+        store_u8(out, oi + 3, load_u8(tbl, triple % 64))
+        oi = oi + 4
+        i = i + 3
+    rem = length - i
+    if rem == 1:
+        b0 = load_u8(data, i)
+        triple = b0 * 65536
+        store_u8(out, oi, load_u8(tbl, triple / 262144))
+        store_u8(out, oi + 1, load_u8(tbl, (triple / 4096) % 64))
+        store_u8(out, oi + 2, 61)
+        store_u8(out, oi + 3, 61)
+        oi = oi + 4
+    elif rem == 2:
+        b0 = load_u8(data, i)
+        b1 = load_u8(data, i + 1)
+        triple = b0 * 65536 + b1 * 256
+        store_u8(out, oi, load_u8(tbl, triple / 262144))
+        store_u8(out, oi + 1, load_u8(tbl, (triple / 4096) % 64))
+        store_u8(out, oi + 2, load_u8(tbl, (triple / 64) % 64))
+        store_u8(out, oi + 3, 61)
+        oi = oi + 4
+    store_u8(out, oi, 0)
+    return as_string(out)
+
+# encode an Aoxn string's bytes (convenience for `input: <base64>` fields)
+def oa_b64_encode_str(s: string) -> string:
+    return oa_b64_encode(as_ptr(s), len(s))
+
+# ---- percent-encoding (RFC 3986) ----
+
+# one uppercase hex digit of the low nibble n (0..15)
+def oa_hex_digit(n: int) -> int:
+    if n < 10:
+        return 48 + n
+    return 65 + (n - 10)
+
+# percent-encode s for a query parameter or URL path segment. Unreserved set
+# is A-Z a-z 0-9 - _ . ~; everything else becomes %XX with uppercase hex.
+# Space is %20 (not `+`), matching the OpenAI server's expectations.
+def oa_url_encode(s: string) -> string:
+    # worst case: every byte becomes three (``%XX``)
+    out = malloc(len(s) * 3 + 1)
+    oi = 0
+    i = 0
+    while i < len(s):
+        c = load_u8(s, i)
+        if (c >= 48 and c <= 57) or (c >= 65 and c <= 90) or (c >= 97 and c <= 122) or c == 45 or c == 95 or c == 46 or c == 126:
+            store_u8(out, oi, c)
+            oi = oi + 1
+        else:
+            store_u8(out, oi, 37)
+            store_u8(out, oi + 1, oa_hex_digit(c / 16))
+            store_u8(out, oi + 2, oa_hex_digit(c % 16))
+            oi = oi + 3
+        i = i + 1
+    store_u8(out, oi, 0)
+    return as_string(out)
+
+# join a list of (key, value) string pairs into an `a=b&c=d` query string.
+# The pairs are flattened into two parallel `Vec`s of string pointers. A key
+# with an empty value still emits `key=`; this matches the Python SDK, which
+# lets the caller pass `""` deliberately.
+def oa_url_encode_pairs(keys: Vec, vals: Vec) -> string:
+    out = ""
+    i = 0
+    while i < keys.len:
+        if i > 0:
+            out = out + "&"
+        k = oa_url_encode(vec_get_str(keys, i))
+        v = oa_url_encode(vec_get_str(vals, i))
+        out = out + k + "=" + v
+        i = i + 1
+    return out

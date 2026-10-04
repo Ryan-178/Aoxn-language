@@ -1,0 +1,605 @@
+# Aoxn OpenAI SDK — JSON (v0.40.1).
+#
+# Aoxn has no dict, no `None`, no `sizeof`, and no address-of-struct. A general
+# JSON DOM therefore cannot live in a `Vec` of `JVal` structs (Vec moves 8-byte
+# slots, not structs). The design here is the same one stdlib's `VecVec` uses:
+# every value is a fixed 5-slot record laid out in a slab, and an array/object
+# value holds a pointer to a parallel buffer of child offsets.
+#
+#   node = 40 bytes (5 x i64):
+#     [0] kind    NULL=0 BOOL=1 INT=2 FLOAT=3 STR=4 ARR=5 OBJ=6 ERR=7
+#     [1] i64     bool(0/1) | int value | array length | object pair count
+#     [2] f64     float value                 (stored with store_f64)
+#     [3] ptr     STR: string pointer
+#                 ARR: buffer of N child BYTE-offsets (i64 each)
+#                 OBJ: buffer of N child value BYTE-offsets (parallel to keys)
+#     [4] ptr     OBJ: buffer of N key string pointers; 0 otherwise
+#
+# Offsets returned to callers are BYTE offsets into `dom.slab` (index * 40).
+# The parser is recursive-descent with write-back (`p = jp_parse_value(p)`,
+# result in `p.res`). Numbers without `.`/`e` are ints (manual parse); any
+# with `.`/`e`/`E` are floats via C `strtod`, declared as an extern.
+#
+# Strings never round-trip through the slab's lifetime: a STR node's pointer
+# aliases either a literal slice of the source (parser) or a concat result
+# (writer). Both leak by the language's design; `jdom_free` frees only the
+# slab and the array/object child buffers it allocated.
+
+import * from "../stdlib.ax"
+import * from "codec.ax"
+
+# ---- kinds ----
+def J_NULL() -> int: return 0
+def J_BOOL() -> int: return 1
+def J_INT() -> int: return 2
+def J_FLOAT() -> int: return 3
+def J_STR() -> int: return 4
+def J_ARR() -> int: return 5
+def J_OBJ() -> int: return 6
+def J_ERR() -> int: return 7
+
+# bytes per node
+def J_NODE_B() -> int: return 40
+
+struct JDom:
+    slab: int
+    cap: int
+    len: int
+
+# an empty DOM
+def jdom_new() -> JDom:
+    return JDom(slab=0, cap=0, len=0)
+
+# grow so at least `need` nodes fit (never shrinks). New slots are zeroed so
+# unset fields read as 0 / NULL.
+def jdom_grow_if(dom: JDom, need: int) -> JDom:
+    if need <= dom.cap:
+        return dom
+    newcap = dom.cap * 2
+    if newcap < need:
+        newcap = need
+    if newcap == 0:
+        newcap = 16
+    newslab = realloc(dom.slab, newcap * J_NODE_B())
+    # zero the newly acquired region
+    i = dom.cap * J_NODE_B()
+    while i < newcap * J_NODE_B():
+        store_u8(newslab, i, 0)
+        i = i + 1
+    return JDom(slab=newslab, cap=newcap, len=dom.len)
+
+# byte offset of the most recently allocated node
+def j_last_off(dom: JDom) -> int:
+    return (dom.len - 1) * J_NODE_B()
+
+# ---- constructors: each returns the updated dom; the new node's offset is
+#      `(dom.len - 1) * 40` after the call. ----
+
+def j_make_null(dom: JDom) -> JDom:
+    dom = jdom_grow_if(dom, dom.len + 1)
+    off = dom.len * J_NODE_B()
+    store_i64(dom.slab + off, J_NULL())
+    dom.len = dom.len + 1
+    return dom
+
+def j_make_bool(dom: JDom, b: bool) -> JDom:
+    dom = jdom_grow_if(dom, dom.len + 1)
+    off = dom.len * J_NODE_B()
+    store_i64(dom.slab + off, J_BOOL())
+    if b:
+        store_i64(dom.slab + off + 8, 1)
+    dom.len = dom.len + 1
+    return dom
+
+def j_make_int(dom: JDom, n: int) -> JDom:
+    dom = jdom_grow_if(dom, dom.len + 1)
+    off = dom.len * J_NODE_B()
+    store_i64(dom.slab + off, J_INT())
+    store_i64(dom.slab + off + 8, n)
+    dom.len = dom.len + 1
+    return dom
+
+def j_make_float(dom: JDom, f: float) -> JDom:
+    dom = jdom_grow_if(dom, dom.len + 1)
+    off = dom.len * J_NODE_B()
+    store_i64(dom.slab + off, J_FLOAT())
+    store_f64(dom.slab + off + 16, f)
+    dom.len = dom.len + 1
+    return dom
+
+def j_make_str(dom: JDom, s: string) -> JDom:
+    dom = jdom_grow_if(dom, dom.len + 1)
+    off = dom.len * J_NODE_B()
+    store_i64(dom.slab + off, J_STR())
+    store_i64(dom.slab + off + 24, as_ptr(s))
+    dom.len = dom.len + 1
+    return dom
+
+# adopt a pre-built buffer of child byte-offsets as an array node. The buffer
+# (typically a `Vec.data`) is now owned by the dom.
+def j_arr_adopt(dom: JDom, child_data: int, count: int) -> JDom:
+    dom = jdom_grow_if(dom, dom.len + 1)
+    off = dom.len * J_NODE_B()
+    store_i64(dom.slab + off, J_ARR())
+    store_i64(dom.slab + off + 8, count)
+    store_i64(dom.slab + off + 24, child_data)
+    dom.len = dom.len + 1
+    return dom
+
+# adopt parallel key-ptr / value-offset buffers as an object node.
+def j_obj_adopt(dom: JDom, keys_data: int, vals_data: int, count: int) -> JDom:
+    dom = jdom_grow_if(dom, dom.len + 1)
+    off = dom.len * J_NODE_B()
+    store_i64(dom.slab + off, J_OBJ())
+    store_i64(dom.slab + off + 8, count)
+    store_i64(dom.slab + off + 24, vals_data)
+    store_i64(dom.slab + off + 32, keys_data)
+    dom.len = dom.len + 1
+    return dom
+
+# ---- accessors ----
+
+def j_kind(dom: JDom, off: int) -> int:
+    return load_i64(dom.slab + off)
+
+def j_as_bool(dom: JDom, off: int) -> bool:
+    return load_i64(dom.slab + off + 8) != 0
+
+def j_as_int(dom: JDom, off: int) -> int:
+    return load_i64(dom.slab + off + 8)
+
+def j_as_float(dom: JDom, off: int) -> float:
+    return load_f64(dom.slab + off + 16)
+
+def j_as_str(dom: JDom, off: int) -> string:
+    return as_string(load_i64(dom.slab + off + 24))
+
+def j_arr_len(dom: JDom, off: int) -> int:
+    return load_i64(dom.slab + off + 8)
+
+def j_arr_child(dom: JDom, off: int, i: int) -> int:
+    base = load_i64(dom.slab + off + 24)
+    return load_i64(base + i * 8)
+
+def j_obj_len(dom: JDom, off: int) -> int:
+    return load_i64(dom.slab + off + 8)
+
+def j_obj_key(dom: JDom, off: int, i: int) -> string:
+    keys = load_i64(dom.slab + off + 32)
+    return as_string(load_i64(keys + i * 8))
+
+def j_obj_val(dom: JDom, off: int, i: int) -> int:
+    vals = load_i64(dom.slab + off + 24)
+    return load_i64(vals + i * 8)
+
+# look up a key in an object; returns the child byte-offset or -1
+def j_obj_get(dom: JDom, off: int, key: string) -> int:
+    n = j_obj_len(dom, off)
+    i = 0
+    while i < n:
+        if j_obj_key(dom, off, i) == key:
+            return j_obj_val(dom, off, i)
+        i = i + 1
+    return -1
+
+# typed getters with a default (the SDK's "field absent or null" path)
+def j_obj_get_str(dom: JDom, off: int, key: string, dflt: string) -> string:
+    c = j_obj_get(dom, off, key)
+    if c < 0:
+        return dflt
+    if j_kind(dom, c) == J_STR():
+        return j_as_str(dom, c)
+    return dflt
+
+def j_obj_get_int(dom: JDom, off: int, key: string, dflt: int) -> int:
+    c = j_obj_get(dom, off, key)
+    if c < 0:
+        return dflt
+    k = j_kind(dom, c)
+    if k == J_INT():
+        return j_as_int(dom, c)
+    if k == J_FLOAT():
+        return to_int(j_as_float(dom, c))
+    return dflt
+
+def j_obj_get_float(dom: JDom, off: int, key: string, dflt: float) -> float:
+    c = j_obj_get(dom, off, key)
+    if c < 0:
+        return dflt
+    k = j_kind(dom, c)
+    if k == J_FLOAT():
+        return j_as_float(dom, c)
+    if k == J_INT():
+        return to_float(j_as_int(dom, c))
+    return dflt
+
+def j_obj_get_bool(dom: JDom, off: int, key: string, dflt: bool) -> bool:
+    c = j_obj_get(dom, off, key)
+    if c < 0:
+        return dflt
+    if j_kind(dom, c) == J_BOOL():
+        return j_as_bool(dom, c)
+    return dflt
+
+# ---- free: the slab and every array/object child buffer. Strings leak
+#      (immutable + shared, the language's cost model). ----
+
+def jdom_free(dom: JDom):
+    i = 0
+    while i < dom.len:
+        off = i * J_NODE_B()
+        k = load_i64(dom.slab + off)
+        if k == J_ARR() or k == J_OBJ():
+            free(load_i64(dom.slab + off + 24))
+        if k == J_OBJ():
+            free(load_i64(dom.slab + off + 32))
+        i = i + 1
+    free(dom.slab)
+
+# ============================================================
+# writer
+# ============================================================
+
+# escape a string for a JSON string literal (quotes, backslash, control).
+# Control bytes below 32 become \uXXXX (except the named \b \f \n \r \t).
+def json_escape(s: string) -> string:
+    out = malloc(len(s) * 6 + 1)
+    oi = 0
+    i = 0
+    while i < len(s):
+        c = load_u8(s, i)
+        if c == 34:
+            store_u8(out, oi, 92)
+            store_u8(out, oi + 1, 34)
+            oi = oi + 2
+        elif c == 92:
+            store_u8(out, oi, 92)
+            store_u8(out, oi + 1, 92)
+            oi = oi + 2
+        elif c == 10:
+            store_u8(out, oi, 92)
+            store_u8(out, oi + 1, 110)
+            oi = oi + 2
+        elif c == 13:
+            store_u8(out, oi, 92)
+            store_u8(out, oi + 1, 114)
+            oi = oi + 2
+        elif c == 9:
+            store_u8(out, oi, 92)
+            store_u8(out, oi + 1, 116)
+            oi = oi + 2
+        elif c == 8:
+            store_u8(out, oi, 92)
+            store_u8(out, oi + 1, 98)
+            oi = oi + 2
+        elif c == 12:
+            store_u8(out, oi, 92)
+            store_u8(out, oi + 1, 102)
+            oi = oi + 2
+        elif c < 32:
+            store_u8(out, oi, 92)
+            store_u8(out, oi + 1, 117)
+            store_u8(out, oi + 2, 48)
+            store_u8(out, oi + 3, 48)
+            store_u8(out, oi + 4, oa_hex_digit(c / 16))
+            store_u8(out, oi + 5, oa_hex_digit(c % 16))
+            oi = oi + 6
+        else:
+            store_u8(out, oi, c)
+            oi = oi + 1
+        i = i + 1
+    store_u8(out, oi, 0)
+    return as_string(out)
+
+# quote a string for JSON
+def json_quote(s: string) -> string:
+    return "\"" + json_escape(s) + "\""
+
+# serialize a node back to a JSON text string (compact, no whitespace).
+def json_dumps(dom: JDom, off: int) -> string:
+    k = j_kind(dom, off)
+    if k == J_NULL():
+        return "null"
+    if k == J_BOOL():
+        if j_as_bool(dom, off):
+            return "true"
+        return "false"
+    if k == J_INT():
+        return str(j_as_int(dom, off))
+    if k == J_FLOAT():
+        return str(j_as_float(dom, off))
+    if k == J_STR():
+        return json_quote(j_as_str(dom, off))
+    if k == J_ARR():
+        out = "["
+        n = j_arr_len(dom, off)
+        i = 0
+        while i < n:
+            if i > 0:
+                out = out + ","
+            out = out + json_dumps(dom, j_arr_child(dom, off, i))
+            i = i + 1
+        return out + "]"
+    if k == J_OBJ():
+        out = "{"
+        n = j_obj_len(dom, off)
+        i = 0
+        while i < n:
+            if i > 0:
+                out = out + ","
+            out = out + json_quote(j_obj_key(dom, off, i)) + ":" + json_dumps(dom, j_obj_val(dom, off, i))
+            i = i + 1
+        return out + "}"
+    return "null"
+
+# ============================================================
+# parser (recursive descent, write-back)
+# ============================================================
+
+extern def strtod(s: string, endp: int) -> float
+
+struct JParser:
+    src: string
+    pos: int
+    err: Err
+    dom: JDom
+    res: int
+
+def jp_err(p: JParser, msg: string) -> JParser:
+    p.err = err_new(ERR_PARSE(), msg + " at pos " + str(p.pos))
+    p.res = -1
+    return p
+
+def jp_at(p: JParser) -> int:
+    if p.pos >= len(p.src):
+        return -1
+    return load_u8(p.src, p.pos)
+
+# skip ASCII whitespace
+def jp_skip_ws(p: JParser) -> JParser:
+    while True:
+        c = jp_at(p)
+        if c == 32 or c == 9 or c == 10 or c == 13:
+            p.pos = p.pos + 1
+        else:
+            return p
+
+def jp_parse_value(p: JParser) -> JParser:
+    p = jp_skip_ws(p)
+    c = jp_at(p)
+    if c == 34:
+        return jp_parse_string(p)
+    if c == 91:
+        return jp_parse_array(p)
+    if c == 123:
+        return jp_parse_object(p)
+    if c == 45 or (c >= 48 and c <= 57):
+        return jp_parse_number(p)
+    if c == 116 or c == 102 or c == 110:
+        return jp_parse_keyword(p)
+    if c == -1:
+        return jp_err(p, "unexpected EOF")
+    return jp_err(p, "unexpected char")
+
+def jp_parse_keyword(p: JParser) -> JParser:
+    c = jp_at(p)
+    # true
+    if c == 116:
+        if load_u8(p.src, p.pos + 1) == 114 and load_u8(p.src, p.pos + 2) == 117 and load_u8(p.src, p.pos + 3) == 101:
+            p.dom = j_make_bool(p.dom, True)
+            p.res = j_last_off(p.dom)
+            p.pos = p.pos + 4
+            return p
+        return jp_err(p, "bad literal")
+    # false
+    if c == 102:
+        if load_u8(p.src, p.pos + 1) == 97 and load_u8(p.src, p.pos + 2) == 108 and load_u8(p.src, p.pos + 3) == 115 and load_u8(p.src, p.pos + 4) == 101:
+            p.dom = j_make_bool(p.dom, False)
+            p.res = j_last_off(p.dom)
+            p.pos = p.pos + 5
+            return p
+        return jp_err(p, "bad literal")
+    # null
+    if c == 110:
+        if load_u8(p.src, p.pos + 1) == 117 and load_u8(p.src, p.pos + 2) == 108 and load_u8(p.src, p.pos + 3) == 108:
+            p.dom = j_make_null(p.dom)
+            p.res = j_last_off(p.dom)
+            p.pos = p.pos + 4
+            return p
+        return jp_err(p, "bad literal")
+    return jp_err(p, "bad literal")
+
+def jp_parse_number(p: JParser) -> JParser:
+    start = p.pos
+    is_float = False
+    c = jp_at(p)
+    if c == 45:
+        p.pos = p.pos + 1
+    while True:
+        c = jp_at(p)
+        if c >= 48 and c <= 57:
+            p.pos = p.pos + 1
+        else:
+            break
+    if jp_at(p) == 46:
+        is_float = True
+        p.pos = p.pos + 1
+        while True:
+            c = jp_at(p)
+            if c >= 48 and c <= 57:
+                p.pos = p.pos + 1
+            else:
+                break
+    c = jp_at(p)
+    if c == 101 or c == 69:
+        is_float = True
+        p.pos = p.pos + 1
+        c = jp_at(p)
+        if c == 43 or c == 45:
+            p.pos = p.pos + 1
+        while True:
+            c = jp_at(p)
+            if c >= 48 and c <= 57:
+                p.pos = p.pos + 1
+            else:
+                break
+    # the substring [start, pos) is the number text. The source is
+    # NUL-terminated, so a string rooted at `start` parses cleanly.
+    slice_str = as_string(as_ptr(p.src) + start)
+    if is_float:
+        f = strtod(slice_str, 0)
+        p.dom = j_make_float(p.dom, f)
+    else:
+        # manual int parse (handles the leading `-`)
+        i = start
+        neg = False
+        if load_u8(p.src, i) == 45:
+            neg = True
+            i = i + 1
+        v = 0
+        while i < p.pos:
+            v = v * 10 + (load_u8(p.src, i) - 48)
+            i = i + 1
+        if neg:
+            v = -v
+        p.dom = j_make_int(p.dom, v)
+    p.res = j_last_off(p.dom)
+    return p
+
+def jp_parse_string(p: JParser) -> JParser:
+    # opening quote
+    p.pos = p.pos + 1
+    out = malloc(len(p.src) + 1)
+    oi = 0
+    while True:
+        c = jp_at(p)
+        if c == -1:
+            return jp_err(p, "unterminated string")
+        if c == 34:
+            p.pos = p.pos + 1
+            store_u8(out, oi, 0)
+            p.dom = j_make_str(p.dom, as_string(out))
+            p.res = j_last_off(p.dom)
+            return p
+        if c == 92:
+            p.pos = p.pos + 1
+            e = jp_at(p)
+            if e == 34:
+                store_u8(out, oi, 34)
+            elif e == 92:
+                store_u8(out, oi, 92)
+            elif e == 47:
+                store_u8(out, oi, 47)
+            elif e == 98:
+                store_u8(out, oi, 8)
+            elif e == 102:
+                store_u8(out, oi, 12)
+            elif e == 110:
+                store_u8(out, oi, 10)
+            elif e == 114:
+                store_u8(out, oi, 13)
+            elif e == 116:
+                store_u8(out, oi, 9)
+            elif e == 117:
+                cp = (oa_hex_val(load_u8(p.src, p.pos + 1)) * 4096
+                    + oa_hex_val(load_u8(p.src, p.pos + 2)) * 256
+                    + oa_hex_val(load_u8(p.src, p.pos + 3)) * 16
+                    + oa_hex_val(load_u8(p.src, p.pos + 4)))
+                oi = oi + oa_cp_utf8(cp, out + oi)
+                p.pos = p.pos + 4
+            else:
+                return jp_err(p, "bad escape")
+            oi = oi + 1
+            p.pos = p.pos + 1
+        else:
+            store_u8(out, oi, c)
+            oi = oi + 1
+            p.pos = p.pos + 1
+
+def jp_parse_array(p: JParser) -> JParser:
+    p.pos = p.pos + 1
+    kids = vec_new()
+    p = jp_skip_ws(p)
+    if jp_at(p) == 93:
+        p.pos = p.pos + 1
+        p.dom = j_arr_adopt(p.dom, kids.data, kids.len)
+        p.res = j_last_off(p.dom)
+        return p
+    while True:
+        p = jp_parse_value(p)
+        if err_is_err(p.err):
+            return p
+        kids = vec_push(kids, p.res)
+        p = jp_skip_ws(p)
+        c = jp_at(p)
+        if c == 44:
+            p.pos = p.pos + 1
+            p = jp_skip_ws(p)
+        elif c == 93:
+            p.pos = p.pos + 1
+            p.dom = j_arr_adopt(p.dom, kids.data, kids.len)
+            p.res = j_last_off(p.dom)
+            return p
+        else:
+            return jp_err(p, "expected , or ]")
+
+def jp_parse_object(p: JParser) -> JParser:
+    p.pos = p.pos + 1
+    keys = vec_new()
+    vals = vec_new()
+    p = jp_skip_ws(p)
+    if jp_at(p) == 125:
+        p.pos = p.pos + 1
+        p.dom = j_obj_adopt(p.dom, keys.data, vals.data, keys.len)
+        p.res = j_last_off(p.dom)
+        return p
+    while True:
+        p = jp_skip_ws(p)
+        if jp_at(p) != 34:
+            return jp_err(p, "expected string key")
+        p = jp_parse_string(p)
+        if err_is_err(p.err):
+            return p
+        key_str = j_as_str(p.dom, p.res)
+        p = jp_skip_ws(p)
+        if jp_at(p) != 58:
+            return jp_err(p, "expected :")
+        p.pos = p.pos + 1
+        p = jp_parse_value(p)
+        if err_is_err(p.err):
+            return p
+        keys = vec_push_str(keys, key_str)
+        vals = vec_push(vals, p.res)
+        p = jp_skip_ws(p)
+        c = jp_at(p)
+        if c == 44:
+            p.pos = p.pos + 1
+        elif c == 125:
+            p.pos = p.pos + 1
+            p.dom = j_obj_adopt(p.dom, keys.data, vals.data, keys.len)
+            p.res = j_last_off(p.dom)
+            return p
+        else:
+            return jp_err(p, "expected , or }")
+
+# parse a complete JSON document. On success `p.err` is OK and `p.res` is the
+# root node's byte offset; on failure `p.err` carries the message.
+def jp_parse(src: string) -> JParser:
+    p = JParser(src=src, pos=0, err=err_ok(), dom=jdom_new(), res=-1)
+    p = jp_parse_value(p)
+    if err_is_err(p.err):
+        return p
+    p = jp_skip_ws(p)
+    if p.pos != len(p.src):
+        return jp_err(p, "trailing data")
+    return p
+
+# single hex char [0-9a-fA-F] -> value 0..15
+def oa_hex_val(c: int) -> int:
+    if c >= 48 and c <= 57:
+        return c - 48
+    if c >= 65 and c <= 70:
+        return c - 55
+    if c >= 97 and c <= 102:
+        return c - 87
+    return 0

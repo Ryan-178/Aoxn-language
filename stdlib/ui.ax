@@ -610,30 +610,10 @@ def utf16z_utf8(p: int) -> string:
     store_u8(out, m, 0)
     return as_string(out)
 
-# ---- text editing primitives (pure; malloc-per-edit, like concat) ----
-
-# bytes [from, to) of s as a fresh NUL-terminated string
-def str_sub(s: string, from: int, to: int) -> string:
-    if from < 0:
-        from = 0
-    if to > len(s):
-        to = len(s)
-    if to < from:
-        to = from
-    n = to - from
-    p = malloc(n + 1)
-    i = 0
-    while i < n:
-        store_u8(p, i, load_u8(s, from + i))
-        i = i + 1
-    store_u8(p, n, 0)
-    return as_string(p)
-
-def str_remove(s: string, from: int, to: int) -> string:
-    return str_sub(s, 0, from) + str_sub(s, to, len(s))
-
-def str_insert(s: string, at: int, ins: string) -> string:
-    return str_sub(s, 0, at) + ins + str_sub(s, at, len(s))
+# ---- text editing primitives: moved to stdlib/stdlib.ax in v0.40.1 ----
+# `str_sub` / `str_remove` / `str_insert` now live in the portable stdlib so
+# the OpenAI client (and other non-UI code) can slice strings without pulling
+# the UI toolkit. They are still in scope here through `import * from "../stdlib/stdlib.ax"`.
 
 # UTF-8-aware caret movement: step one codepoint left / right of `at`
 def caret_left(s: string, at: int) -> int:
