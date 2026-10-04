@@ -4,14 +4,18 @@
 > `docs/openai-sdk.md`。本文件只回答一个问题：**接下来按什么顺序、把哪些
 > Python 标准库模块搬进 Aoxn，卡在哪里。**
 >
-> 模块编号沿用需求清单原编号 1–31，方便对照。
+> 模块编号沿用两份需求清单的原编号：§2 是标准库 1–31，§5 是第三方 1–15，
+> 方便对照。
 
 ---
 
-## 0. 动手之前：四条硬约束
+## 0. 动手之前：六条硬约束
 
-这四条是**已核实**的，不是猜测。它们决定了后面每个模块的可行形态；
+这六条是**已核实**的，不是猜测。它们决定了后面每个模块的可行形态；
 写模块之前先读这一节，能省掉大部分返工。
+
+（0.1–0.4 对标准库模块适用；0.5–0.6 主要是为第二份清单里的
+科学计算 / 数据分析库准备的，见 §5。）
 
 ### 0.1 `stdlib/stdlib.ax` 在自举关键路径上 —— 新模块必须独立成文件
 
@@ -54,6 +58,46 @@ dict / `None` / fn-ptr / `raise` 在 selfhost 镜像里尚未覆盖
   （已实测：打印出 `2.47e-323`）。格式化必须手写整数数学
 - `web/sock_win.ax` 里已有 `load_i64(ts + 8)` 这种写法，直接照抄
 
+### 0.5 没有 `enum`、没有可运行时标记的联合、没有 `Any` —— 异构记录做不了
+
+v0.40.0 的唯一联合形式是 `T | None`，且 `dict[V]` 的**值类型只有一个**。
+所以「一列里既有 int 又有 string」「一行数据库记录有多种类型」这类数据结构
+**在语言层面无法表达**。
+
+被这条直接判死的：`pandas` 的 DataFrame（§5 #3）、所有 ORM 的行对象
+（§5 #12/#14）、`numpy` 的运行期 dtype 分发（§5 #2）。
+
+**已有的正确范式就在仓库里**：`stdlib/openai/json.ax` 的 JSON DOM 是一个
+**40 字节带 tag 的 slab**（kind / i64 / f64 / ptrA / ptrB），用它绕开了「JSON
+值可以是任意类型」这个问题。凡是要做动态值的库（Variant、DataFrame、ORM 行），
+**照抄这个 tagged-slab 设计**，不要试图发明别的。
+
+代价是访问要走 accessor（类型检查从静态掉到运行期），换来的是通用性。
+文档里要写明这层访问开销，别让用户以为是零成本的。
+
+### 0.6 造不出 `inf` / `nan`，浮点除零也没有保护 —— 所有数值代码都要自己兜
+
+两条都核实过：
+
+- **词法层没有 `inf` / `nan` 字面量**。`src/lexer.rs::scan_number` 只接受
+  `数字 [. 数字]`，`codegen_c.rs:537` 那个 `contains("inf")` 是 Rust 侧
+  **打印** f64 常量时的分支，不是词法支持。
+- **整数的位运算戳不进 float**。v0.38.0 的 `& | ^ ~ << >>` 与 `%` 一样是
+  **int-only**，不能拿 IEEE754 的位模式去造 NaN。
+- **浮点除零原样发射**（`src/codegen_c.rs:2153`，`Div => "/"`），C 里
+  `0.0/0.0` 是**未定义行为**，不是保证给 NaN。
+
+**可行的绕法（都实测可写）**：
+
+- 造 NaN：`extern def log(x: float) -> float`，调 `log(-1.0)`
+- 造 ±Inf：`log(0.0)` 给 `-inf`，`-log(0.0)` 给 `+inf`
+- 除法：库里统一走一个 `fdiv(a, b)` 辅助函数，自己判零并返回哨兵值
+
+`numpy` / `scipy` / `matplotlib` 这三个库**全部**踩在这条上，它们的每一个
+公式（归一化、插值、积分、缩放坐标轴）都得考虑除零与 NaN 传播。
+建议在 `stdlib/math.ax` 里就把 `fdiv` / `is_nan` / `is_inf` 定下来，别让
+每个库各写一遍。
+
 ---
 
 ## 1. 批次总览
@@ -64,6 +108,11 @@ dict / `None` / fn-ptr / `raise` 在 selfhost 镜像里尚未覆盖
 | **P1** | 解析与序列化 | `json`(已有，需提升)、`csv`、`re`、`shutil`、`bisect`、`heapq`、`socket`(已有需上提) | 有工程量但形状清晰 |
 | **P2** | 容器与并发 | `collections`、`itertools`、`urllib`、`threading`、`concurrent.futures` | 前两个依赖 P0 基座；线程有真实阻塞 |
 | **P3** | 语言级阻塞 | `sys`、`argparse`、`multiprocessing`、`pickle`、`logging`、`traceback`、`typing`、`unittest` | 需要先改语言或改需求形态 |
+
+第二份清单（第三方 / 大型库，见 §5）**不套用这四个批次**——它们不是标准库
+模块，而是**依赖链上的项目**：`numpy` 在 `scipy` 之前，`Pillow` 在 `opencv`
+之前，`matplotlib` 在 `seaborn` 之前，`socket` 在 `requests` 之前。按依赖顺序
+排，不按批次排。
 
 **建议起手**：P0 全做完 → P1 的 `json` 提升 + `bisect`/`heapq` →
 再评估 P2 并发。P3 整体挂起，等语言侧排期。
@@ -182,11 +231,62 @@ dict / `None` / fn-ptr / `raise` 在 selfhost 镜像里尚未覆盖
 | 正则引擎的极致性能 | `re` 的 NFA/DFA 优化 | 回溯版够用；真要快就换 `str.find` 手写扫描 |
 | 类型体操 | `typing` | 现有静态类型 + 泛型单态化 |
 | 随机可复现 | `rand()` | 自实现 PCG32（见 #29） |
-| 测试框架 | `unittest` | `cargo test`（`tests/*.rs`） |
+| 测试框架 | `unittest`、`pytest` | `cargo test`（`tests/*.rs`） |
+| 深度学习 | `pytorch` | numpy + scipy 那一层；要 GPU 就不在 Aoxn 里做 |
+| 计算机视觉 | `opencv-python` 全家桶 | 明确只做子集（灰度/模糊/Sobel/阈值/缩放） |
+| 数据库对象映射 | ORM（sqlalchemy / django 的那一半） | `stdlib/db.ax` 的参数化查询 + 按表生成 struct |
 
 ---
 
-## 5. 建议的起手顺序（可直接开工）
+## 5. 第三方 / 大型库（第二份清单）
+
+这 15 个不是标准库模块，是**依赖链上的项目**。编号沿用需求清单原编号 1–15。
+图例同 §2。
+
+### 5.1 依赖顺序
+
+```
+stdlib/socket.ax ──► requests(1)
+stdlib/os.ax ──────► Pillow(7) ──► opencv(8)
+stdlib/math.ax ────► numpy(2) ──► scipy(6)
+                      │           pandas(3, 需先解决 §0.5)
+                      └───────► matplotlib(4) ──► seaborn(5)
+stdlib/net.ax ─────► flask(13) ──► django(12)
+stdlib/re.ax ──────► lxml(10), beautifulsoup4(9)
+```
+
+### 5.2 清单
+
+| # | 库 | 可行性 | 备注 |
+|---|---|---|---|
+| 1 | `requests` | ✅ **P1，高回报** | `stdlib/openai/http.ax` 的 WinHTTP 传输已经在了，`requests` 就是它上面一层：session/cookie 持久化、重定向策略、`params`/`json=` 便捷参数、`.raise_for_status()`。**接口层一天能写完**，是第三方清单里最便宜的高价值项。 |
+| 13 | `flask` | ✅✅ **最高 ROI，建议排第一** | 零件基本齐了：`web/serve.ax` 是一个能跑的 HTTP/1.1 服务器（静态文件 / ETag / Range / `/metrics` 都有，`docs/web-benchmark.md` 里有实测数据）。**v0.40.0 的 fn-ptr 让路由表第一次可表达**——`struct Route{pattern, handler: fn(Request) -> Response}`。剩下的是路由匹配、`Request`/`Response`、Jinja 子集模板、session cookie。**把 `web/serve.ax` 泛化成 `stdlib/wsgi.ax`**，flask 建在上面。 |
+| 9 | `beautifulsoup4` | ✅ **P1，高回报** | HTML 分词 + 树构建，**和 `selfhost/parser.ax` 是同一类活**，有现成参照可抄结构。要补的是：几百个 HTML 实体的解码表（`&amp;` `&#x4e2d;` …）、HTML5 的容错规则（隐式闭合、错误嵌套）、CSS 选择器求值。**和 `re`(§2 #11) 一起做最划算**，两者互为用例。 |
+| 10 | `lxml` | ✅ P1 | XML 比 HTML 简单得多（**没有容错要求**，解析器可以短一半），XPath 求值也直接。⚠️ 但 lxml 的核心卖点是「比 bs4 快」——在 Aoxn 里 bs4 还不存在，比较没有意义。**按「XML + XPath」定位就行**，别承诺性能。 |
+| 2 | `numpy` | ⚠️ **P2，最大工程** | 需要 `struct NDArray{data, shape, stride, ndim}` + 步进索引 + 广播 + 花式索引 + 归约轴。**但 dtype 的运行期分发被 §0.5 判死**——现实做法是**按 dtype 各一个单态化类型**（`f64arr` / `i64arr`），靠泛型让同一份算法为每种类型各编一份（§0.3 的泛型机制支持这个）。程序自己选类型，编译器保证没有混合运算。**这个降级必须在模块头写明**，它和 numpy 的语义不同。 |
+| 6 | `scipy` | ⚠️ **P2/P3，最机械** | 纯数值、无 I/O，所以**语言约束最少**：积分（自适应辛普森）、优化（BFGS/牛顿）、线性代数（LU / QR / 特征值）、信号（FFT / 滤波）。每个算法都是循环和算术，没有语言层面的坎。**但每一个都踩 §0.6**（除零、NaN 传播）和**没有 `**` 运算符**（`pow_f` 自己写，spec roadmap 第 1 条）。建议在 `numpy` 之后做。 |
+| 4 | `matplotlib` | ✅ **P2** | **现成的路已经铺好了**：绘图后端直接建在 UI 工具包的 `plat_fill_rect` / `plat_text` / `plat_measure` 上（`stdlib/ui_draw.ax`，已经是 GDI 实测可用），再包一层坐标变换、刻度、图例。⚠️ **但 `plat_*` 目前没有画线/多边形的图元**（只有矩形、文字、裁剪、pump），要先给 `ui_draw.ax` 加 `plat_line` / `plat_polyline`，并**在 `ui_win.ax` 里实现**——`tests/ui.rs` 那三个契约测试（widget 层不得出现平台符号、两个后端实现同一 `plat_*` 集、每个被调的 `plat_*` 两边都存在）会强制你两边都做，**不要只改一边的后端**。 |
+| 5 | `seaborn` | ⚠️ 依赖 4 | 统计默认值（分箱、置信带）、KDE、配色板。`matplotlib` 落地后成本很低，**跟着 4 一起做，不要单独立项**。 |
+| 7 | `Pillow(PIL)` | ⚠️ P2，分档 | BMP 读写很容易（头 + 像素）。**PNG 需要自己实现 zlib inflate**（可行，~600 行，还要配 deflate 才能写）。**JPEG 解码是大工程**（基线解码器 ~1500 行，含霍夫曼、IDCT、YCbCr）。另一条路是 WIC（Windows 自带的图像组件），但它是 COM 接口，定长 `extern def` 调 COM 会很别扭——**优先自己写**。图像算子（裁剪/缩放/灰度/旋转）都建立在解码之上，所以格式支持决定了这个库的规模。 |
+| 3 | `pandas` | ⛔ **需要重新设计** | DataFrame 的核心卖点就是**一列可以混合类型**，正好撞在 §0.5 上。两条出路：(a) 每列固定类型 → 那就是 numpy 的列式视图，不是 pandas；(b) 走 `json.ax` 那种 **tagged slab** → 通用性有了，访问要经 accessor、运行期判类型、性能大幅下降。**建议 (b) 作为「够用就好」的版本，明确写进文档它不是 pandas。** 依赖 `numpy`(2) 与 `csv`(§2 #9)。 |
+| 14 | `sqlalchemy` | ⛔ ORM 层阻塞 / ✅ 底层可行 | 一行数据库记录必然混合类型 → §0.5，ORM 的行对象建不出来。**分解做法**：先做 `stdlib/db.ax`（ODBC 或 WinSQL 的参数化查询、连接池、事务、结果集游标），**把 ORM 砍掉**；真要对象映射，改成「按表生成 struct + 代码生成」，而不是运行期反射。这是有价值的部分，也是唯一可行的部分。 |
+| 12 | `django` | ⚠️ **拆开看，一半可行** | 模板引擎、请求/响应、中间件、认证 session —— 在 flask 那套之上都能做。**但 admin / forms / ORM 全部依赖 ORM 与反射**（§0.5）。**结论：不要做「django」，做 flask + 模板引擎。** django 的价值主要在 ORM 和 admin，正是这里做不了的部分。 |
+| 8 | `opencv-python` | ⛔ **远期，只做子集** | 依赖 `numpy`(2) + `Pillow`(7)，而「opencv」的本体是几百个精心优化的算子。现实可行的子集：灰度化、高斯模糊、Sobel、二值化、缩放、形态学开闭运算。**性能不可能接近 C++ 版本**（Aoxn 无 SIMD、无内联汇编、逃逸分析有限）。**要张量运算就做 numpy 那一层，不要追 opencv 的性能。** |
+| 11 | `pytorch` | ⛔ **建议不做** | GPU 要 CUDA，语言层没有相邻的任何东西。CPU 反向自动微分的 tape 引擎理论上可行（显式栈代替闭包），但真实代价远超收益。**要做数值计算就做 numpy + scipy 那一层**，深度学习框架是另一个量级的工程。 |
+| 15 | `pytest` | ⚠️ **优先级低** | 发现用例要 argv（§0.2）；fixture 需要 `yield`（没有）→ 只能改成 setup/teardown 显式配对；`parametrize` 可做。v0.40.0 的 `raise`/`try` 让 `assert_raises` 能写。**当前阶段的真正答案仍是 `cargo test` + `tests/*.rs`**，`pytest` 只有在语言模块本身需要自测时才值得做。 |
+
+### 5.3 第三方库通用约定
+
+- [ ] **先确认它依赖的标准库模块已落地**（见 §5.1 依赖图），不要在缺基座时开工
+- [ ] 若绕过 §0.5 / §0.6，**在模块头注释写明降级形态**（同 §3 最后一条）
+- [ ] 每个数值库都要跑一遍**边界用例**：除零、空数组、单元素、`NaN` 输入
+- [ ] `docs/<name>.md` 里**明确写「这不等于 Python 的同名库，差异在哪」**——
+      降级过的库（numpy 的 dtype、pandas 的列类型、db 的无 ORM）尤其要写
+- [ ] 若扩展了 UI 工具包的 `plat_*`，**两个后端都要实现**，`tests/ui.rs` 会查
+
+---
+
+## 6. 建议的起手顺序（可直接开工）
 
 1. **`stdlib/time.ax` + `stdlib/datetime.ax`** —— 最纯粹的 extern + 整数数学，
    零语言风险，且 `logging`/`calendar` 都等它。
@@ -197,3 +297,12 @@ dict / `None` / fn-ptr / `raise` 在 selfhost 镜像里尚未覆盖
 5. **`Vec[T]` 堆容器基座** —— P2 的入场券。
 6. **把 `stdlib/openai/json.ax` 提升为 `stdlib/json.ax`** —— 已有实现，
    是最快的一块 P1。
+
+第三方清单接在后面（依赖齐了才动）：
+
+7. **`stdlib/socket.ax` 上提 + `stdlib/net.ax`** —— `requests`(1) 和
+   `flask`(13) 都等它。
+8. **`stdlib/re.ax`** —— 和 `lxml`(10)、`beautifulsoup4`(9) 共用分词基础。
+9. **`flask`(13)** —— 第三方清单里 ROI 最高，零件已经齐了大半。
+10. **`stdlib/math.ax` 补 `fdiv` / `is_nan` / `is_inf`** —— §0.6 说这是
+    三个数值库的公共前置，**先做它，比做 numpy 更划算**。

@@ -758,9 +758,11 @@ Ordered by how much they cost the language's Python parity.
    dict values are never freed either (a dict lives as long as the program,
    like every other heap block in the language).
 7. Standard library expansion: containers, IO, crypto — the module-by-module
-   plan (all 31 Python stdlib modules, batched and feasibility-rated) is in
-   `docs/stdlib-todo.md`; its §0 lists the language-level constraints each
-   module runs into (the self-host critical path, argv, the int-only `Vec`).
+   plan (all 31 Python stdlib modules, batched and feasibility-rated, plus the
+   15 third-party libraries in §5) is in `docs/stdlib-todo.md`; its §0 lists the
+   language-level constraints each module runs into (the self-host critical
+   path, argv, the int-only `Vec`, the absence of `enum`/tagged unions, and the
+   missing `inf`/`nan` literals).
 8. Top-level statements as an implicit `main` (module-script mode).
 9. Larger Python features, each of which is a real language design (not just
    syntax): `with`, generators and `yield`, closures and decorators, classes,

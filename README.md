@@ -415,7 +415,7 @@ program. It also compiles the real stdlib and the full `examples/` suite. See
 | `docs/install.md` | install guide (Windows) |
 | `docs/ide.md` | the IDE: architecture, security boundary, development workflow |
 | `docs/spec.md` | full language specification |
-| `docs/stdlib-todo.md` | the standard-library roadmap: the remaining Python modules, batched P0–P3, with the language constraints each one runs into |
+| `docs/stdlib-todo.md` | the standard-library roadmap: the 31 remaining Python stdlib modules batched P0–P3, plus the 15 third-party libraries (`numpy`, `pandas`, `flask`, `matplotlib`, `pytorch`, …) ordered by dependency chain — each with the language constraints it runs into |
 | `wiki/` | bilingual (中文/English) wiki — frozen since v0.29.3; `docs/` is the living documentation |
 
 ## Testing & CI
