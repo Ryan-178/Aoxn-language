@@ -1,0 +1,71 @@
+# OpenAI chat — the Aoxn OpenAI SDK in action (stdlib/openai/, v0.40.1).
+#
+# Non-streaming first, then the same prompt streamed token-by-token through
+# the SSE layer. Run it with a key:
+#
+#   $env:OPENAI_API_KEY = "sk-..."
+#   cargo run -- run examples\openai_chat.ax -l winhttp
+#
+# Optional: OPENAI_BASE_URL (a gateway or local proxy), OPENAI_ORG_ID,
+# OPENAI_PROJECT_ID. Without a key the demo says so and exits 0 — CI runs it
+# to prove the SDK links and the client surface works.
+
+import * from "stdlib/openai/client"
+
+def chat_once(c: OaClient, model: string, prompt: string) -> int:
+    roles = vec_new()
+    contents = vec_new()
+    roles = vec_push_str(roles, "user")
+    contents = vec_push_str(contents, prompt)
+    r = oa_chat_create_full(c, model, roles, contents, 0.2, 1, 0)
+    if not oa_resp_ok(r):
+        print("chat failed: " + oa_err_msg(r))
+        return 1
+    print("assistant: " + oa_chat_text(r))
+    print("(model " + oa_chat_model(r) + ", tokens " + str(oa_usage_in(r)) + " in / " + str(oa_usage_out(r)) + " out)")
+    return 0
+
+def chat_stream(c: OaClient, model: string, prompt: string) -> int:
+    roles = vec_new()
+    contents = vec_new()
+    roles = vec_push_str(roles, "user")
+    contents = vec_push_str(contents, prompt)
+    st = oa_chat_stream(c, model, roles, contents, 0.2, 1, 0)
+    if st.err == 1:
+        print("stream failed: " + st.errmsg)
+        return 1
+    acc = ""
+    guard = 0
+    while not st.done and st.err == 0 and guard < 10000:
+        st = oa_stream_next(st)
+        if st.res != "":
+            delta = oa_stream_text(st.res)
+            print(delta)
+            acc = acc + delta
+        guard = guard + 1
+    oa_stream_close(st)
+    print("")
+    print("(streamed " + str(len(acc)) + " chars)")
+    return 0
+
+def main() -> int:
+    c = oa_client_env()
+    if not oa_client_ok(c):
+        print("set OPENAI_API_KEY to run this demo against the live API")
+        print("(the SDK itself is exercised offline by cargo test --test openai_sdk)")
+        return 0
+    model = "gpt-4o-mini"
+    prompt = "Name three sorting algorithms, one line, comma separated."
+    if chat_once(c, model, prompt) == 1:
+        return 1
+    print("== streaming ==")
+    if chat_stream(c, model, prompt) == 1:
+        return 1
+    # the plain-models round trip: list, then look one up
+    r = oa_models_list(c)
+    if oa_resp_ok(r):
+        n = oa_data_len(r)
+        print("models: " + str(n) + " listed; first: " + oa_data_id(r, 0))
+    else:
+        print("models failed: " + oa_err_msg(r))
+    return 0

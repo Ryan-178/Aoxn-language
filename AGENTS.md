@@ -650,6 +650,51 @@ crates/aoxn-pkg       package manager crate (its own dependency set; see above)
 - Same-machine benchmark caveat: client + server share the 4C8T i5-1135G7;
   Node p50 jumps 4→9.7ms under 2-client load while Aoxn stays at 0.1ms.
 
+## OpenAI SDK (stdlib/openai/) — v0.40.1
+
+- **FIVE modules, all plain Aoxn** (selfhost-compilable: no dict/None/fn-ptr/
+  raise anywhere): `codec.ax` (base64 RFC 4648, percent-encoding, UTF-8 ↔
+  UTF-16LE), `json.ax` (the JSON DOM), `http.ax` (WinHTTP transport), `sse.ax`
+  (the SSE pull filter), `client.ax` (`OaClient`, resources, accessors).
+  Reference: `docs/openai-sdk.md`; tests `tests/openai_sdk.rs` (2 drivers);
+  example `examples/openai_chat.ax`. Programs link `-l winhttp`.
+- **The JSON DOM is a slab of 40-byte nodes** (kind / i64 / f64 / ptrA / ptrB),
+  child buffers are adopted `Vec.data` arrays of slab indices, and the parser
+  follows the write-back discipline (`p = jp_value(p)`, extra results through
+  `p.res` / `dom.last`). **Empty-dom accessors are guarded** (`slab == 0`
+  reads as null) — a failed `j_parse` hands back an empty dom and every
+  getter/dumps must tolerate it; the original draft dereferenced NULL there
+  and the crash looked like a parser bug.
+- **`snprintf` CANNOT be used from an Aoxn extern.** Aoxn externs are
+  fixed-arity, but printf-family is variadic: the prologue reads its float
+  varargs from the XMM spill slots, which a fixed-arity call site never
+  fills — `j_fmt_f(3.25)` printed `2.47e-323` (the bit pattern of 5). Float
+  formatting is hand-rolled integer math (`j_fmt_f`, ~%.15g). The same trap
+  waits for anyone declaring `printf`/`sprintf`/`fprintf`.
+- **No `\r` escape — again.** Header blocks (HTTP CRLF) and SSE CRLF
+  fixtures must spell byte 13 via `store_u8` (`oa_crlf()` in http.ax). This
+  bit twice in one session (transport, then the test fixture).
+- **The JSON serializer failed silently at first**: `j_quote` escaped
+  content but never emitted the surrounding `"` — `j_dumps` produced
+  `{model:gpt-4o}` (invalid JSON) and the round-trip test crashed on the
+  empty-dom NULL above. Round-trip tests (parse → dumps → parse → dumps)
+  are the pin that caught both.
+- **The end-to-end test needs NO network**: a mock OpenAI server written in
+  Aoxn (`web/sock_win.ax`, ws2_32) is spawned on a loopback port (env
+  `MOCK_PORT`, `MOCK_COUNT` = requests to serve before exit) and the real
+  WinHTTP path walks a chat completion, a full SSE stream and a 401 body.
+  **The port-poll consumes a mock slot** — the poll `TcpStream::connect`
+  lands as a request (400 response), so `MOCK_COUNT` must exceed the
+  client's request count by at least one.
+- Client defaults mirror openai-python: base URL `https://api.openai.com/v1`
+  (env `OPENAI_BASE_URL`), key from `OPENAI_API_KEY`, org `OPENAI_ORG_ID`,
+  project `OPENAI_PROJECT_ID`, 600 s receive / 5 s connect timeouts, 2
+  retries after the first attempt (0.5 s, 1 s; `Retry-After` ≤ 120 s wins;
+  only transport errors, 429 and 5xx retry). Errors follow the v0.39.0
+  Err-value channel: `oa_resp_ok` gates, `oa_err_msg` renders transport /
+  HTTP / `error.message` — nothing raises.
+
+
 ## IDE (ide/) — Tauri 2 + Next.js + Monaco workbench (v0.31.0, continued v0.31.1)
 
 - `ide/src-tauri` is EXCLUDED from the root Cargo workspace — a plain

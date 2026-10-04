@@ -49,7 +49,7 @@ def main() -> int:
 
 ### Install (one file, Windows)
 
-Download **`Aoxn-0.31.1-Setup.exe`** from the
+Download **`Aoxn-0.40.1-Setup.exe`** from the
 [releases page](https://github.com/AlonechatWorkspace/Aoxn-language/releases)
 and double-click it. That single executable carries the compiler, the
 standard library, the UI toolkit and the examples — nothing else to download,
@@ -254,6 +254,49 @@ cargo run -- run examples\ui_demo.ax -l user32 -l gdi32      # getting started
 Details: [`docs/ui.md`](docs/ui.md) · gallery: `examples/ui_gallery.ax` ·
 tests: `tests/ui.rs`.
 
+### The OpenAI SDK (v0.40.1)
+
+`stdlib/openai/` gives the language a real API client in five plain-Aoxn
+modules: JSON with a proper DOM, HTTPS over WinHTTP, SSE streaming, and the
+core OpenAI resources — with the reference Python SDK's defaults (the same
+base URL, env variable names, timeouts and retry budget):
+
+```Aoxn
+import * from "stdlib/openai/client"
+
+def main() -> int:
+    c = oa_client_env()                 # OPENAI_API_KEY, OPENAI_BASE_URL, ...
+    roles = vec_new()
+    contents = vec_new()
+    roles = vec_push_str(roles, "user")
+    contents = vec_push_str(contents, "Say hello in one word")
+    r = oa_chat_create(c, "gpt-4o-mini", roles, contents)
+    if not oa_resp_ok(r):
+        print(oa_err_msg(r))
+        return 1
+    print(oa_chat_text(r))
+    return 0
+```
+
+Streaming is the same shape with a pull loop: `oa_chat_stream` opens the
+request, `oa_stream_next` yields one SSE `data:` payload at a time (the
+`[DONE]` sentinel and connection close both end it), `oa_stream_text`
+extracts `choices[0].delta.content`, `oa_stream_close` releases the
+handles. Resources: `chat.completions`, `responses`, `embeddings`,
+`models`, `moderations` — blocking and streaming; `oa_request` +
+the JSON DOM cover anything the typed helpers do not. Errors never raise:
+`oa_resp_ok` gates, `oa_err_msg` renders whichever layer failed first.
+Link with `-l winhttp` (the one transport that brings TLS without a TLS
+stack).
+
+```powershell
+cargo run -- run examples\openai_chat.ax -l winhttp   # live demo (needs a key)
+cargo test --test openai_sdk                          # offline: pure layers + a mock OpenAI server written in Aoxn
+```
+
+Reference: [`docs/openai-sdk.md`](docs/openai-sdk.md) ·
+example: `examples/openai_chat.ax` · tests: `tests/openai_sdk.rs`.
+
 ## The IDE
 
 Aoxn ships an official editor — `ide/`, a native desktop app built on
@@ -362,6 +405,7 @@ program. It also compiles the real stdlib and the full `examples/` suite. See
 | `src/ts/` | the TypeScript front end (TS-M1 W1 complete: S2b type layer + S3 modules) |
 | `stdlib/stdlib.ax` | the standard library, written in Aoxn itself |
 | `stdlib/ui.ax`, `stdlib/ui_draw.ax`, `stdlib/ui_win.ax` | the UI toolkit v3: portable core + platform-neutral widget layer (20+ widgets) + the Win32/GDI backend |
+| `stdlib/openai/` | the OpenAI SDK (v0.40.1): JSON DOM, WinHTTP transport, SSE, client — `docs/openai-sdk.md` |
 | `examples/*.ax` | demo programs (hello, fib, primes, stdlib_demo, ui_demo, ui_gallery, …) |
 | `dist/package.ps1`, `src/setup/` | the single-file installer: the packager and the installer stub it fills |
 | `selfhost/` | the compiler rewritten in Aoxn (fixed point reached) |
@@ -375,11 +419,12 @@ program. It also compiles the real stdlib and the full `examples/` suite. See
 
 ## Testing & CI
 
-`cargo test` runs the end-to-end suite — 242 tests in the compiler workspace
+`cargo test` runs the end-to-end suite — 244 tests in the compiler workspace
 (pipeline 126, compiler unit tests 17, TypeScript front end 34, UI 9, install
-layout 6, CSS assets 21, CSS assets v0.36 18, symbol export 8, installer 3)
+layout 6, CSS assets 21, CSS assets v0.36 18, symbol export 8, OpenAI SDK 2,
+installer 3)
 plus the `aoxn-pkg`
-crate's 94 via `bash run_pkg_tests.sh`, 336 in
+crate's 94 via `bash run_pkg_tests.sh`, 338 in
 
 total — where every
 pipeline test compiles
@@ -512,10 +557,16 @@ Full reference, including limits: [`docs/css-assets.md`](docs/css-assets.md).
 
 ## Status
 
-**v0.40.0** · **Windows only** · 336 tests green
+**v0.40.1** · **Windows only** · 338 tests green
 (pipeline 126 + lib 17 + assets 21 + assets_v36 18 + symbols 8 + TS 34 + UI 9 +
-install 6 + setup 3 + aoxn-pkg 94; the IDE adds 36 Rust + 62 frontend tests of
-its own) ·
+OpenAI SDK 2 + install 6 + setup 3 + aoxn-pkg 94; the IDE adds 36 Rust + 62
+frontend tests of its own) ·
+**the OpenAI SDK lands in the stdlib** (v0.40.1) — `stdlib/openai/` in five
+plain-Aoxn modules (codec / JSON DOM / WinHTTP transport / SSE / client)
+gives the language a real API client: chat completions, responses,
+embeddings, models and moderations, blocking or streamed token-by-token,
+with the reference Python SDK's defaults and env variable names; tested
+offline end-to-end against a mock OpenAI server written in Aoxn itself ·
 **the language grows its fourth data axis** (v0.40.0) — **function pointers**
 (a bare function name in value position is its address, `fn(int) -> int`
 annotations, indirect calls, `as` casts between `int` and fn-ptr for COM
@@ -625,7 +676,7 @@ Apache-2.0 — see [`LICENSE`](LICENSE).
 ### 一个 exe 装全部（Windows）
 
 从 [releases 页面](https://github.com/AlonechatWorkspace/Aoxn-language/releases)
-下载 **`Aoxn-0.31.1-Setup.exe`**，双击即可。**这一个 exe 里就带着编译器、标准库、
+下载 **`Aoxn-0.40.1-Setup.exe`**，双击即可。**这一个 exe 里就带着编译器、标准库、
 UI 工具箱和示例程序**——不用再下载别的，也不用自己解压：
 
 ```console
@@ -753,6 +804,45 @@ cargo run -- run examples\ui_demo.ax -l user32 -l gdi32      # 入门示例
 细节见 [`docs/ui.md`](docs/ui.md)；画廊 `examples/ui_gallery.ax`；测试
 `tests/ui.rs`。
 
+### OpenAI SDK（v0.40.1）
+
+`stdlib/openai/` 用五个纯 Aoxn 模块给语言带来了真正的 API 客户端：带 DOM 的
+JSON、WinHTTP 上的 HTTPS、SSE 流式，以及 OpenAI 核心资源——默认值与参考
+Python SDK 一致（base URL、环境变量名、超时、重试预算都相同）：
+
+```Aoxn
+import * from "stdlib/openai/client"
+
+def main() -> int:
+    c = oa_client_env()                 # OPENAI_API_KEY、OPENAI_BASE_URL …
+    roles = vec_new()
+    contents = vec_new()
+    roles = vec_push_str(roles, "user")
+    contents = vec_push_str(contents, "Say hello in one word")
+    r = oa_chat_create(c, "gpt-4o-mini", roles, contents)
+    if not oa_resp_ok(r):
+        print(oa_err_msg(r))
+        return 1
+    print(oa_chat_text(r))
+    return 0
+```
+
+流式是同一形态的拉取循环：`oa_chat_stream` 打开请求，`oa_stream_next` 每次
+吐出一个 SSE `data` 载荷（`[DONE]` 哨兵与连接关闭都会结束它），
+`oa_stream_text` 抽取 `choices[0].delta.content`，`oa_stream_close` 释放
+句柄。资源：`chat.completions`、`responses`、`embeddings`、`models`、
+`moderations`——阻塞与流式；类型化辅助没覆盖到的用 `oa_request` + JSON DOM
+兜底。错误永不 raise：`oa_resp_ok` 把关，`oa_err_msg` 把最先失败的那一层
+渲染成一个字符串。链接时加 `-l winhttp`（唯一自带 TLS 的传输）。
+
+```powershell
+cargo run -- run examples\openai_chat.ax -l winhttp   # 在线示例（需 key）
+cargo test --test openai_sdk                          # 离线：纯层 + 用 Aoxn 写的 mock OpenAI 服务器
+```
+
+参考：[`docs/openai-sdk.md`](docs/openai-sdk.md) ·
+示例 `examples/openai_chat.ax` · 测试 `tests/openai_sdk.rs`。
+
 ## Aoxn IDE
 
 Aoxn 自带官方编辑器——`ide/`，一个 Tauri 2 外壳 + Next.js + Monaco 工作台 +
@@ -824,18 +914,20 @@ Web 服务同样能打：[`web/`](web/README.md) 套件用 Aoxn 写了 HTTP/1.1 
 
 （表格同上方英文区：`src/` 编译器、`src/codegen_c.rs` 唯一的 C 发射后端
 （v0.29.0 起）、`src/paths.rs` 安装布局发现、`src/setup/` 单文件安装器、
-`src/ts/` TS 前端（TS-M1 W1 完成）、`stdlib/` 标准库 + UI v3、`ide/` Aoxn IDE
+`src/ts/` TS 前端（TS-M1 W1 完成）、`stdlib/` 标准库 + UI v3 +
+**OpenAI SDK**（`stdlib/openai/`，v0.40.1）、`ide/` Aoxn IDE
 （`ide/src-tauri` 是独立 Cargo 工作区）、`dist/` 打包
 脚本、`selfhost/` 自举、`web/` Web 基准、`tests/` 端到端测试（含 C 文本
 固定点与安装布局）、`docs/ide.md` IDE 参考、`docs/spec.md` 语言规范、
+`docs/openai-sdk.md` SDK 参考、
 `wiki/` 双语 wiki——**已冻结**。`docs/` 才是活文档。）
 
 ## 测试与 CI
 
-`cargo test` 跑端到端测试套件——编译器工作区 242 个（pipeline 126、编译器单元
+`cargo test` 跑端到端测试套件——编译器工作区 244 个（pipeline 126、编译器单元
 测试 17、TypeScript 前端 34、UI 9、安装布局 6、CSS 资产 21、CSS 资产 v0.36 18、
-符号导出 8、安装器 3），另有 `aoxn-pkg` crate 的 94 个经
-`bash run_pkg_tests.sh` 运行，合计 336 个——每个 pipeline 测试都是 .ax → 可执行
+符号导出 8、OpenAI SDK 2、安装器 3），另有 `aoxn-pkg` crate 的 94 个经
+`bash run_pkg_tests.sh` 运行，合计 338 个——每个 pipeline 测试都是 .ax → 可执行
 
 文件 → 运行 → 断言 stdout 与退出码。
 其中含自举固定点：stage-1 与 stage-2 编译器对同一程序必须产出逐字节一致的
@@ -952,9 +1044,15 @@ print(asset_path(styles_fingerprint()))   # …\assets\82b4fb25….css
 
 ## 现状
 
-**v0.40.0** · **只支持 Windows** · 336 测试全绿
+**v0.40.1** · **只支持 Windows** · 338 测试全绿
 （pipeline 126 + lib 17 + assets 21 + assets_v36 18 + symbols 8 + TS 34 + UI 9 +
-安装布局 6 + setup 3 + aoxn-pkg 94；IDE 另有 36 个 Rust + 62 个前端测试）·
+OpenAI SDK 2 + 安装布局 6 + setup 3 + aoxn-pkg 94；IDE 另有 36 个 Rust + 62 个
+前端测试）·
+**OpenAI SDK 进驻标准库**（v0.40.1）——`stdlib/openai/` 五个纯 Aoxn 模块
+（codec / JSON DOM / WinHTTP 传输 / SSE / client）给语言带来真正的 API 客户端：
+chat completions、responses、embeddings、models、moderations，阻塞或逐 token
+流式，默认值与环境变量名与参考 Python SDK 一致；离线端到端测试由一个用 Aoxn
+写成的 mock OpenAI 服务器完成 ·
 **语言长出第四条数据轴**（v0.40.0）——**函数指针**（值位置的裸函数名就是它的
 地址，`fn(int) -> int` 标注、间接调用、`as` 在 `int` 与函数指针之间转换——
 COM vtable 槽位与 Win32 回调的逃生门）、**`None` + `T | None` 可空**（唯一的

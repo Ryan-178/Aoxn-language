@@ -1,0 +1,414 @@
+# Aoxn OpenAI SDK — client (v0.40.1).
+#
+# The Python SDK's surface, flattened into the Aoxn idiom: one `OaClient`
+# value carries the configuration (key, base URL, org/project, timeouts,
+# retries — mirroring the reference client's defaults), resource functions
+# build the JSON body, post it, and return an `OaResp` whose `dom` is the
+# parsed response. Accessors pull the fields people actually use:
+#
+#   c = oa_client_env()                      # OPENAI_API_KEY / OPENAI_BASE_URL
+#   roles = vec_new(); contents = vec_new()
+#   roles = vec_push_str(roles, "user")
+#   contents = vec_push_str(contents, "Say hello in one word")
+#   r = oa_chat_create(c, "gpt-4o", roles, contents)
+#   print(oa_chat_text(r))                   # -> "hello"
+#
+# Errors follow the repo's Err-value channel (v0.39.0): nothing raises.
+# `oa_resp_ok` is the gate; `oa_err_msg` renders transport failures, HTTP
+# statuses and the API's `error.message` into one string. Streaming keeps
+# the WinHTTP request open and feeds SSE frames through sse.ax.
+#
+# Link requirement: -l winhttp (http.ax). Plain Aoxn throughout.
+
+import * from "../stdlib.ax"
+import * from "./codec.ax"
+import * from "./json.ax"
+import * from "./http.ax"
+import * from "./sse.ax"
+
+extern def getenv(name: string) -> string
+
+# ---- environment ("" when unset; getenv may return NULL) ----
+
+def oa_env(name: string) -> string:
+    p = getenv(name)
+    if as_ptr(p) == 0:
+        return ""
+    return p
+
+# ---- the client ----
+
+struct OaClient:
+    api_key: string
+    base_url: string     # e.g. https://api.openai.com/v1 (no trailing slash needed)
+    org: string          # "" = omit the OpenAI-Organization header
+    project: string      # "" = omit the OpenAI-Project header
+    connect_ms: int
+    timeout_ms: int      # receive timeout (the reference default is 600s)
+    max_retries: int     # retries AFTER the first attempt (reference: 2)
+
+def oa_client_new(api_key: string) -> OaClient:
+    return OaClient(api_key=api_key, base_url="https://api.openai.com/v1", org="", project="",
+        connect_ms=OA_DEFAULT_CONNECT_MS(), timeout_ms=OA_DEFAULT_TIMEOUT_MS(), max_retries=OA_DEFAULT_RETRIES())
+
+# explicit base URL (Azure-style gateways, local proxies, reseldon endpoints)
+def oa_client_at(api_key: string, base_url: string) -> OaClient:
+    c = oa_client_new(api_key)
+    c.base_url = base_url
+    return c
+
+# credentials from the environment: OPENAI_API_KEY, OPENAI_BASE_URL,
+# OPENAI_ORG_ID, OPENAI_PROJECT_ID (the reference SDK's variable names)
+def oa_client_env() -> OaClient:
+    c = oa_client_new(oa_env("OPENAI_API_KEY"))
+    b = oa_env("OPENAI_BASE_URL")
+    if len(b) > 0:
+        c.base_url = b
+    org = oa_env("OPENAI_ORG_ID")
+    if len(org) > 0:
+        c.org = org
+    proj = oa_env("OPENAI_PROJECT_ID")
+    if len(proj) > 0:
+        c.project = proj
+    return c
+
+def oa_client_ok(c: OaClient) -> bool:
+    return len(c.api_key) > 0
+
+# ---- the response ----
+
+struct OaResp:
+    status: int       # HTTP status (0 = transport failure)
+    dom: JDom         # parsed body; root node = dom.last
+    pok: int          # 1 = body parsed as JSON
+    pmsg: string      # JSON parse error message
+    raw: string       # raw body text
+    terr: int         # 1 = transport-level failure
+    tmsg: string      # transport error message
+    retries: int      # retry attempts consumed
+
+def oa_resp_ok(r: OaResp) -> bool:
+    return r.terr == 0 and r.pok == 1 and r.status >= 200 and r.status < 300
+
+# one human-readable message for whichever layer failed first
+def oa_err_msg(r: OaResp) -> string:
+    if r.terr == 1:
+        return r.tmsg
+    e = j_obj_get(r.dom, r.dom.last, "error")
+    if e >= 0:
+        msg = j_get_str(r.dom, e, "message", "")
+        if len(msg) > 0:
+            return "openai " + str(r.status) + ": " + msg
+    if r.pok == 0:
+        return "bad json in response: " + r.pmsg
+    if r.status >= 400:
+        return "http " + str(r.status)
+    return ""
+
+# ---- the request core (retry loop; Sleep between attempts) ----
+
+def oa_request(c: OaClient, method: string, path: string, body: string) -> OaResp:
+    url = c.base_url + path
+    headers = oa_headers_build(c.api_key, c.org, c.project, body)
+    attempt = 0
+    while attempt <= c.max_retries:
+        r0 = oa_http_request(method, url, headers, body, c.connect_ms, c.timeout_ms)
+        if r0.err == 1:
+            delay = oa_retry_delay(attempt, c.max_retries, 0, 0)
+            if delay >= 0:
+                Sleep(delay)
+                attempt = attempt + 1
+                continue
+            return OaResp(status=0, dom=jdom_new(), pok=0, pmsg="", raw="", terr=1, tmsg=r0.errmsg, retries=attempt)
+        p = j_parse(r0.body)
+        pok = 1
+        if p.err == 1:
+            pok = 0
+        resp = OaResp(status=r0.status, dom=p.dom, pok=pok, pmsg=p.errmsg, raw=r0.body, terr=0, tmsg="", retries=attempt)
+        delay = oa_retry_delay(attempt, c.max_retries, r0.status, 0)
+        if delay >= 0:
+            Sleep(delay)
+            attempt = attempt + 1
+            continue
+        return resp
+    return OaResp(status=0, dom=jdom_new(), pok=0, pmsg="", raw="", terr=1, tmsg="gave up after retries", retries=c.max_retries)
+
+# ---- request bodies (pure; testable without network) ----
+
+# chat.completions body; messages as parallel role/content string Vecs.
+# has_temp 0 omits temperature; max_tokens <= 0 omits the cap.
+def oa_body_chat(model: string, roles: Vec, contents: Vec, stream: bool, temperature: float, has_temp: int, max_tokens: int) -> string:
+    b = "{\"model\":" + j_quote(model) + ",\"messages\":["
+    i = 0
+    while i < roles.len:
+        if i > 0:
+            b = b + ","
+        b = b + "{\"role\":" + j_quote(vec_get_str(roles, i)) + ",\"content\":" + j_quote(vec_get_str(contents, i)) + "}"
+        i = i + 1
+    b = b + "]"
+    if has_temp == 1:
+        b = b + ",\"temperature\":" + j_fmt_f(temperature)
+    if max_tokens > 0:
+        b = b + ",\"max_tokens\":" + str(max_tokens)
+    if stream:
+        b = b + ",\"stream\":true"
+    return b + "}"
+
+def oa_body_responses(model: string, input: string, instructions: string) -> string:
+    b = "{\"model\":" + j_quote(model) + ",\"input\":" + j_quote(input)
+    if len(instructions) > 0:
+        b = b + ",\"instructions\":" + j_quote(instructions)
+    return b + "}"
+
+def oa_body_embeddings(model: string, input: string, many: bool, inputs: Vec) -> string:
+    b = "{\"model\":" + j_quote(model) + ",\"input\":"
+    if many:
+        b = b + "["
+        i = 0
+        while i < inputs.len:
+            if i > 0:
+                b = b + ","
+            b = b + j_quote(vec_get_str(inputs, i))
+            i = i + 1
+        b = b + "]"
+    else:
+        b = b + j_quote(input)
+    return b + "}"
+
+def oa_body_moderations(model: string, input: string) -> string:
+    b = "{\"input\":" + j_quote(input)
+    if len(model) > 0:
+        b = b + ",\"model\":" + j_quote(model)
+    return b + "}"
+
+# ---- resources: chat.completions ----
+
+def oa_chat_create(c: OaClient, model: string, roles: Vec, contents: Vec) -> OaResp:
+    return oa_request(c, "POST", "/chat/completions", oa_body_chat(model, roles, contents, False, 0.0, 0, 0))
+
+# the full-parameter variant: stream must be False here (use oa_chat_stream)
+def oa_chat_create_full(c: OaClient, model: string, roles: Vec, contents: Vec, temperature: float, has_temp: int, max_tokens: int) -> OaResp:
+    return oa_request(c, "POST", "/chat/completions", oa_body_chat(model, roles, contents, False, temperature, has_temp, max_tokens))
+
+# one user prompt -> assistant text (the 90% case)
+def oa_ask(c: OaClient, model: string, prompt: string) -> string:
+    roles = vec_new()
+    contents = vec_new()
+    roles = vec_push_str(roles, "user")
+    contents = vec_push_str(contents, prompt)
+    r = oa_chat_create(c, model, roles, contents)
+    if oa_resp_ok(r):
+        return oa_chat_text(r)
+    return ""
+
+# ---- resources: responses ----
+
+def oa_responses_create(c: OaClient, model: string, input: string) -> OaResp:
+    return oa_request(c, "POST", "/responses", oa_body_responses(model, input, ""))
+
+def oa_responses_create_full(c: OaClient, model: string, input: string, instructions: string) -> OaResp:
+    return oa_request(c, "POST", "/responses", oa_body_responses(model, input, instructions))
+
+# ---- resources: embeddings ----
+
+def oa_embeddings_create(c: OaClient, model: string, input: string) -> OaResp:
+    return oa_request(c, "POST", "/embeddings", oa_body_embeddings(model, input, False, vec_new()))
+
+def oa_embeddings_create_many(c: OaClient, model: string, inputs: Vec) -> OaResp:
+    return oa_request(c, "POST", "/embeddings", oa_body_embeddings(model, "", True, inputs))
+
+# ---- resources: models ----
+
+def oa_models_list(c: OaClient) -> OaResp:
+    return oa_request(c, "GET", "/models", "")
+
+def oa_models_retrieve(c: OaClient, model: string) -> OaResp:
+    return oa_request(c, "GET", "/models/" + oa_url_encode(model), "")
+
+def oa_models_delete(c: OaClient, model: string) -> OaResp:
+    return oa_request(c, "DELETE", "/models/" + oa_url_encode(model), "")
+
+# ---- resources: moderations ----
+
+def oa_moderations_create(c: OaClient, input: string) -> OaResp:
+    return oa_request(c, "POST", "/moderations", oa_body_moderations("", input))
+
+def oa_moderations_create_model(c: OaClient, model: string, input: string) -> OaResp:
+    return oa_request(c, "POST", "/moderations", oa_body_moderations(model, input))
+
+# ---- response accessors (all default-safe on any OaResp) ----
+
+def oa_chat_text(r: OaResp) -> string:
+    choices = j_obj_get(r.dom, r.dom.last, "choices")
+    c0 = j_arr_get(r.dom, choices, 0)
+    msg = j_obj_get(r.dom, c0, "message")
+    return j_get_str(r.dom, msg, "content", "")
+
+def oa_chat_finish(r: OaResp) -> string:
+    choices = j_obj_get(r.dom, r.dom.last, "choices")
+    c0 = j_arr_get(r.dom, choices, 0)
+    return j_get_str(r.dom, c0, "finish_reason", "")
+
+def oa_chat_model(r: OaResp) -> string:
+    return j_get_str(r.dom, r.dom.last, "model", "")
+
+def oa_usage_in(r: OaResp) -> int:
+    u = j_obj_get(r.dom, r.dom.last, "usage")
+    return j_get_int(r.dom, u, "prompt_tokens", 0)
+
+def oa_usage_out(r: OaResp) -> int:
+    u = j_obj_get(r.dom, r.dom.last, "usage")
+    return j_get_int(r.dom, u, "completion_tokens", 0)
+
+def oa_usage_total(r: OaResp) -> int:
+    u = j_obj_get(r.dom, r.dom.last, "usage")
+    return j_get_int(r.dom, u, "total_tokens", 0)
+
+# the Responses API's assembled output_text (output[].content[].text where
+# type == "output_text"), joined across items
+def oa_responses_text(r: OaResp) -> string:
+    out = ""
+    output = j_obj_get(r.dom, r.dom.last, "output")
+    n = j_len(r.dom, output)
+    i = 0
+    while i < n:
+        item = j_arr_get(r.dom, output, i)
+        content = j_obj_get(r.dom, item, "content")
+        m = j_len(r.dom, content)
+        k = 0
+        while k < m:
+            part = j_arr_get(r.dom, content, k)
+            if j_get_str(r.dom, part, "type", "") == "output_text":
+                if len(out) > 0:
+                    out = out + "\n"
+                out = out + j_get_str(r.dom, part, "text", "")
+            k = k + 1
+        i = i + 1
+    return out
+
+# list endpoints: the count of data[] and data[i].id / .object
+def oa_data_len(r: OaResp) -> int:
+    data = j_obj_get(r.dom, r.dom.last, "data")
+    return j_len(r.dom, data)
+
+def oa_data_id(r: OaResp, i: int) -> string:
+    data = j_obj_get(r.dom, r.dom.last, "data")
+    item = j_arr_get(r.dom, data, i)
+    return j_get_str(r.dom, item, "id", "")
+
+# embeddings: data[i].embedding as a float vector
+def oa_embedding_len(r: OaResp, i: int) -> int:
+    data = j_obj_get(r.dom, r.dom.last, "data")
+    item = j_arr_get(r.dom, data, i)
+    emb = j_obj_get(r.dom, item, "embedding")
+    return j_len(r.dom, emb)
+
+def oa_embedding_at(r: OaResp, i: int, k: int) -> float:
+    data = j_obj_get(r.dom, r.dom.last, "data")
+    item = j_arr_get(r.dom, data, i)
+    emb = j_obj_get(r.dom, item, "embedding")
+    v = j_arr_get(r.dom, emb, k)
+    return j_fval(r.dom, v)
+
+# ---- streaming (chat.completions with stream=true) ----
+
+struct OaStream:
+    hs: OaHttpStream
+    sse: OaSse
+    rbuf: int        # network read scratch
+    done: bool       # [DONE] seen or connection closed
+    res: string      # the latest event's JSON payload ("" between events)
+    status: int      # HTTP status of the streaming response
+    err: int         # 1 = failed (transport or HTTP status)
+    errmsg: string
+
+# open a streaming chat completion. Non-2xx responses are drained here and
+# reported through err/errmsg — a stream either starts clean or fails clean.
+def oa_chat_stream(c: OaClient, model: string, roles: Vec, contents: Vec, temperature: float, has_temp: int, max_tokens: int) -> OaStream:
+    body = oa_body_chat(model, roles, contents, True, temperature, has_temp, max_tokens)
+    headers = oa_headers_build(c.api_key, c.org, c.project, body)
+    url = c.base_url + "/chat/completions"
+    hs = oa_http_stream_open("POST", url, headers, body, c.connect_ms, c.timeout_ms)
+    s = OaStream(hs=hs, sse=oa_sse_new(), rbuf=malloc(16384), done=False, res="", status=hs.status, err=0, errmsg="")
+    if hs.err == 1:
+        s.err = 1
+        s.errmsg = hs.errmsg
+        s.done = True
+        return s
+    if hs.status < 200 or hs.status > 299:
+        # error bodies are plain JSON, not SSE: drain and render the message
+        total = 0
+        ebuf = malloc(16384)
+        while total < 16383:
+            hs = oa_http_stream_read(hs, ebuf + total, 16383 - total)
+            if hs.err == 1 or hs.got == 0:
+                break
+            total = total + hs.got
+        store_u8(ebuf, total, 0)
+        p = j_parse(as_string(ebuf))
+        free(ebuf)
+        s.err = 1
+        s.errmsg = "openai " + str(hs.status) + ": " + j_get_str(p.dom, p.dom.last, "message", "request failed")
+        e = j_obj_get(p.dom, p.dom.last, "error")
+        if e >= 0:
+            s.errmsg = "openai " + str(hs.status) + ": " + j_get_str(p.dom, e, "message", "request failed")
+        s.done = True
+        oa_http_stream_close(hs)
+        s.hs = OaHttpStream(session=0, conn=0, req=0, status=0, got=0, err=0, errmsg="")
+        return s
+    return s
+
+# pull the next event: fills s.res with the chunk JSON ("" and s.done when
+# the stream ends). Example loop:
+#
+#   st = oa_chat_stream(c, "gpt-4o", roles, contents, 0.0, 0, 0)
+#   while not st.done and st.err == 0:
+#       st = oa_stream_next(st)
+#       if st.res != "":
+#           print(oa_stream_text(st.res))
+#   oa_stream_close(st)
+def oa_stream_next(s: OaStream) -> OaStream:
+    if s.err == 1 or s.done:
+        return s
+    while True:
+        s.sse = oa_sse_next(s.sse)
+        if s.sse.done:
+            s.done = True
+            s.res = ""
+            return s
+        if s.sse.res != "":
+            s.res = s.sse.res
+            return s
+        s.hs = oa_http_stream_read(s.hs, s.rbuf, 16384)
+        if s.hs.err == 1:
+            s.err = 1
+            s.errmsg = s.hs.errmsg
+            return s
+        if s.hs.got == 0:
+            s.done = True
+            s.res = ""
+            return s
+        s.sse = oa_sse_feed(s.sse, s.rbuf, s.hs.got)
+    return s
+
+def oa_stream_close(s: OaStream):
+    oa_http_stream_close(s.hs)
+    free(s.rbuf)
+
+# pure helpers over one chunk's JSON (offline-testable)
+def oa_stream_text(chunk_json: string) -> string:
+    p = j_parse(chunk_json)
+    if p.err == 1:
+        return ""
+    choices = j_obj_get(p.dom, p.dom.last, "choices")
+    c0 = j_arr_get(p.dom, choices, 0)
+    delta = j_obj_get(p.dom, c0, "delta")
+    return j_get_str(p.dom, delta, "content", "")
+
+def oa_stream_finish(chunk_json: string) -> string:
+    p = j_parse(chunk_json)
+    if p.err == 1:
+        return ""
+    choices = j_obj_get(p.dom, p.dom.last, "choices")
+    c0 = j_arr_get(p.dom, choices, 0)
+    return j_get_str(p.dom, c0, "finish_reason", "")

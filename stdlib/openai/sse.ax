@@ -1,0 +1,98 @@
+# Aoxn OpenAI SDK — server-sent events (v0.40.1).
+#
+# Streaming responses arrive as SSE frames over the open WinHTTP connection:
+#
+#     data: {"id":"chatcmpl-...","choices":[{"delta":{"content":"He"}}]}
+#
+#     data: {"id":"chatcmpl-...","choices":[{"delta":{},"finish_reason":"stop"}]}
+#
+#     data: [DONE]
+#
+# The parser is a pull filter: `oa_sse_feed` appends network bytes, and
+# `oa_sse_next` extracts one complete `data:` payload per call into `s.res`
+# (empty string = nothing complete yet). The SSE subset the API actually
+# speaks: `data:` lines, `:` comment lines (ignored), blank line = event
+# boundary, CRLF or LF endings, multiple data lines joined with \n. The
+# [DONE] sentinel sets `s.done` — the caller stops then.
+#
+# Buffers grow by doubling; consumed bytes are compacted to the front with
+# memmove (memcpy would be UB on overlap). Payload strings are fresh copies
+# (str_sub) — they outlive the buffer, which keeps growing underneath.
+
+import * from "../stdlib.ax"
+
+extern def memmove(dst: int, src: int, n: int) -> int
+
+struct OaSse:
+    buf: int        # byte buffer (malloc'd, grown by doubling)
+    cap: int
+    n: int          # bytes currently buffered
+    pos: int        # consumed offset (compacted back to 0)
+    done: bool      # saw "data: [DONE]"
+    res: string     # payload of the event extracted by the last next()
+    data: string    # data-line accumulator for the event being built
+
+def oa_sse_new() -> OaSse:
+    cap = 8192
+    return OaSse(buf=malloc(cap), cap=cap, n=0, pos=0, done=False, res="", data="")
+
+# append network bytes (does NOT parse; call oa_sse_next after feeding)
+def oa_sse_feed(s: OaSse, p: int, n: int) -> OaSse:
+    if s.n + n + 1 > s.cap:
+        newcap = (s.n + n + 1) * 2
+        s.buf = realloc(s.buf, newcap)
+        s.cap = newcap
+    memcpy(s.buf + s.n, p, n)
+    s.n = s.n + n
+    return s
+
+# one complete event's payload, or "" when nothing complete is buffered.
+# After a [DONE] sentinel `s.done` is True and res stays "".
+def oa_sse_next(s: OaSse) -> OaSse:
+    s.res = ""
+    if s.done:
+        return s
+    while s.pos < s.n:
+        # find the line end
+        i = s.pos
+        while i < s.n and load_u8(s.buf, i) != 10:
+            i = i + 1
+        if i >= s.n:
+            break            # no complete line yet; wait for more bytes
+        end = i
+        if end > s.pos and load_u8(s.buf, end - 1) == 13:
+            end = end - 1    # strip CR of a CRLF ending
+        line = str_sub(as_string(s.buf), s.pos, end)
+        s.pos = i + 1
+        if len(line) == 0:
+            # blank line: dispatch the accumulated event
+            if len(s.data) > 0:
+                if s.data == "[DONE]":
+                    s.done = True
+                    s.data = ""
+                    return s
+                s.res = s.data
+                s.data = ""
+                return s
+            continue
+        if load_u8(line, 0) == 58:
+            continue         # `: comment` keep-alive line
+        if len(line) >= 5 and str_sub(line, 0, 5) == "data:":
+            payload = str_sub(line, 5, len(line))
+            if len(payload) > 0 and load_u8(payload, 0) == 32:
+                payload = str_sub(payload, 1, len(payload))
+            if len(s.data) > 0:
+                s.data = s.data + "\n" + payload
+            else:
+                s.data = payload
+        # `event:` / `id:` / anything else: irrelevant for the API, ignored
+    # compact consumed bytes so the buffer cannot grow without bound
+    if s.pos > 0:
+        if s.pos == s.n:
+            s.pos = 0
+            s.n = 0
+        else:
+            memmove(s.buf, s.buf + s.pos, s.n - s.pos)
+            s.n = s.n - s.pos
+            s.pos = 0
+    return s

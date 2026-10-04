@@ -5,6 +5,80 @@ minor bumps while pre-1.0: each minor version is a language milestone.
 
 ## [Unreleased]
 
+## [0.40.1] - 2026-10-05
+
+Theme: **the OpenAI SDK lands in the stdlib.** `stdlib/openai/` — five
+modules, ~2.6k lines of plain Aoxn — gives the language a real API client:
+JSON with a proper DOM, HTTPS transport over WinHTTP, SSE streaming, and
+the core OpenAI resources, tested end-to-end against a mock server written
+in Aoxn itself.
+
+### Added
+
+- **`stdlib/openai/codec.ax`** — base64 (RFC 4648, `=` padding), percent-
+  encoding (RFC 3986 unreserved set), and UTF-8 ↔ UTF-16LE conversion.
+  The UTF-16 half is deliberately duplicated from `stdlib/ui.ax` so the
+  SDK does not pull the UI toolkit (and its 1024-slot heap block) just to
+  talk to WinHTTP.
+- **`stdlib/openai/json.ax`** — a JSON DOM that fits the language: no dict,
+  no `None`, no `sizeof`, no address-of-struct, so values are fixed 40-byte
+  nodes in one slab and arrays/objects hold parallel buffers of child slab
+  indices (`Vec` buffers adopted at parse time). Recursive-descent parser
+  (write-back discipline: `p = jp_value(p)`, extras in `p.res`/`dom.last`)
+  with full string escapes incl. surrogate pairs, manual int/float number
+  paths, compact serializer, and typed getters with defaults that tolerate
+  a failed parse (an empty DOM reads as null — never a NULL deref).
+- **`stdlib/openai/http.ax`** — the WinHTTP transport: one-shot requests
+  (`oa_http_request`) and streaming ones (`oa_http_stream_open/read/close`),
+  URL splitting, the header block, the retry policy table
+  (transport/429/5xx, `Retry-After` up to 120 s), and WinHTTP error names.
+  WinHTTP's wide strings cross the boundary as raw pointers declared `int`
+  — declaring them `string` would promise UTF-8 semantics for UTF-16 data.
+- **`stdlib/openai/sse.ax`** — a pull-style SSE filter: `oa_sse_feed`
+  appends network bytes, `oa_sse_next` extracts one `data:` payload per
+  call (CRLF/LF, `:` comments, multi-line data joined, `[DONE]` sets the
+  done flag). Consumed bytes compact to the front with `memmove`
+  (`memcpy` would be UB on overlap).
+- **`stdlib/openai/client.ax`** — `OaClient` (key, base URL, org/project,
+  timeouts, retries — the reference SDK's defaults and env variable names),
+  the request/retry core, resources (`chat.completions`, `responses`,
+  `embeddings`, `models`, `moderations` — blocking and streaming), response
+  accessors (`oa_chat_text`, `oa_usage_*`, `oa_responses_text`,
+  `oa_data_*`, `oa_embedding_*`), and `OaStream` (feed → pull loop →
+  close; error bodies drained and reported before the loop starts).
+- **`tests/openai_sdk.rs`** — two drivers: the pure layers (RFC 4648
+  vectors, JSON round-trips/escapes, URL split, headers, retry table, SSE
+  incl. split feeds and CRLF, bodies, accessors) and an END-TO-END round
+  trip: a mock OpenAI server written in Aoxn (`web/sock_win.ax`, ws2_32)
+  spawns on a loopback port and the real WinHTTP path performs a chat
+  completion, consumes a full SSE stream and walks a 401 error body.
+- **`examples/openai_chat.ax`** — the live demo (blocking + streaming +
+  models list); without a key it prints what is missing and exits 0.
+- **`docs/openai-sdk.md`** — the SDK reference.
+
+### Changed
+
+- **`str_sub` / `str_remove` / `str_insert` moved from `stdlib/ui.ax` to
+  `stdlib/stdlib.ax`** (v0.40.1): the OpenAI client's JSON/SSE layers need
+  a substring without pulling the UI toolkit. Caret movement stayed in
+  `ui.ax` (a UTF-8 UI concern); `ui.ax` re-exports through its stdlib
+  import, so UI sources are unaffected.
+
+### Fixed
+
+- **JSON serializer emits its quotes.** The first `j_quote` escaped the
+  content but never wrapped it, so `j_dumps` produced invalid JSON
+  (`{model:gpt-4o}`) and any round-trip through the serializer failed.
+- **Serializing a failed parse no longer crashes.** An empty DOM
+  (`slab == 0`) read as node 0 through a NULL slab — the accessors now
+  return null/defaults when the slab is empty.
+- **Float formatting without printf.** `snprintf` is variadic; reaching it
+  through a fixed-arity extern leaves the float varargs in register slots
+  the caller never filled (garbage like `2.47e-323` for `3.25`). `j_fmt_f`
+  formats with integer math: 15 significant digits, `%g`-style exponent
+  spelling below 1e-15 / above 1e18, trailing zeros trimmed.
+
+
 ## [0.40.0] - 2026-10-04
 
 Theme: **the language grows its fourth data axis.** Function pointers,

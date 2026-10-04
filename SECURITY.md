@@ -199,6 +199,16 @@ the information needed to protect users even if the reporter disagrees.
   from a production root must never be pruned, and a package named in both
   `dependencies` and `devDependencies` counts as production. A build that
   loses a dependency it declared is a denial of service on that project.
+- **stdlib runtime parsers over hostile input** (since v0.40.1:
+  `stdlib/openai/json.ax`, `sse.ax`, `http.ax`) — the OpenAI SDK's JSON DOM,
+  SSE framer and URL/header splitting parse bytes a remote server controls,
+  inside the user's process. They are hand-written index arithmetic over
+  malloc'd buffers, so a malformed response that overruns a buffer, walks off
+  the DOM slab, or loops without advancing is a stdlib defect (same standing
+  as the UI backend's message parsing below), not merely "the program's bug".
+  The SDK test suite feeds hostile fixtures offline precisely so these paths
+  stay provable; the SDK never runs inside the compiler process and adds no
+  compiler-side surface.
 
 ## Out of scope (documented behavior)
 
@@ -437,9 +447,16 @@ tag，请在报告里说明，我们再商量。
   环节都不得削弱或替代锁文件里的 manifest 哈希。等级被静默提升为 `audited`，
   或未收录的包能通过 `--tier` 门禁，均属漏洞。
 - **`--prod` 物化**（v0.31.0 起，`install::materialize`）—— dev/prod 的划分
-  决定什么会落进 `aox_modules/`。从生产根可达的包绝不能被裁掉；同时出现在
-  `dependencies` 与 `devDependencies` 的包按生产算。让某个项目丢掉它自己声明
-  的依赖，即是对该项目的拒绝服务。
+   决定什么会落进 `aox_modules/`。从生产根可达的包绝不能被裁掉；同时出现在
+   `dependencies` 与 `devDependencies` 的包按生产算。让某个项目丢掉它自己声明
+   的依赖，即是对该项目的拒绝服务。
+- **标准库中解析敌意输入的运行时解析器**（v0.40.1 起：`stdlib/openai/json.ax`、
+   `sse.ax`、`http.ax`）—— OpenAI SDK 的 JSON DOM、SSE 分帧与 URL/请求头拆分
+   解析的是远端服务器可控的字节，运行在用户进程内。它们是对 malloc 缓冲的手写
+   索引运算：一个畸形响应若造成缓冲越界、走出 DOM slab、或不前进的死循环，
+   属于标准库缺陷（与下文 UI 后端的消息解析同一待遇），而不只是"程序的 bug"。
+   SDK 测试套件离线投喂敌意 fixture，正是为了让这些路径保持可证明；SDK 从不在
+   编译器进程内运行，也不新增编译器侧攻击面。
 
 ## 范围外（文档化行为）
 
