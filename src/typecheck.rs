@@ -260,7 +260,15 @@ impl<'a> Tc<'a> {
     ) -> Result<(), Diag> {
         match stmt {
             Stmt::Let { name, ty, expr, pos } => {
-                let t = self.check_expr(expr, scopes)?;
+                // An empty dict literal has no entry to infer a value type
+                // from, so it takes it from the annotation — which is exactly
+                // what the "needs an annotation" diagnostic tells the user to
+                // write. `check_expr` is not handed the expected type, so the
+                // one case that needs it is resolved here.
+                let t = match (expr, ty.as_ref()) {
+                    (Expr::DictLit { entries, .. }, Some(Type::Dict(v))) if entries.is_empty() => Type::Dict(v.clone()),
+                    _ => self.check_expr(expr, scopes)?,
+                };
                 if t == Type::Void {
                     return Err(self.err(pos.line, pos.col, format!("cannot bind a void expression to '{name}'")));
                 }

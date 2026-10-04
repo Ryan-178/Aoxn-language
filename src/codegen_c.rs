@@ -1073,16 +1073,12 @@ fn block_returns_all(block: &Block) -> bool {
     /// `{"k": v, ...}` as a STATEMENT: the literal is lowered to an empty
     /// dict plus one `ax_dict_set` per entry, and the result lands in `into`.
     /// (Expression position is rejected: the chain needs statements.)
-    fn emit_dict_literal_into(&mut self, entries: &[(Expr, Expr)], into: &str, indent: usize) -> Result<(), String> {
-        let mut val_ty: Option<Type> = None;
-        for (_, v) in entries {
-            let t = self.hint(v)?;
-            val_ty = Some(t);
-            break;
-        }
-        let vt = val_ty.ok_or_else(|| "internal error: empty dict literal at codegen".to_string())?;
+    fn emit_dict_literal_into(&mut self, entries: &[(Expr, Expr)], dty: &Type, into: &str, indent: usize) -> Result<(), String> {
+        let Type::Dict(val) = dty else {
+            return Err("internal error: dict literal bound to a non-dict".into());
+        };
+        let vt = (**val).clone();
         let tok = Self::type_token(&vt);
-        let dty = Type::Dict(Box::new(vt));
         let tmp = self.fresh_tmp();
         let decl = self.c_decl(&dty, &tmp);
         self.decls.push(format!("{decl};"));
@@ -1103,14 +1099,21 @@ fn block_returns_all(block: &Block) -> bool {
     fn emit_stmt_inner(&mut self, stmt: &Stmt, indent: usize) -> Result<(), String> {
         match stmt {
             Stmt::Let { name, ty, expr, .. } => {
-                let hint = self.hint(expr)?;
+                // the binding type comes from a prior binding, else the
+                // annotation, else the initializer itself. `hint` is asked
+                // for LAZILY: an empty dict literal (`d: dict[int] = {}`) has
+                // no entry to infer from and errors inside `hint`, yet the
+                // annotation already answers the question.
                 let bind_ty = match self.locals.get(name) {
                     Some(t) => t.clone(),
-                    None => ty.clone().unwrap_or_else(|| hint.clone()),
+                    None => match ty.clone() {
+                        Some(t) => t,
+                        None => self.hint(expr)?,
+                    },
                 };
                 self.declare(name, &bind_ty);
                 if let Expr::DictLit { entries, .. } = expr {
-                    self.emit_dict_literal_into(entries, &self.c_ident(name), indent)?;
+                    self.emit_dict_literal_into(entries, &bind_ty, &self.c_ident(name), indent)?;
                     // the view update below still applies to the binding
                     if self.narrowed.contains_key(name) {
                         self.narrowed.remove(name);
@@ -1123,6 +1126,7 @@ fn block_returns_all(block: &Block) -> bool {
                 // re-narrow the view after a (re-)binding (mirror of the
                 // checker): `b = None` is a Let, and the branch now sees None
                 if self.narrowed.contains_key(name) {
+                    let hint = self.hint(expr)?;
                     if hint == Type::None || matches!(&bind_ty, Type::Opt(inner) if **inner == hint) {
                         self.narrowed.insert(name.clone(), hint);
                     } else {
