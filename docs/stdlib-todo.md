@@ -1,7 +1,8 @@
 # 标准库路线 TODO（stdlib roadmap）
 
-> 工作文档，不是规范。语言规则见 `docs/spec.md`，OpenAI SDK 见
-> `docs/openai-sdk.md`。本文件只回答一个问题：**接下来按什么顺序、把哪些
+> 工作文档，不是规范。语言规则见 `docs/spec.md`，两套 API SDK 见
+> `docs/openai-sdk.md` 与 `docs/anthropic-sdk.md`（它们共用的底层在
+> `stdlib/net/`）。本文件只回答一个问题：**接下来按什么顺序、把哪些
 > Python 标准库模块搬进 Aoxn，卡在哪里。**
 >
 > 模块编号沿用两份需求清单的原编号：§2 是标准库 1–31，§5 是第三方 1–15，
@@ -67,7 +68,7 @@ v0.40.0 的唯一联合形式是 `T | None`，且 `dict[V]` 的**值类型只有
 被这条直接判死的：`pandas` 的 DataFrame（§5 #3）、所有 ORM 的行对象
 （§5 #12/#14）、`numpy` 的运行期 dtype 分发（§5 #2）。
 
-**已有的正确范式就在仓库里**：`stdlib/openai/json.ax` 的 JSON DOM 是一个
+**已有的正确范式就在仓库里**：`stdlib/net/json.ax` 的 JSON DOM 是一个
 **40 字节带 tag 的 slab**（kind / i64 / f64 / ptrA / ptrB），用它绕开了「JSON
 值可以是任意类型」这个问题。凡是要做动态值的库（Variant、DataFrame、ORM 行），
 **照抄这个 tagged-slab 设计**，不要试图发明别的。
@@ -145,7 +146,7 @@ v0.40.0 的唯一联合形式是 `T | None`，且 `dict[V]` 的**值类型只有
 
 | # | 模块 | 批次 | 可行性 | 备注 |
 |---|---|---|---|---|
-| 8 | `json` | P1 | ✅ **已有** | `stdlib/openai/json.ax` 已经是一个完整 JSON DOM（40 字节 slab、parse/dumps、往返测试都过了）。**P1 的工作是把它提升为 `stdlib/json.ax` 独立模块 + 补文件 I/O**，不是从零写。 |
+| 8 | `json` | P1 | ✅ **已有** | `stdlib/net/json.ax` 已经是一个完整 JSON DOM（40 字节 slab、parse/dumps、往返测试都过了）。**P1 的工作是把它提升为 `stdlib/json.ax` 独立模块 + 补文件 I/O**，不是从零写。 |
 | 9 | `csv` | P1 | ✅ | RFC 4180：引号转义、内嵌换行、`\r\n`。**没有 `\r` 字符串转义**（AGENTS.md：只有 `\n \t \\ \"`），CRLF 要用 `store_u8` 写字节 13。 |
 | 10 | `pickle` | P3 | ⛔ **无反射** | 语言没有「遍历一个值的类型/字段」。可行替代是**显式注册**：程序自己声明要序列化的字段清单，`pickle_dump(recs)`。这样能往返，但和 Python pickle 格式不兼容 —— 若目标是「读 `.pkl` 文件」，**直接不做**。 |
 | 11 | `re` | P1 | ⚠️ 大工程 | 回溯匹配器（支持 `* + ? \| () [] {m,n} .`、字符类、非贪婪、锚点）+ 一个手写 DFA 编译步骤会太大。**先只做回溯版**，用 `Vec` 存回溯栈（两个 int 栈：位置、备选点）。预计 2–4k 行。锚定建议：跟一个「HTML/XML 标记提取」的真实用例，避免做成正则引擎而没人用。 |
@@ -163,7 +164,7 @@ v0.40.0 的唯一联合形式是 `T | None`，且 `dict[V]` 的**值类型只有
 
 | # | 模块 | 批次 | 可行性 | 备注 |
 |---|---|---|---|---|
-| 16 | `urllib` | P2 | ✅ **部分已有** | `stdlib/openai/http.ax` 已经是一套 WinHTTP 传输（open/connect/send/receive/timeouts）。**P2 是把它泛化成 `stdlib/net.ax`** + 加 URL 解析（scheme/host/port/path/query 拆分 + percent-decode）。 |
+| 16 | `urllib` | P2 | ✅ **部分已有** | `stdlib/net/http.ax` 已经是一套 WinHTTP 传输（open/connect/send/receive/timeouts）。**P2 是把它泛化成 `stdlib/net.ax`** + 加 URL 解析（scheme/host/port/path/query 拆分 + percent-decode）。 |
 | 17 | `socket` | P1 | ✅ **已有** | `web/sock_win.ax`（ws2_32）已有 TCP/UDP 实测可用。**上提为 `stdlib/socket.ax`**，`web/` 改为 import 它。搬的时候带上两个坑：int 返回零扩展（`i32()` helper）、指针返回是全 64 位。 |
 
 ### 6. 多线程 / 多进程
@@ -178,7 +179,7 @@ v0.40.0 的唯一联合形式是 `T | None`，且 `dict[V]` 的**值类型只有
 
 | # | 模块 | 批次 | 可行性 | 备注 |
 |---|---|---|---|---|
-| 21 | `base64` | P0 | ✅ **半有** | `stdlib/openai/codec.ax` 有 `oa_b64_encode_str`（**没有 decode**）。P0：抽出通用 encode + **补 decode**（`+`/`/` 变体、padding 校验）+ 标准/URL-safe 两套 alphabet。 |
+| 21 | `base64` | P0 | ✅ **半有** | `stdlib/net/codec.ax` 有 `net_b64_encode_str`（**没有 decode**）。P0：抽出通用 encode + **补 decode**（`+`/`/` 变体、padding 校验）+ 标准/URL-safe 两套 alphabet。 |
 | 22 | `hashlib` | P0 | ✅ | SHA-256 在 TLS/HTTP2 工作里已经用位运算跑过（v0.38.0 加 `&\|^~<<>>` 就是为此）。补 SHA-1 / MD5，以及 `IncrementalHash` 式分块喂入。 |
 | 23 | `hmac` | P0 | ✅ | 建在 22 上，标准两趟 HMAC。 |
 
@@ -259,7 +260,7 @@ stdlib/re.ax ──────► lxml(10), beautifulsoup4(9)
 
 | # | 库 | 可行性 | 备注 |
 |---|---|---|---|
-| 1 | `requests` | ✅ **P1，高回报** | `stdlib/openai/http.ax` 的 WinHTTP 传输已经在了，`requests` 就是它上面一层：session/cookie 持久化、重定向策略、`params`/`json=` 便捷参数、`.raise_for_status()`。**接口层一天能写完**，是第三方清单里最便宜的高价值项。 |
+| 1 | `requests` | ✅ **P1，高回报** | `stdlib/net/http.ax` 的 WinHTTP 传输已经在了，`requests` 就是它上面一层：session/cookie 持久化、重定向策略、`params`/`json=` 便捷参数、`.raise_for_status()`。**接口层一天能写完**，是第三方清单里最便宜的高价值项。 |
 | 13 | `flask` | ✅✅ **最高 ROI，建议排第一** | 零件基本齐了：`web/serve.ax` 是一个能跑的 HTTP/1.1 服务器（静态文件 / ETag / Range / `/metrics` 都有，`docs/web-benchmark.md` 里有实测数据）。**v0.40.0 的 fn-ptr 让路由表第一次可表达**——`struct Route{pattern, handler: fn(Request) -> Response}`。剩下的是路由匹配、`Request`/`Response`、Jinja 子集模板、session cookie。**把 `web/serve.ax` 泛化成 `stdlib/wsgi.ax`**，flask 建在上面。 |
 | 9 | `beautifulsoup4` | ✅ **P1，高回报** | HTML 分词 + 树构建，**和 `selfhost/parser.ax` 是同一类活**，有现成参照可抄结构。要补的是：几百个 HTML 实体的解码表（`&amp;` `&#x4e2d;` …）、HTML5 的容错规则（隐式闭合、错误嵌套）、CSS 选择器求值。**和 `re`(§2 #11) 一起做最划算**，两者互为用例。 |
 | 10 | `lxml` | ✅ P1 | XML 比 HTML 简单得多（**没有容错要求**，解析器可以短一半），XPath 求值也直接。⚠️ 但 lxml 的核心卖点是「比 bs4 快」——在 Aoxn 里 bs4 还不存在，比较没有意义。**按「XML + XPath」定位就行**，别承诺性能。 |
@@ -295,7 +296,7 @@ stdlib/re.ax ──────► lxml(10), beautifulsoup4(9)
    测试好写（对拍已知向量）。
 4. **`stdlib/glob.ax` + `os` 遍历** —— 第一次碰 Win32 目录枚举。
 5. **`Vec[T]` 堆容器基座** —— P2 的入场券。
-6. **把 `stdlib/openai/json.ax` 提升为 `stdlib/json.ax`** —— 已有实现，
+6. **把 `stdlib/net/json.ax` 提升为 `stdlib/json.ax`** —— 已有实现，
    是最快的一块 P1。
 
 第三方清单接在后面（依赖齐了才动）：

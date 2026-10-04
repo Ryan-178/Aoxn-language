@@ -119,7 +119,7 @@ pytest 的 fixture 按参数名注入、任何「把对象转成 JSON」或
 
 **对冲手段**　**显式注册**：程序自己声明字段清单，
 `dump(recs: Vec[Rec])`。这能往返，但不是 Python 的语义。
-现存范式见 `stdlib/openai/json.ax`——40 字节带 tag 的 slab。
+现存范式见 `stdlib/net/json.ax`——40 字节带 tag 的 slab。
 
 **代价　大**（需要 codegen 建类型元数据表 + 两种编译器一致）。
 
@@ -139,7 +139,7 @@ pytest 的 fixture 按参数名注入、任何「把对象转成 JSON」或
 - `numpy` 的运行期 dtype 分发
 - 任何 `Variant` / `Any` / `object` 语义
 
-**现成的正确范式就在仓库里**：`stdlib/openai/json.ax` 用一个
+**现成的正确范式就在仓库里**：`stdlib/net/json.ax` 用一个
 **带 tag 的 slab**（kind / i64 / f64 / ptrA / ptrB）表达「JSON 值可以是
 任意类型」。它绕开了这个问题，代价是访问要走 accessor、类型检查从静态
 掉到运行期。**要动态值的库都该抄这个设计**——包括 pandas 的降级版。
@@ -389,7 +389,7 @@ f-string 同样（`docs/spec.md:136`）。**没有格式说明符、没有 `%g`�
 - f-string 的 `{x:.2f}`（roadmap 第 5 条已列）
 
 **要动哪里**　`src/codegen_c.rs` 里 float→string 的发射，
-`selfhost/codegen.ax` 的 `j_fmt_f`（`stdlib/openai/json.ax` 已经有
+`selfhost/codegen.ax` 的 `j_fmt_f`（`stdlib/net/json.ax` 已经有
 一个手写的 `~%.15g`，**可以直接提升为通用实现**）。
 
 **代价　小。**
