@@ -12,6 +12,9 @@ pub enum Type {
     /// `T | None` — a value that may be absent (v0.40.0). Carries a tag at
     /// runtime; `is None` / `is not None` narrow it to `None` or `T`.
     Opt(Box<Type>),
+    /// `dict[V]` — a string-keyed map with values of type V (v0.40.0).
+    /// Mutating a copy mutates the original: the backing buffers are shared.
+    Dict(Box<Type>),
     Array { elem: Box<Type>, len: usize },
     Struct(String),
     /// A function type (v0.40.0): the address of a top-level `def`/`extern
@@ -31,6 +34,7 @@ impl std::fmt::Display for Type {
             Type::Void => write!(f, "void"),
             Type::None => write!(f, "None"),
             Type::Opt(inner) => write!(f, "{inner} | None"),
+            Type::Dict(inner) => write!(f, "dict[{inner}]"),
             Type::Array { elem, len } if *len == GENERIC_LEN => write!(f, "[{elem}; N]"),
             Type::Array { elem, len } => write!(f, "[{elem}; {len}]"),
             Type::Struct(name) => write!(f, "{name}"),
@@ -133,6 +137,8 @@ pub enum ForIter {
     Range(Vec<Expr>),
     /// iterate array elements (each copied into the loop variable)
     Array(Expr),
+    /// iterate a dict's KEYS in insertion order (v0.40.0)
+    Dict(Expr),
 }
 
 #[derive(Debug, Clone)]
@@ -254,6 +260,8 @@ pub enum Expr {
     ArrayLit { elems: Vec<Expr>, lit_id: usize, pos: Pos },
     /// `[elem] * N` — single-element array replication (Python-style)
     ArrayRep { elem: Box<Expr>, count: usize, lit_id: usize, pos: Pos },
+    /// `{"k": v, ...}` — a dict literal (v0.40.0). Keys must be strings.
+    DictLit { entries: Vec<(Expr, Expr)>, lit_id: usize, pos: Pos },
     StructLit { name: String, fields: Vec<(String, Expr)>, lit_id: usize, pos: Pos },
     /// explicit scalar conversion (int <-> float) — the TS front end lowers
     /// `as`/numeric-tower promotions here; the Aoxn surface syntax never
@@ -274,6 +282,7 @@ impl Expr {
             | Expr::Field { pos, .. }
             | Expr::ArrayLit { pos, .. }
             | Expr::ArrayRep { pos, .. }
+            | Expr::DictLit { pos, .. }
             | Expr::StructLit { pos, .. }
             | Expr::Cast { pos, .. } => *pos,
         }

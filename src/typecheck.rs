@@ -405,12 +405,15 @@ impl<'a> Tc<'a> {
                         }
                         Type::Int
                     }
-                    ForIter::Array(e) => {
+                    ForIter::Array(e) | ForIter::Dict(e) => {
                         let t = self.check_expr(e, scopes)?;
                         match t {
                             Type::Array { elem, .. } => *elem,
+                            // iterating a dict walks its KEYS, in insertion
+                            // order (v0.40.0)
+                            Type::Dict(_) => Type::Str,
                             other => {
-                                return Err(self.err(pos.line, pos.col, format!("'for' can only iterate over arrays, found {other}")))
+                                return Err(self.err(pos.line, pos.col, format!("'for' can only iterate over arrays or dicts, found {other}")))
                             }
                         }
                     }
@@ -500,11 +503,19 @@ impl<'a> Tc<'a> {
             Expr::Index { arr, idx, pos } => {
                 let at = self.check_expr(arr, scopes)?;
                 let it = self.check_expr(idx, scopes)?;
-                if it != Type::Int {
-                    return Err(self.err(pos.line, pos.col, format!("array index must be int, found {it}")));
-                }
                 match at {
-                    Type::Array { elem, .. } => Ok(*elem),
+                    Type::Array { elem, .. } => {
+                        if it != Type::Int {
+                            return Err(self.err(pos.line, pos.col, format!("array index must be int, found {it}")));
+                        }
+                        Ok(*elem)
+                    }
+                    Type::Dict(val) => {
+                        if it != Type::Str {
+                            return Err(self.err(pos.line, pos.col, format!("dict key must be a string, found {it}")));
+                        }
+                        Ok(*val)
+                    }
                     other => Err(self.err(pos.line, pos.col, format!("cannot index a value of type {other}"))),
                 }
             }
@@ -569,12 +580,22 @@ impl<'a> Tc<'a> {
             Expr::Index { arr, idx, pos } => {
                 let at = self.check_expr(arr, scopes)?;
                 let it = self.check_expr(idx, scopes)?;
-                if it != Type::Int {
-                    return Err(self.err(pos.line, pos.col, format!("array index must be int, found {it}")));
-                }
                 match at {
-                    Type::Array { elem, .. } => Ok(*elem),
-                    other => Err(self.err(pos.line, pos.col, format!("cannot index a value of type {other} (only [T; N] arrays are indexable)"))),
+                    Type::Array { elem, .. } => {
+                        if it != Type::Int {
+                            return Err(self.err(pos.line, pos.col, format!("array index must be int, found {it}")));
+                        }
+                        Ok(*elem)
+                    }
+                    // a dict index is a STRING key, and a missing one raises
+                    // at runtime (v0.40.0)
+                    Type::Dict(val) => {
+                        if it != Type::Str {
+                            return Err(self.err(pos.line, pos.col, format!("dict key must be a string, found {it}")));
+                        }
+                        Ok(*val)
+                    }
+                    other => Err(self.err(pos.line, pos.col, format!("cannot index a value of type {other} (only [T; N] arrays and dicts are indexable)"))),
                 }
             }
             Expr::Field { obj, name, pos } => {
@@ -623,6 +644,33 @@ impl<'a> Tc<'a> {
                 }
                 let t = self.check_expr(elem, scopes)?;
                 Ok(Type::Array { elem: Box::new(t), len: *count })
+            }
+            Expr::DictLit { entries, pos, .. } => {
+                // dict literal (v0.40.0): string keys, one value type
+                let mut val: Option<Type> = None;
+                for (k, v) in entries {
+                    let kt = self.check_expr(k, scopes)?;
+                    if kt != Type::Str {
+                        return Err(self.err(k.pos().line, k.pos().col, format!("dict keys must be strings, found {kt}")));
+                    }
+                    let vt = self.check_expr(v, scopes)?;
+                    if vt == Type::Void {
+                        return Err(self.err(v.pos().line, v.pos().col, "a dict cannot hold a void value"));
+                    }
+                    match &val {
+                        Some(prev) if *prev != vt => {
+                            return Err(self.err(v.pos().line, v.pos().col, format!("dict values must share one type: found {prev} and {vt}")))
+                        }
+                        _ => val = Some(vt),
+                    }
+                }
+                // `{}` alone cannot infer its value type; `dict()` is not a
+                // thing, so an empty literal is only valid with an annotation
+                let _ = pos;
+                match val {
+                    Some(v) => Ok(Type::Dict(Box::new(v))),
+                    None => Err(self.err(pos.line, pos.col, "an empty dict literal needs an annotation: d: dict[int] = {}")),
+                }
             }
             Expr::StructLit { name, fields, pos, .. } => {
                 let layout = self.structs.get(name).ok_or_else(|| self.err(pos.line, pos.col, format!("unknown struct '{name}'")))?;
@@ -681,10 +729,26 @@ impl<'a> Tc<'a> {
                         return Err(self.err(pos.line, pos.col, "len expects exactly 1 positional argument"));
                     }
                     let t = self.check_expr(&args[0].value, scopes)?;
-                    if !matches!(t, Type::Array { .. } | Type::Str) {
-                        return Err(self.err(pos.line, pos.col, format!("len requires an array or string, found {t}")));
+                    if !matches!(t, Type::Array { .. } | Type::Str | Type::Dict(_)) {
+                        return Err(self.err(pos.line, pos.col, format!("len requires an array, string, or dict, found {t}")));
                     }
                     return Ok(Type::Int);
+                }
+                // dict membership / deletion (v0.40.0)
+                if name == "dict_has" || name == "dict_del" {
+                    let ok_args = args.len() == 2 && args.iter().all(|a| a.name.is_none());
+                    if !ok_args {
+                        return Err(self.err(pos.line, pos.col, format!("{name} expects (dict, key)")));
+                    }
+                    let dt = self.check_expr(&args[0].value, scopes)?;
+                    let kt = self.check_expr(&args[1].value, scopes)?;
+                    if !matches!(dt, Type::Dict(_)) {
+                        return Err(self.err(pos.line, pos.col, format!("{name} requires a dict, found {dt}")));
+                    }
+                    if kt != Type::Str {
+                        return Err(self.err(pos.line, pos.col, format!("{name} key must be a string, found {kt}")));
+                    }
+                    return Ok(Type::Bool);
                 }
                 if name == "str" {
                     if args.len() != 1 || args[0].name.is_some() {
@@ -1249,7 +1313,7 @@ fn subst_stmt_types(stmt: &mut Stmt, subst_t: &HashMap<String, Type>, n: Option<
                         subst_expr(a, n, len_param);
                     }
                 }
-                ForIter::Array(e) => subst_expr(e, n, len_param),
+                ForIter::Array(e) | ForIter::Dict(e) => subst_expr(e, n, len_param),
             }
             subst_block_types(body, subst_t, n, len_param)
         }
@@ -1337,6 +1401,7 @@ fn type_slug(t: &Type) -> String {
         Type::Void => "v".into(),
         Type::None => "z".into(),
         Type::Opt(inner) => format!("n{}", type_slug(inner)),
+        Type::Dict(inner) => format!("d{}", type_slug(inner)),
         Type::Array { elem, len } => format!("a{}x{}", type_slug(elem), len),
         Type::Struct(n) => format!("s_{n}"),
         // a function pointer is part of a generic instance's identity: two
@@ -1429,6 +1494,13 @@ fn resolve_ty(ty: &Type, structs: &StructTable) -> Result<(), String> {
         Type::Opt(inner) => {
             if **inner == Type::Void {
                 Err("void cannot be nullable".into())
+            } else {
+                resolve_ty(inner, structs)
+            }
+        }
+        Type::Dict(inner) => {
+            if **inner == Type::Void {
+                Err("void cannot be a dict value type".into())
             } else {
                 resolve_ty(inner, structs)
             }

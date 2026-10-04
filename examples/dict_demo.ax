@@ -1,0 +1,40 @@
+# dict (v0.40.0): a string-keyed map. Values share one type; lookup is a
+# linear scan over insertion order, growth doubles. A missing key RAISES
+# (that is what the exception channel is for), so `dict_has` guards reads.
+
+def main() -> int:
+    d: dict[int] = {"a": 1, "b": 2}
+    print(d["a"])
+    print(d["b"])
+    print(len(d))
+    # overwrite keeps the key count
+    d["a"] = 10
+    print(d["a"])
+    print(len(d))
+    # growth past the initial capacity
+    i = 0
+    while i < 20:
+        d[str(i)] = i * i
+        i = i + 1
+    print(len(d))
+    print(d["7"])
+    # membership + deletion
+    print(dict_has(d, "zzz"))
+    print(dict_has(d, "3"))
+    print(dict_del(d, "a"))
+    print(dict_has(d, "a"))
+    # iteration walks keys in insertion order
+    total = 0
+    for k in d:
+        total = total + len(k)
+    print(total)
+    # a dict of strings
+    s: dict[string] = {"name": "aoxn", "kind": "language"}
+    print(s["name"] + "/" + s["kind"])
+    print(len(s))
+    # a missing key raises, and try/except catches it
+    try:
+        print(s["nope"])
+    except as e:
+        print("caught: " + e)
+    return 0

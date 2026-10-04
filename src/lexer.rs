@@ -488,6 +488,21 @@ impl<'c> Lexer<'c> {
                 adv!(self);
                 Tok::LBracket
             }
+            // braces join lines too (v0.40.0): `{"k": v}` is a dict literal,
+            // and the TS front end's object literals want the same rule
+            '{' => {
+                self.paren_depth += 1;
+                adv!(self);
+                Tok::LBrace
+            }
+            '}' => {
+                self.paren_depth -= 1;
+                if self.paren_depth < 0 {
+                    return Err(self.err(pos.line, pos.col, "unmatched closing '}'"));
+                }
+                adv!(self);
+                Tok::RBrace
+            }
             ')' | ']' => {
                 self.paren_depth -= 1;
                 if self.paren_depth < 0 {
@@ -499,16 +514,6 @@ impl<'c> Lexer<'c> {
                 } else {
                     Tok::RBracket
                 }
-            }
-            // braces: `import { a, b } from "p"` name lists only (they do
-            // not participate in implicit line joining)
-            '{' => {
-                adv!(self);
-                Tok::LBrace
-            }
-            '}' => {
-                adv!(self);
-                Tok::RBrace
             }
             ';' | '.' | ',' | ':' => {
                 adv!(self);

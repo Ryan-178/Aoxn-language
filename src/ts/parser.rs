@@ -1510,6 +1510,7 @@ impl Parser {
             Expr::Str(..) => Some(Type::Str),
             Expr::Bool(..) => Some(Type::Bool),
             Expr::NoneLit(_) => Some(Type::None),
+            Expr::DictLit { .. } => None,
             Expr::Var { name, .. } => self.vars.get(name).cloned(),
             Expr::Cast { to, .. } => Some(to.clone()),
             Expr::Unary { op, expr, .. } => match op {
@@ -1726,7 +1727,7 @@ fn fill_stmt(st: &mut Stmt, opts: &HashMap<String, Vec<(usize, Expr)>>, totals: 
                         fill_expr(a, opts, totals);
                     }
                 }
-                ForIter::Array(a) => fill_expr(a, opts, totals),
+                ForIter::Array(a) | ForIter::Dict(a) => fill_expr(a, opts, totals),
             }
             fill_block(body, opts, totals);
         }
@@ -1772,7 +1773,7 @@ fn fill_expr(e: &mut Expr, opts: &HashMap<String, Vec<(usize, Expr)>>, totals: &
                 fill_expr(v, opts, totals);
             }
         }
-        Expr::Int(..) | Expr::Float(..) | Expr::Str(..) | Expr::Bool(..) | Expr::NoneLit(_) | Expr::Var { .. } => {}
+        Expr::Int(..) | Expr::Float(..) | Expr::Str(..) | Expr::Bool(..) | Expr::NoneLit(_) | Expr::DictLit { .. } | Expr::Var { .. } => {}
     }
 }
 

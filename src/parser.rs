@@ -277,6 +277,17 @@ impl Parser {
         // `fn(int, string) -> int` — a function-pointer type (v0.40.0). `fn`
         // is identifier-led so that `fn = node` in the self-hosted compiler
         // keeps parsing as an assignment.
+        // `dict[V]` — a string-keyed map (v0.40.0), identifier-led like `fn`
+        if matches!(self.peek(), Tok::Ident(n) if n == "dict") && matches!(self.peek2(), Tok::LBracket) {
+            self.bump();
+            self.bump(); // '['
+            let inner = self.ty()?;
+            self.eat(&Tok::RBracket)?;
+            if inner == Type::Void {
+                return Err(self.perr(self.pos().line, self.pos().col, "void cannot be a dict value type"));
+            }
+            return Ok(Type::Dict(Box::new(inner)));
+        }
         if matches!(self.peek(), Tok::Ident(n) if n == "fn") && matches!(self.peek2(), Tok::LParen) {
             self.bump();
             self.bump(); // '('
@@ -949,6 +960,7 @@ impl Parser {
                 | Tok::FStr(_)
                 | Tok::LParen
                 | Tok::LBracket
+                | Tok::LBrace
         ) {
             return Err(self.perr(pos.line, pos.col, format!("expected an expression, found {:?}", self.peek())));
         }
@@ -965,6 +977,31 @@ impl Parser {
                 let e = self.expr()?;
                 self.eat(&Tok::RParen)?;
                 Ok(e)
+            }
+            Tok::LBrace => {
+                // dict literal (v0.40.0): {"k": v, ...}. `{}` is the empty one.
+                let mut entries: Vec<(Expr, Expr)> = Vec::new();
+                if *self.peek() != Tok::RBrace {
+                    loop {
+                        let key = self.expr()?;
+                        self.eat(&Tok::Colon)?;
+                        let value = self.expr()?;
+                        entries.push((key, value));
+                        match self.peek() {
+                            Tok::Comma => {
+                                self.bump();
+                                if *self.peek() == Tok::RBrace {
+                                    break;
+                                }
+                            }
+                            Tok::RBrace => break,
+                            _ => return Err(self.unexpected(&Tok::RBrace)),
+                        }
+                    }
+                }
+                self.eat(&Tok::RBrace)?;
+                let lit_id = self.lit_id();
+                Ok(Expr::DictLit { entries, lit_id, pos })
             }
             Tok::LBracket => {
                 // array literal: [e0, e1, ...]

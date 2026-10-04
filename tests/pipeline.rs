@@ -2746,3 +2746,311 @@ fn chained_comparison_emits_short_circuit_and() {
     .expect("chained comparison should compile");
     assert!(c.contains("&&"), "{c}");
 }
+
+// ---- v0.40.0: dict ------------------------------------------------------
+//
+// A dict is a HANDLE (`struct ax_dict_V*`). It was originally spelled as a
+// 4-word struct passed by value, which was unsound twice over: a callee's
+// growth/deletion never reached the caller, and the stale `len` then walked
+// off a reallocated buffer — correct at -O0, a segfault at -O1 and above.
+// The tests below run at -O3 by construction (`build_exe(.., true)`), so
+// they are the regression net for exactly that.
+
+/// insert / read / len / overwrite
+#[test]
+fn dict_basics() {
+    let out = build_and_run(
+        r#"
+        def main() -> int:
+            d: dict[int] = {"a": 1, "b": 2}
+            print(d["a"])
+            print(d["b"])
+            print(len(d))
+            d["a"] = 10
+            print(d["a"])
+            print(len(d))
+            return 0
+        "#,
+    );
+    assert_eq!(out, "1\n2\n2\n10\n2\n");
+}
+
+/// THE regression test: a mutation made through a handle passed to another
+/// function is visible to the caller. Under the by-value spelling the callee
+/// grew its own copy and the caller kept the old len.
+#[test]
+fn dict_mutation_through_a_callee_is_visible_to_the_caller() {
+    let out = build_and_run(
+        r#"
+        def put(d: dict[int], k: str, v: int) -> None:
+            d[k] = v
+
+        def main() -> int:
+            d: dict[int] = {}
+            put(d, "x", 7)
+            print(len(d))
+            print(d["x"])
+            i = 0
+            while i < 10:
+                put(d, str(i), i)
+                i = i + 1
+            print(len(d))
+            print(d["9"])
+            return 0
+        "#,
+    );
+    assert_eq!(out, "1\n7\n11\n9\n");
+}
+
+/// `dict_del` used to shrink a copy: the caller still saw the key.
+#[test]
+fn dict_del_is_visible_to_the_caller() {
+    let out = build_and_run(
+        r#"
+        def drop(d: dict[int], k: str) -> None:
+            dict_del(d, k)
+
+        def main() -> int:
+            d: dict[int] = {"a": 1, "b": 2, "c": 3}
+            print(dict_del(d, "b"))
+            print(len(d))
+            print(dict_has(d, "b"))
+            print(d["a"] + d["c"])
+            print(dict_del(d, "nope"))
+            print(len(d))
+            drop(d, "a")
+            print(len(d))
+            print(dict_has(d, "a"))
+            return 0
+        "#,
+    );
+    assert_eq!(out, "true\n2\nfalse\n4\nfalse\n2\n1\nfalse\n");
+}
+
+/// growth past the initial capacity, which is where the stale `len` used to
+/// read past the end of the reallocated arrays
+#[test]
+fn dict_grows_past_the_initial_capacity() {
+    let out = build_and_run(
+        r#"
+        def main() -> int:
+            d: dict[int] = {}
+            i = 0
+            while i < 200:
+                d[str(i)] = i * i
+                i = i + 1
+            print(len(d))
+            print(d["0"])
+            print(d["199"])
+            return 0
+        "#,
+    );
+    assert_eq!(out, "200\n0\n39601\n");
+}
+
+/// `for k in d` walks KEYS, in insertion order
+#[test]
+fn dict_iteration_walks_keys_in_insertion_order() {
+    let out = build_and_run(
+        r#"
+        def main() -> int:
+            d: dict[int] = {"z": 1, "a": 2, "m": 3}
+            parts = ""
+            for k in d:
+                parts = parts + k
+            print(parts)
+            total = 0
+            for k in d:
+                total = total + d[k]
+            print(total)
+            return 0
+        "#,
+    );
+    assert_eq!(out, "zam\n6\n");
+}
+
+/// a missing key raises; `dict_has` is the guard
+#[test]
+fn dict_missing_key_raises() {
+    let out = build_and_run(
+        r#"
+        def main() -> int:
+            d: dict[string] = {"name": "aoxn"}
+            print(dict_has(d, "name"))
+            print(dict_has(d, "nope"))
+            try:
+                print(d["nope"])
+            except as e:
+                print("caught: " + e)
+            return 0
+        "#,
+    );
+    assert_eq!(out, "true\nfalse\n\ncaught: dict key not found\n");
+}
+
+/// dicts of strings, and of structs (the value array holds a by-value struct)
+#[test]
+fn dict_of_strings_and_of_structs() {
+    let out = build_and_run(
+        r#"
+        struct P:
+            x: int
+            y: int
+
+        def main() -> int:
+            s: dict[string] = {"name": "aoxn", "kind": "language"}
+            print(s["name"] + "/" + s["kind"])
+            print(len(s))
+            p: dict[P] = {}
+            p["origin"] = P(x=1, y=2)
+            p["far"] = P(x=10, y=20)
+            o = p["far"]
+            print(o.x + o.y)
+            print(len(p))
+            return 0
+        "#,
+    );
+    assert_eq!(out, "aoxn/language\n2\n30\n2\n");
+}
+
+/// non-string keys are rejected
+#[test]
+fn dict_key_must_be_a_string() {
+    let msg = expect_compile_error(
+        r#"
+        def main() -> int:
+            d: dict[int] = {}
+            i = 1
+            d[i] = 1
+            return 0
+        "#,
+    );
+    assert!(msg.contains("dict key must be a string"), "{msg}");
+}
+
+/// all values share one type
+#[test]
+fn dict_values_must_share_one_type() {
+    let msg = expect_compile_error(
+        r#"
+        def main() -> int:
+            d: dict[int] = {"a": 1, "b": "two"}
+            print(len(d))
+            return 0
+        "#,
+    );
+    assert!(msg.contains("must share one type"), "{msg}");
+}
+
+/// `{}` cannot infer its value type — it needs the annotation
+#[test]
+fn empty_dict_literal_needs_an_annotation() {
+    let msg = expect_compile_error(
+        r#"
+        def main() -> int:
+            d = {}
+            print(len(d))
+            return 0
+        "#,
+    );
+    assert!(msg.contains("needs an annotation"), "{msg}");
+}
+
+/// a dict is emitted as a pointer, not a by-value struct
+#[test]
+fn dict_is_emitted_as_a_handle() {
+    let c = aoxn::compile_to_c(
+        &dedent(
+            r#"
+        def main() -> int:
+            d: dict[int] = {"a": 1}
+            print(len(d))
+            return 0
+        "#,
+        ),
+        true,
+    )
+    .expect("dict program should compile");
+    assert!(c.contains("struct ax_dict_i*"), "{c}");
+}
+
+// ---- v0.40.0: None / raise / try / except / fn pointers ---------------
+
+/// `T | None` is a carrier struct with a presence tag
+#[test]
+fn none_optional_round_trip() {
+    let out = build_and_run(
+        r#"
+        def main() -> int:
+            a: int | None = None
+            print(a == None)
+            b: int | None = 7
+            print(b == None)
+            if b != None:
+                print(b + 1)
+            return 0
+        "#,
+    );
+    assert_eq!(out, "true\nfalse\n8\n");
+}
+
+/// a raise unwinds to the nearest handler, across frames; the normal path
+/// still works afterwards
+#[test]
+fn raise_unwinds_to_the_nearest_handler() {
+    let out = build_and_run(
+        r#"
+        def risky(n: int) -> int:
+            if n < 0:
+                raise "negative input: " + str(n)
+            return n * 2
+
+        def wrapper(n: int) -> int:
+            return risky(n)
+
+        def main() -> int:
+            try:
+                print(risky(5))
+                raise "boom"
+            except as e:
+                print("caught: " + e)
+            try:
+                print(wrapper(-3))
+            except as e:
+                print("crossed frames: " + e)
+            try:
+                print(wrapper(4))
+            except:
+                print("never printed")
+            print(risky(21))
+            return 0
+        "#,
+    );
+    assert_eq!(out, "10\ncaught: boom\ncrossed frames: negative input: -3\n42\n");
+}
+
+/// a function used as a value and called indirectly; a pointer copies
+#[test]
+fn fnptr_call_through_a_variable() {
+    let out = build_and_run(
+        r#"
+        def twice(x: int) -> int:
+            return x * 2
+
+        def add(a: int, b: int) -> int:
+            return a + b
+
+        def main() -> int:
+            f = twice
+            print(f(21))
+            g = add
+            print(g(20, 22))
+            h = f
+            print(h(5))
+            print(to_int(twice) != 0)
+            print(to_int(f) == to_int(h))
+            return 0
+        "#,
+    );
+    assert_eq!(out, "42\n42\n10\ntrue\ntrue\n");
+}
