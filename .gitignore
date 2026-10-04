@@ -9,3 +9,22 @@ tmp/
 
 # release archives produced by dist/package.sh
 /dist/release*/
+
+# Vendored upstream SDK sources, kept on disk as READ-ONLY reference
+# material: ~36 MB of Python per tree (api.md, typings/, uv.lock, …). The
+# Aoxn ports are the tracked source of truth — stdlib/openai/ and
+# stdlib/anthropic/, docs/openai-sdk.md and docs/anthropic-sdk.md — so
+# committing the reference trees would add 36 MB of Python that nothing
+# builds and that goes stale the moment upstream tags a release. Leave the
+# directory alone; do not delete it, and do not `git add -A` around it.
+/third-party-package-in-the-making/
+
+# Session handover notes. The file says so itself ("本文件为会话交接用，
+# 不入 git"): it is rewritten per session and describes a version that is
+# days old by the time anyone reads it. The authoritative docs are docs/.
+/HANDOVER.md
+
+# ZCode's tool-local exclusion file: generated from .gitignore plus the
+# tool's own defaults, so tracking it buys nothing but churn. The rules
+# that matter live in .gitignore above, which this file syncs FROM.
+/.zcodeignore
