@@ -375,11 +375,11 @@ program. It also compiles the real stdlib and the full `examples/` suite. See
 
 ## Testing & CI
 
-`cargo test` runs the end-to-end suite — 228 tests in the compiler workspace
-(pipeline 112, compiler unit tests 17, TypeScript front end 34, UI 9, install
+`cargo test` runs the end-to-end suite — 242 tests in the compiler workspace
+(pipeline 126, compiler unit tests 17, TypeScript front end 34, UI 9, install
 layout 6, CSS assets 21, CSS assets v0.36 18, symbol export 8, installer 3)
 plus the `aoxn-pkg`
-crate's 94 via `bash run_pkg_tests.sh`, 322 in
+crate's 94 via `bash run_pkg_tests.sh`, 336 in
 
 total — where every
 pipeline test compiles
@@ -512,11 +512,29 @@ Full reference, including limits: [`docs/css-assets.md`](docs/css-assets.md).
 
 ## Status
 
-**v0.39.2** · **Windows only** · 322 tests green
-(pipeline 112 + lib 17 + assets 21 + assets_v36 18 + symbols 8 + TS 34 + UI 9 +
-install 6 + setup 3 + aoxn-pkg 94; the IDE adds 22 Rust + 26 frontend tests of
+**v0.40.0** · **Windows only** · 336 tests green
+(pipeline 126 + lib 17 + assets 21 + assets_v36 18 + symbols 8 + TS 34 + UI 9 +
+install 6 + setup 3 + aoxn-pkg 94; the IDE adds 36 Rust + 62 frontend tests of
 its own) ·
-**the self-hosting heap corruption is root-caused and fixed** — the struct
+**the language grows its fourth data axis** (v0.40.0) — **function pointers**
+(a bare function name in value position is its address, `fn(int) -> int`
+annotations, indirect calls, `as` casts between `int` and fn-ptr for COM
+vtable slots and Win32 callbacks), **`None` + `T | None` nullability** (the
+only union form; `is None` / `is not None` narrow per branch in checker and
+codegen alike; print and operators reject a nullable until narrowed), real
+**`raise` / `try` / `except`** (the v0.39.0 "no exceptions" decision reversed
+by user instruction — `raise <string>` unwinds to the nearest handler or out
+of the function; the `Err`-value channel stays for failures a caller
+inspects), and **`dict[V]`** — string-keyed maps with insertion-order
+iteration whose missing keys raise. The dict is a **heap handle** (the
+`TableModel` / `FileTable` shape): the first spelling passed the 4-word
+struct by value and was unsound twice over — a callee's growth was invisible
+to the caller, and the stale `len` then walked off the reallocated buffer
+(correct at `-O0`, a segfault at `-O1`+; reproduced with clang on the bare
+generated C). Copies now share the dict, so set/del through any of them are
+seen by all ·
+**the self-hosting heap corruption is root-caused and fixed (v0.39.2)** — the
+struct
 cycle detector threaded its DFS path as a `Vec` by value, pushed onto it and
 recurred; the callee's `realloc` freed the buffer the caller still held, and
 the next sibling branch walked freed memory. It was hidden by an 8-slot
@@ -814,16 +832,16 @@ Web 服务同样能打：[`web/`](web/README.md) 套件用 Aoxn 写了 HTTP/1.1 
 
 ## 测试与 CI
 
-`cargo test` 跑端到端测试套件——编译器工作区 228 个（pipeline 112、编译器单元
+`cargo test` 跑端到端测试套件——编译器工作区 242 个（pipeline 126、编译器单元
 测试 17、TypeScript 前端 34、UI 9、安装布局 6、CSS 资产 21、CSS 资产 v0.36 18、
 符号导出 8、安装器 3），另有 `aoxn-pkg` crate 的 94 个经
-`bash run_pkg_tests.sh` 运行，合计 322 个——每个 pipeline 测试都是 .ax → 可执行
+`bash run_pkg_tests.sh` 运行，合计 336 个——每个 pipeline 测试都是 .ax → 可执行
 
 文件 → 运行 → 断言 stdout 与退出码。
 其中含自举固定点：stage-1 与 stage-2 编译器对同一程序必须产出逐字节一致的
 C 文本与目标文件（目标文件比较会屏蔽 clang 写入每个 Windows 目标文件的
-COFF 时间戳）。IDE 自带两套独立测试：命令层的 16 个 Rust 测试（`ide/` 下
-`pnpm test:rust`）与前端的 21 个 node:test 用例（`pnpm test`）；由于
+COFF 时间戳）。IDE 自带两套独立测试：命令层的 36 个 Rust 测试（`ide/` 下
+`pnpm test:rust`）与前端的 62 个 node:test 用例（`pnpm test`）；由于
 `ide/src-tauri` 有意排除在根工作区之外，它们不会在 `cargo test` 里运行。
 Aoxn 只支持 Windows（v0.30.0），每次 push 在 windows-latest
 跑全套件；同一个任务随后打出单文件安装器、安装到临时目录并跑 `aoxn doctor`
@@ -934,10 +952,22 @@ print(asset_path(styles_fingerprint()))   # …\assets\82b4fb25….css
 
 ## 现状
 
-**v0.39.2** · **只支持 Windows** · 322 测试全绿
-（pipeline 112 + lib 17 + assets 21 + assets_v36 18 + symbols 8 + TS 34 + UI 9 +
-安装布局 6 + setup 3 + aoxn-pkg 94；IDE 另有 22 个 Rust + 26 个前端测试）·
-**自举堆损坏已查明根因并修复**——struct 环检测器把 DFS 路径按值传递、push
+**v0.40.0** · **只支持 Windows** · 336 测试全绿
+（pipeline 126 + lib 17 + assets 21 + assets_v36 18 + symbols 8 + TS 34 + UI 9 +
+安装布局 6 + setup 3 + aoxn-pkg 94；IDE 另有 36 个 Rust + 62 个前端测试）·
+**语言长出第四条数据轴**（v0.40.0）——**函数指针**（值位置的裸函数名就是它的
+地址，`fn(int) -> int` 标注、间接调用、`as` 在 `int` 与函数指针之间转换——
+COM vtable 槽位与 Win32 回调的逃生门）、**`None` + `T | None` 可空**（唯一的
+union 形式；`is None` / `is not None` 在 checker 与 codegen 两侧都按分支收窄；
+收窄之前 print 与运算符都拒绝可空值）、真正的 **`raise` / `try` / `except`**
+（v0.39.0「无异常」的决策被用户指令推翻——`raise <string>` 退到最近的
+handler 或退出函数；`Err` 值通道保留给调用方要**检视**的失败），以及
+**`dict[V]`**——字符串键字典，按插入序迭代，缺失键直接 raise。字典是**堆
+句柄**（`TableModel` / `FileTable` 同款形状）：最初按值传 4 词结构体的写法
+有两重不健全——被调方的增长对调用方不可见，过期的 `len` 又会走出被
+realloc 过的缓冲（`-O0` 正确、`-O1` 起段错误；用 clang 直接编同一份生成 C
+复现过）。现在拷贝共享同一个字典，set/del 透过任一副本都彼此可见 ·
+**自举堆损坏已查明根因并修复（v0.39.2）**——struct 环检测器把 DFS 路径按值传递、push
 之后递归，被调方的 `realloc` 释放了调用方仍持有的缓冲，下一个兄弟分支就读
 到了已释放内存；它之所以潜伏，是因为内联增长一次性预留 8 槽、路径前 8 次
 push 都不触发 realloc。修复方式是写回（`struct Cycle{hit, path}`），
