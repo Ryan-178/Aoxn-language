@@ -275,7 +275,7 @@ Single test: `cargo test --test pipeline recursion_fib`.
   → src/typecheck.rs  strict check + FnSig table + GENERIC monomorphizer
   → src/codegen_c.rs  ISO C text → clang -c → object file (clang -O<n> -w -c)
   → src/lib.rs        load imports (src/files.rs registry) → link via clang → executable
-src/main.rs           CLI (build / run / c / pkg...), --json diagnostics, -l/-L link flags
+src/main.rs           CLI (build / run / c / pkg...), --json diagnostics, -l/-L link flags, --clang-arg/-g/--cc-warnings
 crates/aoxn-pkg       package manager crate (its own dependency set; see above)
 ```
 
@@ -300,10 +300,6 @@ crates/aoxn-pkg       package manager crate (its own dependency set; see above)
   reject imports; only path-based entry points resolve them. A resolved
   `.css` target is diverted to the asset pipeline (`src/assets.rs`) instead
   of a front end; see the CSS assets section below.
-- Diagnostics: `Diag { stage, file, line, col, message }` in lib.rs; stages
-  are `lex | parse | type | internal | link | io | asset`. `asset` covers
-  stylesheet problems and is constructed in `lib.rs`/`assets.rs` directly —
-  `codegen_c.rs` is `Result<_, String>` and would flatten it to `internal`.
 
 ## C backend invariants (src/codegen_c.rs; mirrored by selfhost/codegen.ax)
 
@@ -328,8 +324,8 @@ crates/aoxn-pkg       package manager crate (its own dependency set; see above)
   builtin name list (`malloc`, `memcpy`, `strlen`, `snprintf`, …).
 - platform.rs centralizes exe/obj extensions (`exe_ext`/`obj_ext`), the
   Windows stack-link flag (`-Wl,/STACK:8388608`), and `target_os_name()`.
-  Tests must use these helpers, not literals (CI runs the suite on four
-  platforms).
+  Tests must use these helpers, not literals (CI runs the suite on ONE
+  platform, `windows-latest`, since v0.30.0 — the language is Windows-only).
 
 ## Lexer invariants (Python-style layout)
 
@@ -520,8 +516,10 @@ crates/aoxn-pkg       package manager crate (its own dependency set; see above)
   (driver.ax) are the self-hosted `aoxn c`.
 - The Aoxn driver also compiles its own front end
   (`selfhost/driver_frontend_demo.ax`) and the whole `examples/` suite.
-  Next rung: porting `main.rs` CLI semantics (argv is still missing from the
-  language).
+  Next rung: porting `main.rs` CLI semantics. argv reached the LANGUAGE in
+  v0.42.0 (`argc()`/`arg(i)`), but stage-2 does not know those builtins (nor
+  assert/exit/dict/None/fn-ptr/raise) — the mirror is still on the pre-v0.40
+  subset, see the language rules above.
 - CRITICAL value-semantics discipline (the v0.11 segfault): a function
   taking `p: PState`/`c: CState` by value MUST return the struct — local
   `p.n_tag = vec_push(...)` mutations are discarded by the caller. All
@@ -643,8 +641,9 @@ crates/aoxn-pkg       package manager crate (its own dependency set; see above)
 - **C `int` returns arrive zero-extended in i64** (callee writes EAX): -1
   shows up as 4294967295. The sock modules' `i32()` helper maps it back (a
   true 64-bit -1 passes through). SOCKET/pointer returns are full 64-bit.
-- **No `\r` string escape** (`\n`, `\t`, `\\`, `\"` only) — HTTP CRLF is
-  written as raw bytes 13/10 (`bb_crlf`).
+- **`\r` EXISTS since v0.42.0** (six escapes: `\n \t \r \0 \\ \"`). The web
+  layer predates it and still spells CRLF as raw bytes 13/10 (`bb_crlf`) —
+  that works and is not a bug; new code can write `"...\r\n..."` directly.
 - Long-running servers must render into byte buffers (`bb_*` in
   `http_buf.ax`): string concat results leak by design, so per-request concat
   would balloon RSS. This is idiomatic (C-style), not a bug.
@@ -768,9 +767,12 @@ crates/aoxn-pkg       package manager crate (its own dependency set; see above)
   which is exactly the absent-vs-empty distinction the API draws. The
   vendored reference is a FORK whose body has no `temperature`/`top_p`/
   `top_k` — do not add them.
-- **No `\r` escape — again.** Header blocks (HTTP CRLF) and SSE CRLF
-  fixtures must spell byte 13 via `store_u8` (`net_crlf()` in net/http.ax).
-  This bit twice in the OpenAI session and again in the Anthropic one.
+- **`\r` exists since v0.42.0** — the trap below is history. The SDK layers
+  were written when the lexer had only four escapes, so header blocks (HTTP
+  CRLF) and SSE CRLF fixtures still spell byte 13 via `store_u8`
+  (`net_crlf()` in net/http.ax); that is fine, do not churn them. It DID bit
+  twice in the OpenAI session and again in the Anthropic one — which is why
+  the escape now exists.
 - **The JSON serializer failed silently at first**: `j_quote` escaped
   content but never emitted the surrounding `"` — `j_dumps` produced
   `{model:gpt-4o}` (invalid JSON) and the round-trip test crashed on the
