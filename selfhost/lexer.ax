@@ -238,6 +238,39 @@ def parse_int(s: string) -> int:
         i = i + 1
     return v
 
+# `0x`/`0b` literal digits (v0.42.0) — mirrors the Rust lexer's
+# i64::from_str_radix path
+def parse_radix(s: string, radix: int) -> int:
+    v = 0
+    i = 0
+    while i < len(s):
+        c = str_get(s, i)
+        d = c - 48
+        if c >= 97:
+            d = c - 87
+        elif c >= 65:
+            d = c - 55
+        v = v * radix + d
+        i = i + 1
+    return v
+
+def is_radix_digit(c: int, radix: int) -> int:
+    if c < 48:
+        return 0
+    if c <= 57:
+        if c - 48 < radix:
+            return 1
+        return 0
+    if c >= 97 and c <= 102:
+        if c - 87 < radix:
+            return 1
+        return 0
+    if c >= 65 and c <= 70:
+        if c - 55 < radix:
+            return 1
+        return 0
+    return 0
+
 # ---- lexer state (tokens included) ----
 
 struct LexState:
@@ -484,6 +517,27 @@ def lex_all(st0: LexState) -> LexState:
 
         # ---- numbers ----
         if c >= 48 and c <= 57:
+            # radix prefixes (v0.42.0): 0x/0X hex, 0b/0B binary
+            radix = 0
+            if c == 48:
+                nx = peek_byte(st, 1)
+                if nx == 120 or nx == 88:
+                    radix = 16
+                elif nx == 98 or nx == 66:
+                    radix = 2
+            if radix != 0:
+                st = bump(st)
+                st = bump(st)
+                dstart = st.pos
+                while is_radix_digit(cur_byte(st), radix) == 1:
+                    st = bump(st)
+                if st.pos == dstart:
+                    st = emit(st, TK_ERROR(), 0, "radix literal needs at least one digit")
+                    st.error = 1
+                    break
+                rtext = str_slice(st.src, dstart, st.pos - dstart)
+                st = emit(st, TK_INT(), parse_radix(rtext, radix), rtext)
+                continue
             start = st.pos
             while True:
                 d = cur_byte(st)
@@ -531,6 +585,10 @@ def lex_all(st0: LexState) -> LexState:
                         sval = sval + chr_str(10)
                     elif esc == 116:
                         sval = sval + chr_str(9)
+                    elif esc == 114:
+                        sval = sval + chr_str(13)
+                    elif esc == 48:
+                        sval = sval + chr_str(0)
                     elif esc == 92:
                         sval = sval + chr_str(92)
                     elif esc == 34:

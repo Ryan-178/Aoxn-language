@@ -193,6 +193,35 @@ implicitly, conditions must be `bool`, array indexing is unchecked (C-style),
 and every function must return a value on all paths. Strictness is a feature:
 the guarantees are simple enough for a machine to reason about.
 
+### v0.42.0 on the surface
+
+```Aoxn
+def main() -> int:
+    assert(0x1F == 31)          # hex / binary literals — malformed ones name
+    assert(0b101 == 5)          #   the offending digit instead of "unknown variable 'x10'"
+
+    i = 0
+    while i < argc():           # command-line arguments: count + 0-based get
+        print(arg(i))
+        i = i + 1
+
+    if argc() == 0:
+        exit(2)                 # explicit status, from anywhere
+
+    s = "line\r\n"              # \r and \0 join \n \t \\ \" (six escapes)
+    print(len(s))               # 6 — CR and LF are real bytes
+    return 0
+```
+
+`assert` aborts with the source line (not catchable — `raise` is for that),
+`exit(code)` sets the status, `argc()`/`arg(i)` read what `aoxn run app.ax --
+a b` forwarded, and `main` itself takes no parameters. The compiler also has a
+**warning tier** now: `W001` reports a local that is assigned and never read
+without failing the build, `--json` returns `{"ok":…,"errors":[…],"warnings":[…]}`
+on success too, and `--clang-arg`/`-g` forwards flags to clang (debug info,
+`-fsanitize=undefined`) — with a failed C compile reported as the `cc` stage
+rather than `internal`.
+
 ## Standard library and the UI toolkit
 
 `stdlib/stdlib.ax` is written in Aoxn itself: generic `sort` /
@@ -458,12 +487,12 @@ program. It also compiles the real stdlib and the full `examples/` suite. See
 
 ## Testing & CI
 
-`cargo test` runs the end-to-end suite — 246 tests in the compiler workspace
-(pipeline 126, compiler unit tests 17, TypeScript front end 34, UI 9, install
+`cargo test` runs the end-to-end suite — 261 tests in the compiler workspace
+(pipeline 141, compiler unit tests 20, TypeScript front end 34, UI 9, install
 layout 6, CSS assets 21, CSS assets v0.36 18, symbol export 8, OpenAI SDK 2,
 Anthropic SDK 2, installer 3)
 plus the `aoxn-pkg`
-crate's 94 via `bash run_pkg_tests.sh`, 340 in
+crate's 94 via `bash run_pkg_tests.sh`, 355 in
 
 total — where every
 pipeline test compiles
@@ -600,10 +629,26 @@ Full reference, including limits: [`docs/css-assets.md`](docs/css-assets.md).
 
 ## Status
 
-**v0.41.0** · **Windows only** · 340 tests green
-(pipeline 126 + lib 17 + assets 21 + assets_v36 18 + symbols 8 + TS 34 + UI 9 +
+**v0.42.0** · **Windows only** · 355 tests green
+(pipeline 141 + lib 20 + assets 21 + assets_v36 18 + symbols 8 + TS 34 + UI 9 +
 OpenAI SDK 2 + Anthropic SDK 2 + install 6 + setup 3 + aoxn-pkg 94; the IDE
 adds 36 Rust + 62 frontend tests of its own) ·
+**the everyday gaps close** (v0.42.0) — radix integer literals
+(`0x1F` / `0b101`; before, `0x10` lexed as `0` + the identifier `x10` and the
+error pointed at nothing), the two missing string escapes (`\r` — the byte the
+HTTP/SSE layers had been writing by hand — and `\0` for byte buffers),
+**`assert(cond[, message])`** with the source line baked into the report,
+**`exit(code)`**, and **command-line arguments via `argc()` / `arg(i)`** — the
+oldest item on the language-gaps list, closed without touching `main`'s shape
+(`def main(argc: int)` is now a compile error that names the builtins instead
+of an `internal` clang failure). The toolchain learns `--clang-arg`/`-g`
+(forwarded to every clang invocation and part of the cache key),
+`--cc-warnings` (drop the hard-coded `-w`), a **`cc` diagnostic stage** for
+C-compiler failures, and a **warning tier**: `Diag` carries a severity and a
+stable code, `W001` reports assigned-but-never-read locals, and `--json`
+returns `{"ok":…,"errors":[…],"warnings":[…]}` on success too. The generated C
+of a program using none of this is byte-identical, so the self-host fixed
+point holds without a `selfhost/codegen.ax` mirror ·
 **the Anthropic SDK lands in the stdlib, and the transport becomes shared**
 (v0.41.0) — `stdlib/anthropic/` (blocks / tools / client, ~1.7k lines of
 plain Aoxn) covers the Messages API including **tool use** end to end:
@@ -829,6 +874,34 @@ cargo run -- build examples\fib.ax --O0   # clang -O0
 数组索引不检查（C 风格），函数所有路径必须返回。严格是特性：保证简单到机器
 可以推理。
 
+### v0.42.0 在语言面上加了什么
+
+```Aoxn
+def main() -> int:
+    assert(0x1F == 31)          # 十六进制 / 二进制字面量；写错时报
+    assert(0b101 == 5)          #   「invalid digit」而不是「unknown variable 'x10'」
+
+    i = 0
+    while i < argc():           # 命令行参数：个数 + 按下标取
+        print(arg(i))
+        i = i + 1
+
+    if argc() == 0:
+        exit(2)                 # 显式退出码，任何位置
+
+    s = "line\r\n"              # \r 与 \0 加入转义集（共六个）
+    print(len(s))               # 6 —— CR/LF 是真实字节
+    return 0
+```
+
+`assert` 失败即中止并带源行号（不可捕获——那是 `raise` 的事）、`exit(code)`
+设退出码、`argc()`/`arg(i)` 读到 `aoxn run app.ax -- a b` 转发的参数、
+`main` 本身不带参数。编译器也有了**警告层**：`W001` 报「赋值后从未读取」的
+局部变量且不使构建失败；`--json` 在成功时也返回
+`{"ok":…,"errors":[…],"warnings":[…]}`；`--clang-arg`/`-g` 透传给 clang
+（调试信息、`-fsanitize=undefined`）——C 编译失败现在是 `cc` 阶段，
+不再是 `internal`。
+
 ## 标准库与 UI 工具箱
 
 `stdlib/stdlib.ax` 用 Aoxn 自己写成：泛型 `sort` / `binary_search` / 聚合、
@@ -1018,11 +1091,11 @@ Web 服务同样能打：[`web/`](web/README.md) 套件用 Aoxn 写了 HTTP/1.1 
 
 ## 测试与 CI
 
-`cargo test` 跑端到端测试套件——编译器工作区 246 个（pipeline 126、编译器单元
-测试 17、TypeScript 前端 34、UI 9、安装布局 6、CSS 资产 21、CSS 资产 v0.36 18、
+`cargo test` 跑端到端测试套件——编译器工作区 261 个（pipeline 141、编译器单元
+测试 20、TypeScript 前端 34、UI 9、安装布局 6、CSS 资产 21、CSS 资产 v0.36 18、
 符号导出 8、OpenAI SDK 2、Anthropic SDK 2、安装器 3），另有 `aoxn-pkg` crate 的
 94 个经
-`bash run_pkg_tests.sh` 运行，合计 340 个——每个 pipeline 测试都是 .ax → 可执行
+`bash run_pkg_tests.sh` 运行，合计 355 个——每个 pipeline 测试都是 .ax → 可执行
 
 文件 → 运行 → 断言 stdout 与退出码。
 其中含自举固定点：stage-1 与 stage-2 编译器对同一程序必须产出逐字节一致的
@@ -1142,10 +1215,22 @@ print(asset_path(styles_fingerprint()))   # …\assets\82b4fb25….css
 
 ## 现状
 
-**v0.41.0** · **只支持 Windows** · 340 测试全绿
-（pipeline 126 + lib 17 + assets 21 + assets_v36 18 + symbols 8 + TS 34 + UI 9 +
+**v0.42.0** · **只支持 Windows** · 355 测试全绿
+（pipeline 141 + lib 20 + assets 21 + assets_v36 18 + symbols 8 + TS 34 + UI 9 +
 OpenAI SDK 2 + Anthropic SDK 2 + 安装布局 6 + setup 3 + aoxn-pkg 94；IDE 另有
 36 个 Rust + 62 个前端测试）·
+**日常缺口闭合**（v0.42.0）——进制整数字面量（`0x1F` / `0b101`；此前 `0x10`
+会被切成 `0` 加标识符 `x10`，报错指向一个不存在的东西）、缺的两个字符串转义
+（`\r`——各 HTTP/SSE 层一直在手写的那个字节——和给字节缓冲用的 `\0`）、
+**`assert(cond[, message])`**（报告里带源行号）、**`exit(code)`**，以及**经
+`argc()` / `arg(i)` 读取命令行参数**——语言缺口清单上最老的一条，且没有动
+`main` 的形状（`def main(argc: int)` 现在是编译错误并指名这两个内建，而不是
+在 clang 里炸成 `internal`）。工具链新增 `--clang-arg`/`-g`（透传给每一次
+clang 调用并计入缓存键）、`--cc-warnings`（去掉写死的 `-w`）、C 编译失败的
+**`cc` 诊断阶段**，以及**警告层**：`Diag` 带 severity 与稳定错误码，`W001`
+报「赋值后从未读取」的局部变量，`--json` 在成功时也返回
+`{"ok":…,"errors":[…],"warnings":[…]}`。不用新特性的程序，生成的 C 逐字节
+不变，因此自举固定点无需 `selfhost/codegen.ax` 镜像即成立 ·
 **Anthropic SDK 进驻标准库，传输层同时被共享**（v0.41.0）——
 `stdlib/anthropic/`（blocks / tools / client，约 1.7k 行纯 Aoxn）覆盖 Messages
 API 且**工具调用**完整闭环：内容块（text、image、document、thinking、

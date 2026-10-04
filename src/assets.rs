@@ -33,7 +33,7 @@ use std::path::{Path, PathBuf};
 pub const STAGE: &str = "asset";
 
 fn err(file: u32, line: usize, col: usize, message: impl Into<String>) -> crate::Diag {
-    crate::Diag { stage: STAGE, file, line, col, message: message.into() }
+    crate::Diag::at(STAGE, file, line, col, message)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

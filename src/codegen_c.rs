@@ -32,6 +32,7 @@ use std::path::Path;
 
 use crate::ast::*;
 use crate::hashing::FastBuild;
+use crate::Diag;
 
 type Locals = HashMap<String, Type, FastBuild>;
 
@@ -185,19 +186,31 @@ pub fn generate_to_object(
     obj_path: &Path,
     opt_level: u8,
     call_map: &HashMap<usize, String>,
-) -> Result<(), String> {
-    let text = generate_c_text(program, call_map)?;
+) -> Result<(), Diag> {
+    let text = generate_c_text(program, call_map).map_err(Diag::internal)?;
     if std::env::var("AOXN_DUMP_C").is_ok() {
         eprintln!("{text}");
     }
     let c_path = obj_path.with_extension("c");
     std::fs::write(&c_path, &text)
-        .map_err(|e| format!("internal error: cannot write {}: {e}", c_path.display()))?;
+        .map_err(|e| Diag::internal(format!("cannot write {}: {e}", c_path.display())))?;
 
     let clang = crate::find_clang()
-        .ok_or_else(|| "internal error: cannot find clang for the C backend".to_string())?;
+        .ok_or_else(|| Diag::cc("cannot find clang for the C backend (set AOXN_CLANG or add LLVM to PATH)"))?;
     let mut cmd = std::process::Command::new(&clang);
-    cmd.arg(format!("-O{}", opt_level.min(3))).arg("-w");
+    cmd.arg(format!("-O{}", opt_level.min(3)));
+    // clang's own warnings are off by default: the emitted C is machine text
+    // and `-w` keeps it (and the user) quiet. `--cc-warnings` turns them back
+    // on, which is how a wrong `extern def` signature becomes visible instead
+    // of merely failing at the call site (v0.42.0).
+    let cc_warnings = crate::cc_warnings_enabled();
+    if !cc_warnings {
+        cmd.arg("-w");
+    }
+    // `--clang-arg` passthrough (v0.42.0): -g, -fsanitize=*, -fno-strict-aliasing, ...
+    for a in crate::extra_clang_args() {
+        cmd.arg(a);
+    }
     // mirror the LLVM backend's AOXN_CPU handling; clang spells it -march on
     // x86 and -mcpu elsewhere, and unlike the LLVM-C API it does accept
     // "native" (the v0.26.3 C-API limitation does not apply here)
@@ -213,18 +226,24 @@ pub fn generate_to_object(
     cmd.arg("-c").arg(&c_path).arg("-o").arg(obj_path);
     let out = cmd
         .output()
-        .map_err(|e| format!("internal error: failed to spawn {}: {e}", clang.display()))?;
+        .map_err(|e| Diag::cc(format!("failed to spawn {}: {e}", clang.display())))?;
     if !out.status.success() {
         // keep the generated C around for debugging
         let stderr = String::from_utf8_lossy(&out.stderr);
         let lines: Vec<&str> = stderr.lines().collect();
         let start = lines.len().saturating_sub(12);
-        return Err(format!(
-            "internal error: C backend clang failed with exit code {:?}; generated C kept at {}\n{}",
+        return Err(Diag::cc(format!(
+            "clang failed with exit code {:?}; generated C kept at {}\n{}",
             out.status.code(),
             c_path.display(),
             lines[start..].join("\n")
-        ));
+        )));
+    }
+    if cc_warnings {
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        if !stderr.trim().is_empty() {
+            eprint!("{stderr}");
+        }
     }
     let _ = std::fs::remove_file(&c_path);
     Ok(())
@@ -287,6 +306,13 @@ struct GenC<'a> {
     used_str_i: bool,
     used_str_f: bool,
     used_raw: bool,
+    /// `assert`/`exit` need the exit shim (`void exit(int)` is declared, never
+    /// included: the generated C has no standard headers)
+    used_exit: bool,
+    /// `argc()`/`arg(i)` need the argv globals AND the `main(argc, argv)`
+    /// wrapper; a program that does not ask for its arguments keeps the
+    /// byte-identical `int main(void)` text (v0.42.0)
+    used_argv: bool,
 }
 
 impl<'a> GenC<'a> {
@@ -316,6 +342,8 @@ impl<'a> GenC<'a> {
             used_str_i: false,
             used_str_f: false,
             used_raw: false,
+            used_exit: false,
+            used_argv: false,
         };
         for s in &program.structs {
             g.struct_names.insert(s.name.clone());
@@ -626,6 +654,26 @@ impl<'a> GenC<'a> {
             s.push('\n');
         }
 
+        // assert/exit (v0.42.0): the generated C never includes a header, so
+        // the one libc function they need is declared here. `exit` is a real
+        // C symbol with a fixed signature; the shim keeps the call site typed
+        // and gives `assert` a single place to abort from.
+        if self.used_exit {
+            s.push_str(
+                "void exit(int);\n\
+                 static void ax_exit(long long code) { exit((int)code); }\n\n",
+            );
+        }
+        // argc()/arg(i) (v0.42.0): the wrapper `main` fills these; `ax_arg`
+        // returns "" past the end instead of reading out of bounds.
+        if self.used_argv {
+            s.push_str(
+                "static long long ax_argc = 0;\n\
+                 static char** ax_argv = 0;\n\
+                 static const char* ax_arg(long long i) { return (i >= 0 && i < ax_argc) ? ax_argv[i + 1] : \"\"; }\n\n",
+            );
+        }
+
         for p in &protos {
             s.push_str(p);
             s.push_str(";\n");
@@ -648,9 +696,23 @@ impl<'a> GenC<'a> {
         } else {
             "    aoxn_main();\n    return 0;\n".to_string()
         };
+        // The wrapper main takes `argc`/`argv` only when the program asked for
+        // its arguments (v0.42.0). That keeps every other program's C text —
+        // and therefore the self-host fixed point — byte-identical, and it
+        // means the second compiler only has to learn argv when it learns the
+        // two builtins.
+        let (main_sig, main_prologue) = if self.used_argv {
+            (
+                "int main(int argc, char** argv) {",
+                "    ax_argc = (long long)(argc - 1);\n    ax_argv = argv;\n",
+            )
+        } else {
+            ("int main(void) {", "")
+        };
         s.push_str(&format!(
             "#ifdef _WIN32\nlong long _setmode(long long, long long);\n#endif\n\n\
-             int main(void) {{\n\
+             {main_sig}\n\
+             {main_prologue}\
              #ifdef _WIN32\n    _setmode(1, 0x8000);\n#endif\n\
              {main_call}}}\n"
         ));
@@ -1766,6 +1828,55 @@ fn block_returns_all(block: &Block) -> bool {
         let name: &str = routed.unwrap_or(name);
         let _ = pos;
 
+        // assert / exit / command-line arguments (v0.42.0)
+        if name == "assert" {
+            if args.is_empty() || args.len() > 2 {
+                return Err("internal error: assert expects 1 or 2 arguments".into());
+            }
+            self.used_exit = true;
+            self.out.push_str("if (!(");
+            self.emit_expr_inner(&args[0].value)?;
+            self.out.push_str(")) { ");
+            // the source line is baked in: it is a function of the source, and
+            // an assertion that does not say where it fired is half useless
+            if args.len() == 2 {
+                self.out.push_str(&format!(
+                    "__builtin_printf(\"assertion failed at line {0}: %s\\n\", ",
+                    pos.line
+                ));
+                self.emit_expr_inner(&args[1].value)?;
+                self.out.push(')');
+            } else {
+                self.out.push_str(&format!("__builtin_printf(\"assertion failed at line {}\\n\")", pos.line));
+            }
+            self.out.push_str("; ax_exit(1); }");
+            return Ok(Type::Void);
+        }
+        if name == "exit" {
+            if args.len() != 1 {
+                return Err("internal error: exit expects 1 argument".into());
+            }
+            self.used_exit = true;
+            self.out.push_str("ax_exit(");
+            self.emit_expr_inner(&args[0].value)?;
+            self.out.push(')');
+            return Ok(Type::Void);
+        }
+        if name == "argc" {
+            self.used_argv = true;
+            self.out.push_str("ax_argc");
+            return Ok(Type::Int);
+        }
+        if name == "arg" {
+            if args.len() != 1 {
+                return Err("internal error: arg expects 1 argument".into());
+            }
+            self.used_argv = true;
+            self.out.push_str("ax_arg(");
+            self.emit_expr_inner(&args[0].value)?;
+            self.out.push(')');
+            return Ok(Type::Str);
+        }
         if name == "print" {
             if args.len() != 1 {
                 return Err("internal error: print expects 1 argument".into());
@@ -2246,6 +2357,16 @@ if matches!(op, Is | IsNot) {
                 }
                 if eff == "to_float" {
                     return Ok(Type::Float);
+                }
+                // v0.42.0 builtins
+                if eff == "argc" {
+                    return Ok(Type::Int);
+                }
+                if eff == "arg" {
+                    return Ok(Type::Str);
+                }
+                if eff == "assert" || eff == "exit" {
+                    return Ok(Type::Void);
                 }
                 if eff == "target_os" || eff == "as_string" {
                     return Ok(Type::Str);

@@ -5,6 +5,85 @@ minor bumps while pre-1.0: each minor version is a language milestone.
 
 ## [Unreleased]
 
+## [0.42.0] - 2026-10-04
+
+Theme: **the everyday gaps close.** Four batches of small, high-frequency
+language and toolchain work that the gap analysis ranked as P0/P1: the
+spelling layer (radix literals, `\r`/`\0`), program I/O (`assert`, `exit`,
+command-line arguments), the toolchain's escape hatches (`--clang-arg`, a `cc`
+diagnostic stage), and a **warning tier** in the diagnostics contract. No
+existing program changes meaning; the generated C for a program that uses none
+of the new surface is byte-identical (the self-host fixed point still holds).
+
+### Added
+
+- **Radix integer literals**: `0x`/`0X` hexadecimal and `0b`/`0B` binary.
+  Before this, `0x10` lexed as `0` followed by the identifier `x10` and the
+  type checker reported `unknown variable 'x10'` — an error that pointed at
+  nothing. A malformed literal now names the offending digit (`invalid digit
+  'Z' in hexadecimal literal`), a bare `0x` says it needs a digit, and an
+  out-of-range value names the maximum in its own radix. Mirrored in
+  `selfhost/lexer.ax` (`parse_radix` / `is_radix_digit`) and pinned by a new
+  parity test against the Rust lexer.
+- **`\r` and `\0` string escapes** (so six: `\n \t \r \0 \\ \"`). `\r` replaces
+  the `store_u8(s, i, 13)` dance every HTTP/SSE layer had been doing — the
+  AGENTS notes record that trap being hit in three separate sessions. `\0`
+  spells a NUL for byte buffers; it does **not** make a string binary-safe
+  (`len()` is `strlen`), which the spec now states where the escapes live.
+- **`assert(cond)` / `assert(cond, message)`**: a runtime check that prints
+  `assertion failed at line N: message` and exits 1. It is not catchable
+  (unlike `raise`), does not affect the all-paths-return rule, and bakes the
+  source line into the C text. This is the assertion the 46 planned stdlib
+  modules had no way to write.
+- **`exit(code)`**: terminate with an explicit status. Until now a program
+  could only return from `main` or raise (which always exits 1).
+- **Command-line arguments: `argc()` and `arg(i)`** — the oldest item on the
+  language-gaps list (D1). `argc()` counts the arguments the program was
+  invoked with, excluding the program path; `arg(i)` is 0-based and yields `""`
+  past the end rather than raising. `Aoxn run app.ax -- a b` now reaches the
+  program (the CLI had been forwarding those arguments all along; `int
+  main(void)` simply could not read them).
+- **`main` signature validation**: `main` takes no parameters and returns
+  `int` or `void`. Declaring `def main(argc: int)` used to pass the type
+  checker and then die inside clang as an `internal` error; it is now a
+  `type` diagnostic that names `argc()`/`arg(i)`. (The TS front end's
+  `function main(): number` keeps its own contract and is exempt.)
+- **`--clang-arg <flag>` (repeatable) and `-g`**: forward flags to every clang
+  invocation, compile and link alike — debug info, `-fsanitize=undefined`,
+  `-fno-strict-aliasing`. `AOXN_CLANG_ARGS` is the env-var form. The flags join
+  the cache key, so switching them rebuilds instead of reusing a stale exe.
+- **`--cc-warnings`** (or `AOXN_CC_WARNINGS=1`): drop the hard-coded `-w` and
+  show clang's warnings about the emitted C. A wrong `extern def` signature
+  now says so (`incompatible redeclaration of library function 'strlen'`)
+  instead of failing mysteriously at the call site.
+- **The `cc` diagnostic stage**: a C-compiler failure is `[cc]`, not
+  `[internal]` — it is nearly always a user-written `extern def` that
+  contradicts a C declaration, and the message keeps clang's own text plus the
+  path of the retained `.c` file.
+- **A warning tier**: `Diag` carries a `severity` and an optional stable
+  `code`; warnings never fail a build. `W001` reports a local that is bound and
+  never read. Text mode prints them on stderr; `--json` returns
+  `{"ok":…,"errors":[…],"warnings":[…]}` **on success too**, so a caller never
+  has to parse human output. The report also gained `severity`/`code` fields.
+  Running the new lint over the repository found and removed one real dead
+  variable (`stdlib/ui_draw.ax`'s `sel_y`, written twice and never read).
+
+### Changed
+
+- `aoxn check`/`c`/`build`/`run` print collected warnings on success (stderr;
+  stdout stays the program's or the C text's). A cache hit re-prints nothing:
+  the warnings belong to the compile that produced them.
+- `docs/spec.md` gains the literal/escape/builtin/`main`/tooling sections and
+  its header finally matches the version. The diagnostics-stage list adds
+  `asset` (missing since v0.34.0) and `cc`.
+- `crates/aoxn-pkg`'s version moves to 0.42.0: it had drifted to 0.40.0 while
+  the compiler reached 0.41.0, which quietly falsified the
+  `IndexVersion.aoxn` minimum-compiler-version field it records.
+
+### Fixed
+
+- `def main(argc: int)` no longer reaches clang.
+
 ## [0.41.0] - 2026-10-05
 
 Theme: **the Anthropic SDK lands in the stdlib, and the transport becomes

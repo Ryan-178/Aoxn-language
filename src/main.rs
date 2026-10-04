@@ -46,6 +46,12 @@ struct Opts {
     /// codegen backend; only "c" exists since v0.29.0 (the flag is accepted
     /// for compatibility with v0.27.x/v0.28.x command lines)
     backend: Option<String>,
+    /// extra flags forwarded verbatim to every clang invocation (v0.42.0),
+    /// e.g. `-g`, `-fsanitize=undefined`, `-fno-strict-aliasing`
+    clang_args: Vec<String>,
+    /// show clang's own warnings about the generated C (drops the hard-coded
+    /// `-w`) — this is how a wrong `extern def` signature becomes visible
+    cc_warnings: bool,
 }
 
 fn parse_opts(args: &[String]) -> Opts {
@@ -61,6 +67,8 @@ fn parse_opts(args: &[String]) -> Opts {
         libs: Vec::new(),
         lib_paths: Vec::new(),
         backend: None,
+        clang_args: Vec::new(),
+        cc_warnings: false,
     };
     let mut level_flags = 0usize;
     let mut i = 0;
@@ -127,6 +135,21 @@ fn parse_opts(args: &[String]) -> Opts {
                 opts.json = true;
                 i += 1;
             }
+            // clang passthrough (v0.42.0): `--clang-arg -g` reaches both the
+            // compile and the link step; `-g` alone is the common case, so it
+            // is spelled as its own flag
+            "--clang-arg" if i + 1 < args.len() => {
+                opts.clang_args.push(args[i + 1].clone());
+                i += 2;
+            }
+            "-g" => {
+                opts.clang_args.push("-g".to_string());
+                i += 1;
+            }
+            "--cc-warnings" => {
+                opts.cc_warnings = true;
+                i += 1;
+            }
             "--" => {
                 opts.passthrough = args[i + 1..].to_vec();
                 break;
@@ -144,6 +167,16 @@ fn parse_opts(args: &[String]) -> Opts {
     // target CPU for the C compile (e.g. `native`); also settable via AOXN_CPU
     if let Some(cpu) = &opts.cpu {
         std::env::set_var("AOXN_CPU", cpu);
+    }
+    // `--clang-arg` / `-g` travel to codegen and the link step through one
+    // env var (`AOXN_CLANG_ARGS`, newline-separated so a flag may contain
+    // spaces), the same way `--cpu` does — no pipeline signature has to grow
+    // an argument for it.
+    if !opts.clang_args.is_empty() {
+        std::env::set_var("AOXN_CLANG_ARGS", opts.clang_args.join("\n"));
+    }
+    if opts.cc_warnings {
+        std::env::set_var("AOXN_CC_WARNINGS", "1");
     }
     // `--tailwind` is a build-time source scan, not a codegen switch, so it
     // travels to the loader the same way --cpu does rather than threading a
@@ -230,10 +263,29 @@ fn print_help() {
 }
 
 fn report(diags: &[Diag], json: bool) {
+    // a failed compile still owns any warnings collected before the error
+    let warnings = aoxn::take_warnings();
     if json {
-        eprintln!("{}", aoxn::diags_to_json(diags));
+        eprintln!("{}", aoxn::report_to_json(diags, &warnings));
     } else {
+        for d in &warnings {
+            eprintln!("{}", aoxn::diag_to_string(d));
+        }
         for d in diags {
+            eprintln!("{}", aoxn::diag_to_string(d));
+        }
+    }
+}
+
+/// Report a SUCCESSFUL compile: warnings only, plus the report document when
+/// `--json` asked for machine output. Always on stderr — stdout belongs to the
+/// program (`run`) or to the C text (`c`).
+fn report_ok(json: bool) {
+    let warnings = aoxn::take_warnings();
+    if json {
+        eprintln!("{}", aoxn::report_to_json(&[], &warnings));
+    } else {
+        for d in &warnings {
             eprintln!("{}", aoxn::diag_to_string(d));
         }
     }
@@ -294,6 +346,9 @@ fn cmd_build(args: &[String]) {
         report(&diags, opts.json);
         std::process::exit(1);
     }
+    // the compile produced the warnings; drain them before the asset step
+    // (which re-runs the loader and would otherwise be reported against)
+    report_ok(opts.json);
 
     match &cache_path {
         Some(final_path) => {
@@ -411,6 +466,8 @@ fn cmd_run(args: &[String]) {
         report(&diags, opts.json);
         std::process::exit(1);
     }
+    // warnings belong to the compile, not to the program's own output
+    report_ok(opts.json);
 
     let exe = match &cache_path {
         Some(final_path) => {
@@ -438,7 +495,11 @@ fn cmd_c(args: &[String]) {
         std::process::exit(2);
     }
     match aoxn::compile_paths_to_c_lvl(&opts.positional, opts.opt_level) {
-        Ok(text) => print!("{text}"),
+        Ok(text) => {
+            // warnings first: stdout is the C text, stderr is the metadata
+            report_ok(opts.json);
+            print!("{text}")
+        }
         Err(diags) => {
             report(&diags, opts.json);
             std::process::exit(1);
@@ -457,7 +518,7 @@ fn cmd_check(args: &[String]) {
         std::process::exit(2);
     }
     match aoxn::compile_paths_to_c_lvl(&opts.positional, opts.opt_level) {
-        Ok(_) => {}
+        Ok(_) => report_ok(opts.json),
         Err(diags) => {
             report(&diags, opts.json);
             std::process::exit(1);
@@ -591,6 +652,9 @@ fn cache_key(opts: &Opts) -> Option<String> {
     // every option that changes generated code
     opts.opt_level.hash(&mut h);
     std::env::var("AOXN_CPU").unwrap_or_default().hash(&mut h);
+    // clang flags change the OBJECT, so they belong in the key (v0.42.0)
+    opts.clang_args.hash(&mut h);
+    std::env::var("AOXN_CC_WARNINGS").unwrap_or_default().hash(&mut h);
     opts.libs.hash(&mut h);
     opts.lib_paths.hash(&mut h);
     // linked-in toolchain identity (cheap: the resolved clang path)

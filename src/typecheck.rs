@@ -69,6 +69,12 @@ pub struct Tc<'a> {
     instances: Vec<FnDecl>,
     /// AOXN_TC_TRACE, read once per compile (not per function)
     trace: bool,
+    /// locals bound in the function being checked — `x = e` first bindings and
+    /// annotated `x: T = e`. Loop variables and parameters are deliberately
+    /// NOT collected: `for _ in range(n)` is a legitimate way to count.
+    local_decls: Vec<(String, usize, usize)>,
+    /// locals READ somewhere in the function being checked (W001)
+    local_reads: HashSet<String>,
 }
 
 pub struct CheckOutput {
@@ -79,6 +85,9 @@ pub struct CheckOutput {
 }
 
 pub fn check(program: &Program) -> Result<CheckOutput, Diag> {
+    // a fresh compile owns the warning channel (warnings cannot ride the
+    // `Result`, so they are collected thread-locally and drained by the caller)
+    crate::clear_warnings();
     let structs = collect_structs(&program.structs)?;
     let mut sigs: SigMap = HashMap::default();
     let mut generics: GenMap = HashMap::default();
@@ -86,10 +95,45 @@ pub fn check(program: &Program) -> Result<CheckOutput, Diag> {
     // pass 1: concrete functions (signatures first, enables mutual recursion)
     for f in &program.funcs {
         if !f.type_params.is_empty() {
+            if f.name == "main" {
+                return Err(Diag::at("type", f.pos.file, f.pos.line, f.pos.col, "'main' cannot be generic"));
+            }
             continue;
         }
         if f.is_extern && f.name == "main" {
             return Err(Diag::at("type", f.pos.file, f.pos.line, f.pos.col, "'main' cannot be declared extern"));
+        }
+        // `main` is the one function whose signature the runtime fixes. Before
+        // v0.42.0 a parameterized `main` passed this pass and then died inside
+        // clang ("too few arguments to function call") as an `internal` error,
+        // which blamed the compiler for a source-level mistake.
+        if f.name == "main" {
+            if !f.params.is_empty() {
+                return Err(Diag::at(
+                    "type",
+                    f.pos.file,
+                    f.pos.line,
+                    f.pos.col,
+                    "'main' cannot take parameters; read the command line with argc() / arg(i)",
+                ));
+            }
+            // The return-type rule is an Aoxn rule. The TS front end lowers
+            // `function main(): number` to a float-returning main (number is
+            // f64 there) and discards the value, which is its own contract —
+            // so it is exempt rather than forced to rewrite every TS sample.
+            let from_ts = {
+                let name = crate::files::name(f.pos.file).to_ascii_lowercase();
+                name.ends_with(".ts") || name.ends_with(".tsx")
+            };
+            if !from_ts && !matches!(f.ret, Type::Int | Type::Void) {
+                return Err(Diag::at(
+                    "type",
+                    f.pos.file,
+                    f.pos.line,
+                    f.pos.col,
+                    format!("'main' must return int (the exit code) or void, found {}", f.ret),
+                ));
+            }
         }
         if sigs.contains_key(&f.name) {
             return Err(Diag::at("type", f.pos.file, f.pos.line, f.pos.col, format!("function '{}' is defined more than once", f.name)));
@@ -174,6 +218,8 @@ pub fn check(program: &Program) -> Result<CheckOutput, Diag> {
         done: HashSet::new(),
         instances: Vec::new(),
         trace: std::env::var("AOXN_TC_TRACE").is_ok(),
+        local_decls: Vec::new(),
+        local_reads: HashSet::new(),
     };
 
     // pass 3: check concrete non-extern bodies
@@ -219,6 +265,9 @@ impl<'a> Tc<'a> {
         // so a map preserves the old reversed-linear-scan semantics
         let mut scopes: Scopes =
             f.params.iter().map(|p| (p.name.clone(), p.ty.clone())).collect();
+        // per-function warning state (W001): what was bound, what was read
+        self.local_decls.clear();
+        self.local_reads.clear();
         let returns_all = self.check_block(&f.body, f, &mut scopes, 0, 0)?;
         // strict rule: non-void functions must return a value on every path
         if f.ret != Type::Void && !returns_all {
@@ -226,6 +275,23 @@ impl<'a> Tc<'a> {
                     "function '{}' returns {} but does not return a value on all paths",
                     f.name, f.ret
                 )));
+        }
+        // W001 — a binding that is never read. Typechecking a local that is
+        // only ever written is almost always a leftover from an edit, and
+        // "unused" is the one lint the AI repair loop wants most: it is
+        // machine-checkable with no false-positive risk in this language
+        // (bindings are function-scoped and cannot be exported).
+        for (name, line, col) in &self.local_decls {
+            if !self.local_reads.contains(name) {
+                crate::push_warning(Diag::warn(
+                    "type",
+                    f.pos.file,
+                    *line,
+                    *col,
+                    "W001",
+                    format!("unused variable '{name}' (assigned but never read)"),
+                ));
+            }
         }
         Ok(())
     }
@@ -311,6 +377,8 @@ impl<'a> Tc<'a> {
                         } else {
                             scopes.insert(name.clone(), t);
                         }
+                        // W001 bookkeeping: this is a NEW local, not a re-assignment
+                        self.local_decls.push((name.clone(), pos.line, pos.col));
                     }
                 }
                 Ok(())
@@ -572,7 +640,13 @@ impl<'a> Tc<'a> {
             Expr::Bool(..) => Ok(Type::Bool),
             Expr::NoneLit(..) => Ok(Type::None),
             Expr::Var { name, pos } => match scopes.get(name).cloned() {
-                Some(t) => Ok(t),
+                Some(t) => {
+                    // W001: reading a local counts as a use. `x += e` reaches
+                    // here through the parser's desugaring (`x = x + e`), so
+                    // augmented assignment counts too.
+                    self.local_reads.insert(name.clone());
+                    Ok(t)
+                }
                 // a bare function name in value position is its address
                 // (v0.40.0): `cb = handler` yields a function pointer typed by
                 // the declaration. Locals shadow globals because `scopes` is
@@ -722,6 +796,49 @@ impl<'a> Tc<'a> {
             }
             Expr::Call { name, args, pos, .. } => {
                 // builtins first (they are not in the function table)
+                // assert / exit / command-line arguments (v0.42.0)
+                if name == "assert" {
+                    if args.is_empty() || args.len() > 2 || args.iter().any(|a| a.name.is_some()) {
+                        return Err(self.err(pos.line, pos.col, "assert expects (condition: bool[, message: string])"));
+                    }
+                    let ct = self.check_expr(&args[0].value, scopes)?;
+                    if ct != Type::Bool {
+                        return Err(self.err(pos.line, pos.col, format!("assert condition must be bool, found {ct}")));
+                    }
+                    if args.len() == 2 {
+                        let mt = self.check_expr(&args[1].value, scopes)?;
+                        if mt != Type::Str {
+                            return Err(self.err(pos.line, pos.col, format!("assert message must be string, found {mt}")));
+                        }
+                    }
+                    return Ok(Type::Void);
+                }
+                if name == "exit" {
+                    if args.len() != 1 || args[0].name.is_some() {
+                        return Err(self.err(pos.line, pos.col, "exit expects exactly 1 positional argument (code: int)"));
+                    }
+                    let t = self.check_expr(&args[0].value, scopes)?;
+                    if t != Type::Int {
+                        return Err(self.err(pos.line, pos.col, format!("exit code must be int, found {t}")));
+                    }
+                    return Ok(Type::Void);
+                }
+                if name == "argc" {
+                    if !args.is_empty() {
+                        return Err(self.err(pos.line, pos.col, "argc expects no arguments"));
+                    }
+                    return Ok(Type::Int);
+                }
+                if name == "arg" {
+                    if args.len() != 1 || args[0].name.is_some() {
+                        return Err(self.err(pos.line, pos.col, "arg expects exactly 1 positional argument (index: int)"));
+                    }
+                    let t = self.check_expr(&args[0].value, scopes)?;
+                    if t != Type::Int {
+                        return Err(self.err(pos.line, pos.col, format!("arg index must be int, found {t}")));
+                    }
+                    return Ok(Type::Str);
+                }
                 if name == "print" {
                     if args.len() != 1 || args[0].name.is_some() {
                         return Err(self.err(pos.line, pos.col, "print expects exactly 1 positional argument"));

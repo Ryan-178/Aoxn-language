@@ -32,16 +32,17 @@ dict / `None` / fn-ptr / `raise` 在 selfhost 镜像里尚未覆盖
 - ✅ `stdlib/os.ax`、`stdlib/datetime.ax`、`stdlib/re.ax` … 各自成文件
 - ❌ 把它们 `import` 进 `stdlib/stdlib.ax`（一步毁掉固定点测试）
 
-### 0.2 argv 还没进语言 —— `sys` / `argparse` 拿不到命令行参数
+### 0.2 argv —— **v0.42.0 已闭合**（`argc()` / `arg(i)`）
 
-`src/codegen_c.rs:653` 生成的是 `int main(void)`，入口签名不带参数。
+不再是阻塞项。当前形态：
 
-- `sys.argv` / `sys.executable` / `sys.stdin` **阻塞**
-- `argparse` 可以先做「解析一个传入的 `string` 数组」，只是没法自己拿到
-  那份数组 —— 不算完全阻塞，优先级下调
-
-> 编译器侧的改动很小（`main(int argc, char** argv)` + 落进一个运行时
-> `Vec`），但要同步 `selfhost/codegen.ax` 才能保持固定点，属于 P3。
+- `argc()` 返回参数个数（不含程序自身路径），`arg(i)` 取第 i 个（0 起算，
+  越界给 `""`）
+- `sys.argv` / `argparse` 现在可以动手：前者是这两个内建的薄包装，
+  后者是「解析一个 `string` 数组」的纯函数
+- `sys.stdin` **仍然阻塞**（没有控制台输入内建），`sys.executable` 由
+  `exe_path()` 承担
+- `argparse` 仍需一个语言内测试运行器才能真正替代 `pytest`（见 §0.7）
 
 ### 0.3 没有泛型堆容器 —— `collections` / `itertools` 无处落脚
 
@@ -98,6 +99,24 @@ v0.40.0 的唯一联合形式是 `T | None`，且 `dict[V]` 的**值类型只有
 公式（归一化、插值、积分、缩放坐标轴）都得考虑除零与 NaN 传播。
 建议在 `stdlib/math.ax` 里就把 `fdiv` / `is_nan` / `is_inf` 定下来，别让
 每个库各写一遍。
+
+### 0.7 断言有了，运行器还没有 —— `unittest` / `pytest` 差一半
+
+v0.42.0 补上了 `assert(cond[, message])`：失败时打印
+`assertion failed at line N: message` 并 exit 1。所以**一个库现在可以自带
+自测文件**，只要有人把那些文件跑起来。
+
+仍然缺的是运行器本身：
+
+- 没有 `aoxn test` 子命令，也没有用例发现约定（`test_*.ax`？）
+- 每个测试程序要自己 `def main()` 并把失败汇总成退出码；多文件用例要么
+  每个文件编译一次，要么由一个 runner 编译一次再逐个调用（后者要函数指针
+  表，v0.40.0 已有）
+- 在此之前，stdlib 模块的验证仍落在 `tests/<name>.rs`（Rust 侧、内嵌
+  `.ax` 源码），所以「给 stdlib 加模块 = 必须会 Rust」这条约束还在
+
+**成本**：小～中（一个 `aoxn test <dir>` 走 loader + 每个 `test_*.ax` 编一次、
+跑、汇总；不需要语言改动）。
 
 ---
 

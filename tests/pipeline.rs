@@ -1896,6 +1896,61 @@ fn selfhost_driver_links_hello() {
     assert_eq!(out_rust.stdout, out_self.stdout);
 }
 
+/// v0.42.0: the Aoxn-written lexer must see the same literals as the Rust one —
+/// radix prefixes and the two new escapes. Both compilers build the same
+/// fixture and their programs must print the same bytes.
+#[test]
+fn selfhost_driver_mirrors_radix_literals_and_escapes() {
+    let Some(clang) = clang_dir() else {
+        eprintln!("skipping: clang not found (set AOXN_CLANG or add clang to PATH)");
+        return;
+    };
+    let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let demo = manifest.join("selfhost").join("driver_demo.ax");
+
+    let dir = manifest
+        .join("target")
+        .join(format!("shradix-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    // keep to the subset stage-2 can emit: no dict/None/fn-ptr/raise, and no
+    // argv (the self-hosted emitter has no `main(argc, argv)` mirror)
+    let prog = "def main() -> int:\n    print(0x1F)\n    print(0b101)\n    print(0xff + 1)\n    print(0X10)\n    s = \"a\\rb\"\n    print(len(s))\n    print(load_u8(s, 1))\n    return 0\n";
+    std::fs::write(dir.join("hello.ax"), prog).unwrap();
+
+    let exe = dir.join(format!("driver{EXE}"));
+    aoxn::build_paths_exe(&[demo.display().to_string()], &exe, true)
+        .expect("self-host driver demo failed to compile");
+
+    let path = path_with_clang(&clang);
+    let out = Command::new(&exe)
+        .current_dir(&dir)
+        .env("PATH", &path)
+        .output()
+        .expect("failed to run driver demo");
+    assert!(
+        out.status.success(),
+        "driver demo failed: {:?} {}",
+        out.status.code(),
+        String::from_utf8_lossy(&out.stdout)
+    );
+
+    let produced = dir.join(format!("selfhost_hello{EXE}"));
+    assert!(produced.exists(), "driver did not emit selfhost_hello.exe");
+    let out_self = Command::new(&produced).output().expect("failed to run produced exe");
+
+    let rust_exe = dir.join(format!("hello_rust{EXE}"));
+    aoxn::build_paths_exe(&[dir.join("hello.ax").display().to_string()], &rust_exe, true)
+        .expect("rust reference compile failed");
+    let out_rust = Command::new(&rust_exe).output().expect("failed to run rust reference");
+
+    let _ = std::fs::remove_dir_all(&dir);
+    assert_eq!(
+        String::from_utf8_lossy(&out_self.stdout),
+        "31\n5\n256\n16\n3\n13\n"
+    );
+    assert_eq!(out_rust.stdout, out_self.stdout);
+}
+
 // ---- self-hosting: the Aoxn-written driver compiles a stdlib program ----
 
 /// fixture: a stdlib-importing program exercising generics, arrays, Vec and
@@ -3062,4 +3117,278 @@ fn fnptr_call_through_a_variable() {
         "#,
     );
     assert_eq!(out, "42\n42\n10\ntrue\ntrue\n");
+}
+
+// ---------------------------------------------------------------------------
+// v0.42.0: radix literals, the two new escapes, assert/exit, argv, warnings
+// ---------------------------------------------------------------------------
+
+/// Build and run a program that is EXPECTED to fail, returning
+/// (exit code, stdout, stderr).
+fn build_and_run_status(src: &str, args: &[&str]) -> (Option<i32>, String, String) {
+    let src = &dedent(src);
+    let id = COUNTER.fetch_add(1, Ordering::SeqCst) + std::process::id() as usize;
+    let dir = std::env::temp_dir().join("Aoxn-tests");
+    std::fs::create_dir_all(&dir).unwrap();
+    let exe: PathBuf = dir.join(format!("t{id}{EXE}"));
+
+    match build_exe(src, &exe, true) {
+        Ok(()) => {}
+        Err(diags) => panic!("compilation failed: {:?}", diags),
+    }
+    let out = Command::new(&exe).args(args).output().expect("failed to run compiled program");
+    let _ = std::fs::remove_file(&exe);
+    let _ = std::fs::remove_file(exe.with_extension("obj"));
+    (
+        out.status.code(),
+        String::from_utf8_lossy(&out.stdout).into_owned(),
+        String::from_utf8_lossy(&out.stderr).into_owned(),
+    )
+}
+
+#[test]
+fn radix_integer_literals() {
+    let out = build_and_run(
+        r#"
+        def main() -> int:
+            print(0x10)            # 16
+            print(0X1f)            # 31
+            print(0b101)           # 5
+            print(0B1111)          # 15
+            print(0xff + 1)        # 256
+            print(0b1 << 8)        # 256 — usable in expressions, not just print
+            return 0
+        "#,
+    );
+    assert_eq!(out, "16\n31\n5\n15\n256\n256\n");
+}
+
+#[test]
+fn radix_literal_diagnostics() {
+    // a malformed literal names the offending digit instead of splitting into
+    // `0` + an identifier ("unknown variable 'x10'", which is what v0.41 did)
+    let msg = expect_compile_error("def main():\n    print(0xZZ)\n");
+    assert!(
+        msg.contains("invalid digit 'Z' in hexadecimal literal"),
+        "unexpected message: {msg}"
+    );
+    let msg = expect_compile_error("def main():\n    print(0b12)\n");
+    assert!(msg.contains("invalid digit '2' in binary literal"), "unexpected message: {msg}");
+    let msg = expect_compile_error("def main():\n    print(0x)\n");
+    assert!(msg.contains("needs at least one digit"), "unexpected message: {msg}");
+    let msg = expect_compile_error("def main():\n    print(0xFFFFFFFFFFFFFFFF)\n");
+    assert!(msg.contains("out of range"), "unexpected message: {msg}");
+}
+
+#[test]
+fn string_escapes_cr_and_nul() {
+    let out = build_and_run(
+        r#"
+        def main() -> int:
+            s = "a\rb"
+            print(len(s))            # 3 bytes: the CR is a real byte
+            print(load_u8(s, 1))     # ... and it is 13
+            print(load_u8(s, 0))     # 'a'
+            t = "x\0y"
+            # len() is strlen: everything after the NUL is invisible to the
+            # string builtins, which is why \0 is for byte buffers
+            print(len(t))
+            print(load_u8(t, 1))
+            print(load_u8(t, 2))
+            return 0
+        "#,
+    );
+    assert_eq!(out, "3\n13\n97\n1\n0\n121\n");
+}
+
+#[test]
+fn assert_passes_silently() {
+    let out = build_and_run(
+        r#"
+        def main() -> int:
+            assert(1 + 1 == 2)
+            assert(len("abc") == 3, "length is bytes")
+            print("still here")
+            return 0
+        "#,
+    );
+    assert_eq!(out, "still here\n");
+}
+
+#[test]
+fn assert_failure_reports_the_line_and_exits_1() {
+    let (code, stdout, _stderr) = build_and_run_status(
+        r#"
+        def main() -> int:
+            print("before")
+            assert(1 == 2, "one is not two")
+            print("unreachable in practice")
+            return 0
+        "#,
+        &[],
+    );
+    assert_eq!(code, Some(1));
+    // the report goes to stdout, like the uncaught-exception report and like
+    // `print` itself (the runtime never writes to stderr)
+    assert_eq!(stdout, "before\nassertion failed at line 3: one is not two\n");
+}
+
+#[test]
+fn exit_sets_the_process_status() {
+    let (code, stdout, _stderr) = build_and_run_status(
+        r#"
+        def main():
+            print("leaving early")
+            exit(3)
+        "#,
+        &[],
+    );
+    assert_eq!(code, Some(3));
+    assert_eq!(stdout, "leaving early\n");
+}
+
+#[test]
+fn argv_builtins_read_the_command_line() {
+    let (code, stdout, _stderr) = build_and_run_status(
+        r#"
+        def main():
+            print(argc())
+            i = 0
+            while i < argc():
+                print(arg(i))
+                i = i + 1
+        "#,
+        &["alpha", "beta"],
+    );
+    assert_eq!(code, Some(0));
+    assert_eq!(stdout, "2\nalpha\nbeta\n");
+}
+
+#[test]
+fn arg_without_arguments_and_past_the_end_is_empty() {
+    let (code, stdout, _stderr) = build_and_run_status(
+        r#"
+        def main():
+            print(argc())
+            print("[" + arg(0) + "]")     # out of range: "" (never a crash)
+            print("[" + arg(-1) + "]")
+        "#,
+        &[],
+    );
+    assert_eq!(code, Some(0));
+    assert_eq!(stdout, "0\n[]\n[]\n");
+}
+
+#[test]
+fn main_signature_is_validated() {
+    // v0.41 let this through the checker and then died inside clang as an
+    // `internal` error; it is a source-level mistake and says so now
+    let msg = expect_compile_error("def main(argc: int) -> int:\n    return 0\n");
+    assert!(msg.contains("'main' cannot take parameters"), "unexpected message: {msg}");
+    assert!(msg.contains("argc()"), "the message must name the replacement: {msg}");
+    let msg = expect_compile_error("def main() -> string:\n    return \"x\"\n");
+    assert!(msg.contains("'main' must return int"), "unexpected message: {msg}");
+    let msg = expect_compile_error("def main[T]() -> int:\n    return 0\n");
+    assert!(msg.contains("'main' cannot be generic"), "unexpected message: {msg}");
+}
+
+#[test]
+fn unused_local_warns_without_failing_the_build() {
+    let src = dedent(
+        r#"
+        def helper() -> int:
+            unused = 41
+            other = 1
+            return other
+
+        def main():
+            print(helper())
+        "#,
+    );
+    let id = COUNTER.fetch_add(1, Ordering::SeqCst) + std::process::id() as usize;
+    let dir = std::env::temp_dir().join("Aoxn-tests");
+    std::fs::create_dir_all(&dir).unwrap();
+    let exe: PathBuf = dir.join(format!("t{id}{EXE}"));
+    let _ = aoxn::take_warnings(); // start clean on this thread
+    build_exe(&src, &exe, true).expect("a warning must not fail the compile");
+    let _ = std::fs::remove_file(&exe);
+    let warnings = aoxn::take_warnings();
+    assert_eq!(warnings.len(), 1, "expected exactly one warning, got {warnings:?}");
+    let w = &warnings[0];
+    assert_eq!(w.severity, aoxn::Severity::Warning);
+    assert_eq!(w.code, Some("W001"));
+    assert!(w.message.contains("unused variable 'unused'"), "{}", w.message);
+    assert_eq!(w.line, 2, "the warning points at the binding");
+}
+
+#[test]
+fn a_read_local_does_not_warn() {
+    let src = dedent(
+        r#"
+        def main():
+            total = 0
+            i = 0
+            while i < 3:
+                total = total + i
+                i = i + 1
+            print(total)
+        "#,
+    );
+    let id = COUNTER.fetch_add(1, Ordering::SeqCst) + std::process::id() as usize;
+    let dir = std::env::temp_dir().join("Aoxn-tests");
+    std::fs::create_dir_all(&dir).unwrap();
+    let exe: PathBuf = dir.join(format!("t{id}{EXE}"));
+    let _ = aoxn::take_warnings();
+    build_exe(&src, &exe, true).expect("compile");
+    let _ = std::fs::remove_file(&exe);
+    assert!(aoxn::take_warnings().is_empty(), "augmented/loop reads count as uses");
+}
+
+#[test]
+fn warning_json_has_a_severity_and_a_code() {
+    let w = aoxn::Diag::warn("type", u32::MAX, 7, 3, "W001", "unused variable 'x'");
+    let json = aoxn::report_to_json(&[], &[w]);
+    assert!(json.contains("\"ok\":true"), "{json}");
+    assert!(json.contains("\"severity\":\"warning\""), "{json}");
+    assert!(json.contains("\"code\":\"W001\""), "{json}");
+    // errors and warnings live in separate arrays
+    let e = aoxn::Diag::at("type", u32::MAX, 1, 1, "boom");
+    let json = aoxn::report_to_json(&[e], &[aoxn::Diag::warn("type", u32::MAX, 2, 2, "W001", "w")]);
+    assert!(json.contains("\"ok\":false"), "{json}");
+    assert_eq!(json.matches("\"severity\":\"error\"").count(), 1, "{json}");
+    assert_eq!(json.matches("\"severity\":\"warning\"").count(), 1, "{json}");
+}
+
+/// A user `extern def` that contradicts a declaration the backend already
+/// emitted is a C-compiler failure, not an internal one: the diagnostic must
+/// be attributed to the `cc` stage (v0.42.0). `_setmode` is the cheapest such
+/// contradiction — the wrapper `main` declares it with two parameters on
+/// Windows only, so this assertion is Windows-scoped like the platform is.
+#[cfg(windows)]
+#[test]
+fn c_backend_failures_are_reported_as_the_cc_stage() {
+    let src = dedent(
+        r#"
+        extern def _setmode(a: int) -> int
+
+        def main():
+            print(_setmode(1))
+        "#,
+    );
+    let id = COUNTER.fetch_add(1, Ordering::SeqCst) + std::process::id() as usize;
+    let dir = std::env::temp_dir().join("Aoxn-tests");
+    std::fs::create_dir_all(&dir).unwrap();
+    let exe: PathBuf = dir.join(format!("t{id}{EXE}"));
+    let diags = build_exe(&src, &exe, true).expect_err("clang must reject the conflicting prototype");
+    assert_eq!(diags[0].stage, "cc", "unexpected stage: {diags:?}");
+    assert!(!diags[0].message.contains("internal error"), "{}", diags[0].message);
+}
+
+#[test]
+fn clang_arg_list_parsing() {
+    // newline-separated, so one flag may contain spaces
+    let args = aoxn::parse_clang_args("-g\n-Xclang -load\n\n");
+    assert_eq!(args, vec!["-g".to_string(), "-Xclang -load".to_string()]);
+    assert!(aoxn::parse_clang_args("").is_empty());
+    assert!(aoxn::parse_clang_args("\n  \n").is_empty());
 }

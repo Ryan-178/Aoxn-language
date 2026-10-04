@@ -841,14 +841,12 @@ def ui_listbox[N](c: UI, x: int, y: int, w: int, h: int, items: [string; N], n: 
     ui_fill_rect(c, x, y, w, h, face)
     ui_frame_rect(c, x, y, w, h, bcol)
     ui_clip_push(c, x + 1, y + 1, x + w - sbw - 1, y + h - 1)
-    sel_y = -1
     i = 0
     while i < vis and i < n:
         it = i + scroll
         iy = y + i * item_h
         if it == cur:
             ui_fill_rect(c, x + 1, iy, w - sbw - 2, item_h, pal.sel)
-            sel_y = iy
         elif hot and c.my >= iy and c.my < iy + item_h:
             ui_fill_rect(c, x + 1, iy, w - sbw - 2, item_h, pal.widget_hover)
         tcol = pal.text

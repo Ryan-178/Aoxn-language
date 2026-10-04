@@ -21,24 +21,77 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Severity {
+    Error,
+    Warning,
+}
+
+impl Severity {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Severity::Error => "error",
+            Severity::Warning => "warning",
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct Diag {
-    pub stage: &'static str, // "lex" | "parse" | "type" | "internal" | "link" | "io" | "asset"
+    pub stage: &'static str, // "lex" | "parse" | "type" | "internal" | "link" | "io" | "asset" | "cc"
     pub file: u32,           // index into the compilation file registry
     pub line: usize,
     pub col: usize,
     pub message: String,
+    /// errors stop the pipeline; warnings are reported and dropped (v0.42.0)
+    pub severity: Severity,
+    /// stable machine-readable tag (`W001`), for tools that must not match on
+    /// message text; `None` for the unclassified majority
+    pub code: Option<&'static str>,
 }
 
 impl Diag {
     /// constructor at a source position (B1 in docs/p2-compiler-performance.md:
     /// one place to build diagnostics, keeping error-site diffs small)
     pub fn at(stage: &'static str, file: u32, line: usize, col: usize, message: impl Into<String>) -> Diag {
-        Diag { stage, file, line, col, message: message.into() }
+        Diag { stage, file, line, col, message: message.into(), severity: Severity::Error, code: None }
     }
 
-    fn internal(message: impl Into<String>) -> Diag {
-        Diag { stage: "internal", file: u32::MAX, line: 0, col: 0, message: message.into() }
+    /// a warning at a source position (never stops the pipeline)
+    pub fn warn(stage: &'static str, file: u32, line: usize, col: usize, code: &'static str, message: impl Into<String>) -> Diag {
+        Diag { stage, file, line, col, message: message.into(), severity: Severity::Warning, code: Some(code) }
+    }
+
+    pub(crate) fn internal(message: impl Into<String>) -> Diag {
+        Diag {
+            stage: "internal",
+            file: u32::MAX,
+            line: 0,
+            col: 0,
+            message: message.into(),
+            severity: Severity::Error,
+            code: None,
+        }
+    }
+
+    /// the C compiler rejected the text we emitted (v0.42.0). This is NOT an
+    /// internal error: the usual cause is a user-written `extern def` whose
+    /// signature does not match the C function, which is why it gets its own
+    /// stage instead of blaming the compiler.
+    pub(crate) fn cc(message: impl Into<String>) -> Diag {
+        Diag {
+            stage: "cc",
+            file: u32::MAX,
+            line: 0,
+            col: 0,
+            message: message.into(),
+            severity: Severity::Error,
+            code: None,
+        }
+    }
+
+    pub fn is_error(&self) -> bool {
+        self.severity == Severity::Error
     }
 
     fn to_json(&self) -> String {
@@ -57,9 +110,15 @@ impl Diag {
             }
             out
         }
+        let code = match self.code {
+            Some(c) => format!("\"{c}\""),
+            None => "null".to_string(),
+        };
         format!(
-            "{{\"stage\":\"{}\",\"file\":\"{}\",\"line\":{},\"col\":{},\"message\":\"{}\"}}",
+            "{{\"stage\":\"{}\",\"severity\":\"{}\",\"code\":{},\"file\":\"{}\",\"line\":{},\"col\":{},\"message\":\"{}\"}}",
             self.stage,
+            self.severity.as_str(),
+            code,
             esc(&files::name(self.file)),
             self.line,
             self.col,
@@ -72,6 +131,47 @@ pub fn diags_to_json(diags: &[Diag]) -> String {
     let items: Vec<String> = diags.iter().map(|d| d.to_json()).collect();
     format!("{{\"ok\":false,\"errors\":[{}]}}", items.join(","))
 }
+
+/// The full machine-readable report: errors AND warnings, with `ok` derived
+/// from the error list. This is what `--json` prints (v0.42.0).
+pub fn report_to_json(errors: &[Diag], warnings: &[Diag]) -> String {
+    let errs: Vec<String> = errors.iter().filter(|d| d.is_error()).map(|d| d.to_json()).collect();
+    let warns: Vec<String> = warnings.iter().filter(|d| !d.is_error()).map(|d| d.to_json()).collect();
+    format!(
+        "{{\"ok\":{},\"errors\":[{}],\"warnings\":[{}]}}",
+        errs.is_empty(),
+        errs.join(","),
+        warns.join(",")
+    )
+}
+
+// ---- warning channel -------------------------------------------------------
+//
+// Warnings do not fail a compile, so they cannot ride the `Result` that every
+// pipeline entry point returns without changing ~15 signatures. They are
+// collected in a thread-local instead — the same shape `files.rs` uses for the
+// file registry — and drained by whoever reports the result. The collector is
+// cleared once per `typecheck::check`, so a compile can never see another
+// compile's warnings.
+
+thread_local! {
+    static WARNINGS: std::cell::RefCell<Vec<Diag>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+pub fn push_warning(d: Diag) {
+    debug_assert!(!d.is_error(), "push_warning takes warnings only");
+    WARNINGS.with(|w| w.borrow_mut().push(d));
+}
+
+/// Drain the warnings collected since the last `clear_warnings`.
+pub fn take_warnings() -> Vec<Diag> {
+    WARNINGS.with(|w| std::mem::take(&mut *w.borrow_mut()))
+}
+
+pub fn clear_warnings() {
+    WARNINGS.with(|w| w.borrow_mut().clear());
+}
+
 
 /// human-readable one-line form used by the CLI
 pub fn diag_to_string(d: &Diag) -> String {
@@ -180,7 +280,7 @@ fn finish_to_object(program: Program, obj_path: &Path, opt_level: u8) -> Result<
     timed("codegen", || {
         codegen_c::generate_to_object(&program, obj_path, opt_level, &out.call_map)
     })
-    .map_err(|m| vec![Diag::internal(m)])?;
+    .map_err(|d| vec![d])?;
     Ok(())
 }
 
@@ -207,16 +307,16 @@ pub(crate) fn parse_sources(sources: &[String]) -> Result<Program, Vec<Diag>> {
         funcs.extend(program.funcs);
     }
     if let Some(imp) = imports.first() {
-        return Err(vec![Diag {
-            stage: "io",
-            file: imp.pos.file,
-            line: imp.pos.line,
-            col: imp.pos.col,
-            message: format!(
+        return Err(vec![Diag::at(
+            "io",
+            imp.pos.file,
+            imp.pos.line,
+            imp.pos.col,
+            format!(
                 "import \"{}\" requires compiling from files (imports resolve relative to the importing file)",
                 imp.path
             ),
-        }]);
+        )]);
     }
     Ok(Program { imports: vec![], structs, funcs, assets: assets::AssetSet::default() })
 }
@@ -303,15 +403,8 @@ struct LoadState {
 }
 
 fn load_file(path: &Path, state: &mut LoadState) -> Result<(), Vec<Diag>> {
-    let canonical = std::fs::canonicalize(path).map_err(|e| {
-        vec![Diag {
-            stage: "io",
-            file: u32::MAX,
-            line: 0,
-            col: 0,
-            message: format!("cannot open '{}': {e}", path.display()),
-        }]
-    })?;
+    let canonical = std::fs::canonicalize(path)
+        .map_err(|e| vec![Diag::at("io", u32::MAX, 0, 0, format!("cannot open '{}': {e}", path.display()))])?;
     if state.stack.contains(&canonical) {
         let cycle: Vec<String> = state
             .stack
@@ -319,13 +412,7 @@ fn load_file(path: &Path, state: &mut LoadState) -> Result<(), Vec<Diag>> {
             .chain(std::iter::once(&canonical))
             .map(|p| p.display().to_string())
             .collect();
-        return Err(vec![Diag {
-            stage: "io",
-            file: u32::MAX,
-            line: 0,
-            col: 0,
-            message: format!("circular import: {}", cycle.join(" -> ")),
-        }]);
+        return Err(vec![Diag::at("io", u32::MAX, 0, 0, format!("circular import: {}", cycle.join(" -> ")))]);
     }
     if state.visited.contains(&canonical) {
         return Ok(()); // include-once
@@ -333,15 +420,8 @@ fn load_file(path: &Path, state: &mut LoadState) -> Result<(), Vec<Diag>> {
     state.visited.insert(canonical.clone());
     state.stack.push(canonical.clone());
 
-    let src = std::fs::read_to_string(path).map_err(|e| {
-        vec![Diag {
-            stage: "io",
-            file: u32::MAX,
-            line: 0,
-            col: 0,
-            message: format!("cannot read '{}': {e}", path.display()),
-        }]
-    })?;
+    let src = std::fs::read_to_string(path)
+        .map_err(|e| vec![Diag::at("io", u32::MAX, 0, 0, format!("cannot read '{}': {e}", path.display()))])?;
     // Register the CANONICAL path, not the one we were called with: import
     // resolution canonicalizes, so a name registered from `path` would be
     // spelled `stdlib\ui.ax` when the entry was spelled as an absolute path
@@ -574,6 +654,34 @@ fn scan_imports(src: &str) -> Vec<String> {
     out
 }
 
+/// Extra flags forwarded verbatim to every clang invocation (v0.42.0).
+///
+/// The CLI's `--clang-arg <flag>` (repeatable) and `-g` land here as one
+/// newline-separated `AOXN_CLANG_ARGS`, following the `AOXN_CPU` /
+/// `AOXN_TAILWIND` precedent: an env var travels through all ~15 pipeline
+/// entry points without adding a parameter to each. Newline separation means a
+/// single flag may contain spaces (`-Xclang -load`).
+pub fn extra_clang_args() -> Vec<String> {
+    match std::env::var("AOXN_CLANG_ARGS") {
+        Ok(s) => parse_clang_args(&s),
+        Err(_) => Vec::new(),
+    }
+}
+
+/// Split the newline-separated flag list (`-Xclang -load` is ONE flag).
+pub fn parse_clang_args(s: &str) -> Vec<String> {
+    s.lines().filter(|l| !l.trim().is_empty()).map(|l| l.to_string()).collect()
+}
+
+/// Whether clang's own warnings should be shown (`--cc-warnings`, or
+/// `AOXN_CC_WARNINGS=1`). Off by default: the emitted C is machine text.
+pub fn cc_warnings_enabled() -> bool {
+    match std::env::var("AOXN_CC_WARNINGS") {
+        Ok(v) => v != "0" && !v.is_empty(),
+        Err(_) => false,
+    }
+}
+
 /// Locate the clang driver used for final linking.
 /// Order: AOXN_CLANG env -> PATH -> the toolchain root's own `toolchain/bin`
 /// (a portable LLVM dropped in by the installer) -> repo-local LLVM ->
@@ -681,21 +789,27 @@ pub fn link(obj_path: &Path, exe_path: &Path) -> Result<(), Vec<Diag>> {
 
 /// Link with additional libraries and library search paths.
 pub fn link_opts(obj_path: &Path, exe_path: &Path, libs: &[String], lib_paths: &[String]) -> Result<(), Vec<Diag>> {
-    let clang = find_clang().ok_or_else(|| vec![Diag {
-        stage: "link",
-        file: u32::MAX,
-        line: 0,
-        col: 0,
-        message: "cannot find clang for linking. Set AOXN_CLANG to the clang executable \
-                  or add LLVM's bin directory to PATH."
-            .into(),
-    }])?;
+    let clang = find_clang().ok_or_else(|| {
+        vec![Diag::at(
+            "link",
+            u32::MAX,
+            0,
+            0,
+            "cannot find clang for linking. Set AOXN_CLANG to the clang executable \
+             or add LLVM's bin directory to PATH.",
+        )]
+    })?;
 
     let mut cmd = Command::new(&clang);
     cmd.arg(obj_path).arg("-o").arg(exe_path);
     // 8 MB stack: large fixed-size arrays live on the stack (allocas)
     if let Some(flag) = crate::platform::stack_link_flag() {
         cmd.arg(flag);
+    }
+    // `--clang-arg` flags reach the link step too (`-g` is a compile AND a
+    // link flag; `-fsanitize=*` needs to be on both sides)
+    for a in extra_clang_args() {
+        cmd.arg(a);
     }
     for dir in lib_paths {
         cmd.arg(format!("-L{dir}"));
@@ -718,13 +832,9 @@ pub fn link_opts(obj_path: &Path, exe_path: &Path, libs: &[String], lib_paths: &
     let mut attempt = 0u32;
     loop {
         let out = timed("link", || {
-            cmd.output().map_err(|e| vec![Diag {
-                stage: "link",
-                file: u32::MAX,
-                line: 0,
-                col: 0,
-                message: format!("failed to spawn {}: {e}", clang.display()),
-            }])
+            cmd.output().map_err(|e| {
+                vec![Diag::at("link", u32::MAX, 0, 0, format!("failed to spawn {}: {e}", clang.display()))]
+            })
         })?;
 
         if out.status.success() {
@@ -739,16 +849,13 @@ pub fn link_opts(obj_path: &Path, exe_path: &Path, libs: &[String], lib_paths: &
             eprintln!("{}", stderr.trim_end());
         }
         if !transient || attempt >= LINK_ATTEMPTS {
-            return Err(vec![Diag {
-                stage: "link",
-                file: u32::MAX,
-                line: 0,
-                col: 0,
-                message: format!(
-                    "clang linking failed with exit code {:?}",
-                    out.status.code()
-                ),
-            }]);
+            return Err(vec![Diag::at(
+                "link",
+                u32::MAX,
+                0,
+                0,
+                format!("clang linking failed with exit code {:?}", out.status.code()),
+            )]);
         }
         std::thread::sleep(std::time::Duration::from_millis(250 * u64::from(attempt)));
     }

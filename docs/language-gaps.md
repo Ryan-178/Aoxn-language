@@ -31,7 +31,7 @@
 | **C4** 没有类 / 方法 / 接口 | | unittest fixture、ORM 实体、多态 |
 | **C5** 没有运算符重载 | | `a + b` 的形状语法、BigInt |
 | **C6** 没有 `with` | | 确定性资源释放 |
-| **D1** argv 缺失（`int main(void)`） | | sys、argparse、pytest、CLI |
+| **D1** ~~argv 缺失~~ **v0.42.0 已闭合** | `argc()` / `arg(i)`，`main` 签名校验 | sys、argparse、CLI（pytest 还差一个运行器，见 stdlib-todo §0.7） |
 | **D2** 没有线程/同步原语 | 见 §3，线程本身可行 | 线程池、锁、条件变量 |
 | **D3** 浮点与整数除零都是 UB，无检查 | 原生崩溃 | 所有数值库 |
 | **D4** 没有 `inf`/`nan` 字面量，位运算 int-only | 戳不进 float 的 IEEE 位 | 所有数值库 |
@@ -316,20 +316,34 @@ codegen 侧把 `a + b` 改写成 `op_add(a, b)`。
 
 ## D. 运行时与平台
 
-### D1 argv 缺失
+### D1 argv 缺失 —— **v0.42.0 已闭合**
 
-**缺什么**　`src/codegen_c.rs:653` 发射 `int main(void)`。
-入口签名不带参数，程序**无法知道自己被怎么调起来的**。
+**曾缺什么**　`src/codegen_c.rs` 发射 `int main(void)`，入口签名不带参数，
+程序无法知道自己被怎么调起来的。
 
-**挡住了什么**　`sys.argv`（§2 #24）、`argparse`（#25）、
-`pytest` 的用例发现（#15）、所有 CLI 工具。
+**现状（v0.42.0）**　两个内建取代了 `main` 参数：
 
-**要动哪里**　codegen 发射 `main(int argc, char** argv)`，
-把参数落进一个运行时结构，`sys` 从那里读；
-**必须同步 `selfhost/codegen.ax`**（AGENTS.md 明确：两个编译器要一致，
-否则固定点破）。
+```aoxn
+def main():
+    i = 0
+    while i < argc():
+        print(arg(i))
+        i = i + 1
+```
 
-**代价　小。** 这是 §2 #24/#25/#15 三项的共同前置。
+- `argc()` = 被调用时收到的参数个数，**不含程序自身路径**
+  （`aoxn run app.ax -- a b` → 2）
+- `arg(i)` 0 起算，越界返回 `""`（不 raise，所以 `range(argc())` 循环无需守卫）
+- `def main(argc: int)` 现在是**编译错误**并在信息里给出这两个内建
+  （v0.41 之前它会过检查、再在 clang 里炸成 `internal`）
+
+**实现方式**　只在程序**用到** `argc()`/`arg()` 时才发射
+`int main(int argc, char** argv)` 与两个 argv 全局量；其余程序的 C 文本
+逐字节不变，**因此 `selfhost/codegen.ax` 不需要镜像就能保持固定点**
+（自举编译器仍不支持这两个内建，与 v0.40.0 的四个特性同状态）。
+
+**解锁**　`sys.argv`（§2 #24）、`argparse`（#25）、CLI 工具。`pytest`
+的用例发现还需要一个语言内测试运行器（见下文新增的 G 节）。
 
 ### D2 没有线程与同步原语
 
@@ -477,7 +491,7 @@ docs/spec.md  tests/pipeline.rs
 | **2** | **`sizeof` + 结构体取址**（A2） | **小** | 所有非槽位容器 → numpy / Pillow / `Vec[T]` |
 | **3** | **float 格式说明符 + `%g`**（D5） | 小 | 所有数值输出（现成实现已在 json.ax 里） |
 | **4** | **元组 / 多返回值**（B3） | 中 | 大量库的 API 形态；sret ABI 已存在 |
-| **5** | **argv**（D1） | 小 | sys / argparse / pytest / CLI |
+| ~~**5**~~ | ~~**argv**（D1）~~ **v0.42.0 已闭合** | 小 | `argc()` / `arg(i)` 落地；sys / argparse 解除阻塞（pytest 还差运行器） |
 | **6** | **E1–E4、E6 一批语法糖** | 小 | 整个生态的可读性 |
 | **7** | `dict` 换哈希/排序数组（B2） | 中 | 会话、路由表、词表的规模 |
 | **8** | **`enum` / 可标记联合**（B1） | 大 | pandas、ORM —— 唯一出路 |

@@ -147,11 +147,20 @@ fn lex_interpolation(
     lx.run()
 }
 
-/// the four string escapes shared by plain strings and f-strings
+/// the six string escapes shared by plain strings and f-strings.
+///
+/// `\r` and `\0` were added in v0.42.0: `\r` because HTTP/SSE framing is
+/// CRLF and every layer that needed it had been writing byte 13 through
+/// `store_u8`, and `\0` because a byte buffer needs a way to spell a NUL.
+/// Note that `\0` does NOT make a string binary-safe: `len()` is `strlen`,
+/// so everything after the NUL is invisible to the string builtins. It is
+/// there for buffers you then address with `as_ptr`/`store_u8`.
 fn escape_char(esc: char) -> Option<char> {
     match esc {
         'n' => Some('\n'),
         't' => Some('\t'),
+        'r' => Some('\r'),
+        '0' => Some('\0'),
         '\\' => Some('\\'),
         '"' => Some('"'),
         _ => None,
@@ -204,13 +213,7 @@ struct Lexer<'c> {
 
 impl<'c> Lexer<'c> {
     fn err(&self, line: usize, col: usize, message: impl Into<String>) -> Diag {
-        Diag {
-            stage: "lex",
-            file: self.file_id,
-            line,
-            col,
-            message: message.into(),
-        }
+        Diag::at("lex", self.file_id, line, col, message)
     }
 
     fn run(mut self) -> Result<Vec<Token>, Diag> {
@@ -401,6 +404,14 @@ impl<'c> Lexer<'c> {
 
     /// integer / float literal (the current char is a digit)
     fn scan_number(&mut self, pos: Pos) -> Result<Tok, Diag> {
+        // radix prefixes first (v0.42.0): `0x`/`0X` hex, `0b`/`0B` binary.
+        // Without this the lexer produced `0` plus the identifier `x10`, and
+        // the type checker then reported `unknown variable 'x10'`.
+        if at!(self, self.i) == Some('0') {
+            if let Some(marker @ ('x' | 'X' | 'b' | 'B')) = at!(self, self.i + 1) {
+                return self.scan_radix(pos, marker);
+            }
+        }
         let start = self.i;
         while self.i < self.end && self.chars[self.i].is_ascii_digit() {
             adv!(self);
@@ -431,6 +442,49 @@ impl<'c> Lexer<'c> {
             })?;
             Ok(Tok::Int(v))
         }
+    }
+
+    /// `0x` / `0b` integer literal (v0.42.0). The current char is the leading
+    /// `0` and the next is the radix marker.
+    ///
+    /// The whole alphanumeric run after the marker is consumed so that a
+    /// malformed literal names the offending digit (`0xZZ`, `0b12`) instead of
+    /// silently splitting into `0` + an identifier.
+    fn scan_radix(&mut self, pos: Pos, marker: char) -> Result<Tok, Diag> {
+        let (radix, name, max) = if marker == 'b' || marker == 'B' {
+            (2u32, "binary", "0b111111111111111111111111111111111111111111111111111111111111111")
+        } else {
+            (16u32, "hexadecimal", "0x7fffffffffffffff")
+        };
+        adv!(self); // '0'
+        adv!(self); // marker
+        let start = self.i;
+        while self.i < self.end && self.chars[self.i].is_ascii_alphanumeric() {
+            adv!(self);
+        }
+        let digits: String = self.chars[start..self.i].iter().collect();
+        if digits.is_empty() {
+            return Err(self.err(
+                pos.line,
+                pos.col,
+                format!("{name} literal needs at least one digit after '0{marker}'"),
+            ));
+        }
+        if let Some(off) = digits.chars().position(|c| c.to_digit(radix).is_none()) {
+            let bad = digits.chars().nth(off).unwrap_or('?');
+            return Err(self.err(
+                pos.line,
+                pos.col + 2 + off,
+                format!("invalid digit '{bad}' in {name} literal"),
+            ));
+        }
+        i64::from_str_radix(&digits, radix).map(Tok::Int).map_err(|_| {
+            self.err(
+                pos.line,
+                pos.col,
+                format!("{name} literal '0{marker}{digits}' out of range (max {max})"),
+            )
+        })
     }
 
     /// plain string literal (the current char is `"`)

@@ -1,4 +1,4 @@
-# Aoxn Language Specification (v0.40.0)
+# Aoxn Language Specification (v0.42.0)
 
 Aoxn is an AI-native, statically typed, ahead-of-time compiled language with a
 Python-style syntax. Design goals: minimal syntax, explicit semantics, native
@@ -93,6 +93,13 @@ print("apple" < "banana")      # true (byte-wise lexicographic)
 - `+` concatenates two strings (only strings can be concatenated).
 - All six comparison operators work on `(string, string)` via byte-wise
   `strcmp` semantics; `len(s)` is the byte length.
+- **Escapes (v0.42.0): six of them** — `\n`, `\t`, `\r`, `\0`, `\\`, `\"`.
+  Anything else is a lex error naming the escape. `\r` exists because HTTP/SSE
+  framing is CRLF and every layer that needed a carriage return had been
+  writing byte 13 through `store_u8`; `\0` exists because a byte buffer needs a
+  way to spell a NUL. **`\0` does not make a string binary-safe**: `len()` is
+  `strlen`, so everything after the NUL is invisible to the string builtins —
+  use it for buffers you then address with `as_ptr`/`store_u8`.
 - Strings are **immutable**. Literals live in static storage; concatenation
   results are heap-allocated and intentionally not freed (no GC yet 鈥?safe
   because strings never mutate, so sharing/aliasing is sound).
@@ -335,6 +342,20 @@ def fib(n: int) -> int:
 - `return` / `return expr`.
 - `pass` - explicit empty statement.
 - assignment (`x = e`, `x: t = e`, `x += e`) and expression statements.
+- `assert(cond)` / `assert(cond, message)` (v0.42.0) - a runtime check: on
+  failure it prints `assertion failed at line N[: message]` and exits with
+  status 1. Not catchable (unlike `raise`), and it does not affect the
+  all-paths-return analysis. It is an expression of type `void`, so it is used
+  as a statement.
+- `exit(code)` (v0.42.0) - terminate immediately with `code`. Non-void
+  functions that end in `exit(...)` still need a `return` on the paths the
+  checker can see: `exit` is ordinary control flow to the type system.
+
+**`main` (v0.42.0)** is the program entry point and has a fixed shape: no
+parameters, and a return type of `int` (the exit code) or `void`. Command-line
+arguments are read with `argc()` / `arg(i)`, not from a `main` parameter —
+`def main(argc: int)` is a compile error that says so. (The TS front end's
+`function main(): number` keeps its own contract: its value is discarded.)
 
 ## Expressions
 
@@ -355,6 +376,12 @@ primary := INT | FLOAT | STRING | True | False | FSTRING
          | "[" expr ("," expr)* "]" | "[" "]"      # array literal / index
 postfix := primary ("(" args ")" | "[" expr "]" | "." IDENT)*
 ```
+
+**Integer literals (v0.42.0)** are decimal, hexadecimal (`0x`/`0X`) or binary
+(`0b`/`0B`). A malformed literal names the offending digit (`invalid digit 'Z'
+in hexadecimal literal`) instead of lexing `0` plus an identifier, and an
+out-of-range value is rejected with the maximum spelled in its own radix.
+`int` is signed 64-bit, so `0xFFFFFFFFFFFFFFFF` does not fit.
 
 - `and`/`or`/`not` and `&&`/`||`/`!` are synonyms. `and`/`or` short-circuit.
 - `True`/`False` and `true`/`false` are synonyms.
@@ -408,6 +435,17 @@ postfix := primary ("(" args ")" | "[" expr "]" | "." IDENT)*
   through the dict's handle.
 - `to_int(f)` on a function value (v0.40.0) is its raw address; `f = addr as
   fn(...) -> ...` converts back. The FFI escape hatch.
+- `assert(cond)` / `assert(cond, message)` (v0.42.0) — see Statements.
+- `exit(code: int)` (v0.42.0) — terminate with `code`; `void`.
+- `argc() -> int` (v0.42.0) — how many arguments the program was invoked with,
+  **not counting the program path** (`argc()` is Python's `len(sys.argv) - 1`,
+  so `aoxn run app.ax -- a b` gives 2).
+- `arg(i: int) -> string` (v0.42.0) — the `i`-th argument, 0-based. An index
+  before 0 or at/after `argc()` yields `""` rather than raising, so a loop over
+  `range(argc())` needs no guard.
+- **Warnings are part of the contract (v0.42.0)**: the compiler can report
+  diagnostics that do not fail a build (`W001` unused variable). They go to
+  stderr as text, or into the `warnings` array of the `--json` report.
 
 ## Raw memory (unsafe, for the standard library and systems code)
 
@@ -673,7 +711,8 @@ widget layer names no platform symbol at all.
 
 - `Aoxn build file.ax [-o out] [--O0|--O1|--O2|--O3]` — native executable
   (O3 default: the level selects the clang `-O` used to compile the generated C).
-- `Aoxn run file.ax [-- args...]` — compile and run.
+- `Aoxn run file.ax [-- args...]` — compile and run; the arguments after `--`
+  reach the program through `argc()`/`arg(i)` (v0.42.0).
 - `Aoxn c file.ax` — print the generated C text (v0.29.0: the C-emitting
   backend is the only backend; `Aoxn ir` is kept as a deprecated alias).
 - `Aoxn doctor [--json] [--no-smoke]` (v0.30.0) — report the install root,
@@ -701,12 +740,29 @@ widget layer names no platform symbol at all.
   compile and link (`run` executes the cached exe; `build` copies it to the
   `-o` destination). Any source or option change is a miss; output is
   identical to a fresh compile either way.
-- `--json` - diagnostics as `{"ok":false,"errors":[{"stage","line","col","message"}]}`.
+- `--json` - the machine-readable report:
+  `{"ok":true|false,"errors":[{"stage","severity","code","file","line","col","message"}],"warnings":[…]}`.
+  Printed on success too (with an empty `errors` array), so a caller never has
+  to parse human text to learn the outcome.
+- `--clang-arg <flag>` (repeatable, v0.42.0) - forward a flag verbatim to
+  **every** clang invocation, compile and link alike: `-g` for debug info,
+  `-fsanitize=undefined` for the UB the language leaves unchecked,
+  `-fno-strict-aliasing`, … `-g` is also spelled as its own flag. The flags
+  join the cache key, so switching them rebuilds.
+- `--cc-warnings` (v0.42.0) - stop passing `-w`, so clang's own warnings about
+  the emitted C are shown. This is how a wrong `extern def` signature becomes
+  visible (clang knows many libc prototypes) instead of silently misbehaving.
+- A C-compiler failure is a `cc`-stage diagnostic, not `internal`: the usual
+  cause is a user-written `extern def` that contradicts a C declaration, and
+  the message keeps the clang error text plus the path of the retained `.c`.
 - `AOXN_DUMP_C=1` - dump the generated C to stderr; `AOXN_TIME=1` - per-phase
   wall clock; `AOXN_TC_TRACE=1` - per-function typecheck markers;
-  `AOXN_CLANG=<path>` - select the clang executable.
+  `AOXN_CLANG=<path>` - select the clang executable;
+  `AOXN_CLANG_ARGS` - newline-separated flags, the env-var form of
+  `--clang-arg`; `AOXN_CC_WARNINGS=1` - same as `--cc-warnings`.
 
-Diagnostics stages: `lex`, `parse`, `type`, `internal`, `link`, `io`.
+Diagnostics stages: `lex`, `parse`, `type`, `internal`, `link`, `io`, `asset`,
+`cc`.
 
 ## Platform support
 

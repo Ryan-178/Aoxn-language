@@ -181,8 +181,11 @@ Env: `AOXN_DUMP_C=1` dumps generated C to stderr; `AOXN_TIME=1` prints
 pipeline phase wall-clock (lex/parse/typecheck/codegen/link);
 `AOXN_TC_TRACE=1` prints per-fn typecheck markers; `AOXN_CPU=native` (or
 `--cpu native`) targets the host CPU; `AOXN_CLANG=<path>` selects the clang
-executable. NOTE: `AOXN_DUMP_IR`, `AOXN_PASSES`, `AOXN_BACKEND`,
-`AOXN_CG_TRACE` are DEAD since v0.29.0 (LLVM-era).
+executable; `AOXN_CLANG_ARGS` (newline-separated) is the env form of the
+repeatable `--clang-arg` / `-g` passthrough; `AOXN_CC_WARNINGS=1` is the env
+form of `--cc-warnings` (drops the hard-coded `-w`). NOTE: `AOXN_DUMP_IR`,
+`AOXN_PASSES`, `AOXN_BACKEND`, `AOXN_CG_TRACE` are DEAD since v0.29.0
+(LLVM-era).
 
 Single test: `cargo test --test pipeline recursion_fib`.
 
@@ -276,11 +279,18 @@ src/main.rs           CLI (build / run / c / pkg...), --json diagnostics, -l/-L 
 crates/aoxn-pkg       package manager crate (its own dependency set; see above)
 ```
 
-- Diagnostics: `Diag { stage, file: u32, line, col, message }` in lib.rs;
-  stages are `lex | parse | type | internal | link | io`. `file` indexes
-  `src/files.rs` (thread_local registry) — resolved to names at print/JSON
-  time. Compiler-internal failures must surface as `internal` diags, never
-  panics.
+- Diagnostics: `Diag { stage, file: u32, line, col, message, severity, code }`
+  in lib.rs; stages are `lex | parse | type | internal | link | io | asset |
+  cc`. `file` indexes `src/files.rs` (thread_local registry) — resolved to
+  names at print/JSON time. Compiler-internal failures must surface as
+  `internal` diags, never panics. **`severity` splits errors from warnings**
+  (v0.42.0): warnings never fail a build, ride a thread-local channel
+  (`push_warning`/`take_warnings`, cleared once per `typecheck::check`) instead
+  of every pipeline `Result`, and appear in `--json` as a `warnings` array
+  beside `errors` — including on success. `W001` is the unused-local lint.
+  A **`cc`** diag means the C compiler rejected our text (nearly always a
+  user `extern def` that contradicts a C declaration) — do not fold it back
+  into `internal`.
 - The compiler library `src/` has zero external crate dependencies. The C
   emitter is plain string building — no LLVM handles, no FFI of its own
   beyond what user programs declare.
@@ -350,6 +360,30 @@ crates/aoxn-pkg       package manager crate (its own dependency set; see above)
   `==` binds TIGHTER than `&`** (`a & b == c` is `a & (b == c)` — write
   `(a & b) == c`), and there are **no augmented bitwise forms** — write
   `x = x & y`. Do not "fix" the precedence to what looks intuitive.
+- **The spelling/IO layer grew in v0.42.0** (all four are pinned in
+  `tests/pipeline.rs`):
+  - **Integer literals**: decimal, `0x`/`0X` hex, `0b`/`0B` binary. The whole
+    alphanumeric run after the prefix is consumed so a malformed literal names
+    the offending digit; `0x` alone and out-of-range values have their own
+    messages. Mirrored in `selfhost/lexer.ax` (`parse_radix`,
+    `is_radix_digit`) and pinned by `selfhost_driver_mirrors_radix_literals_and_escapes`.
+  - **Six string escapes**: `\n \t \r \0 \\ \"` (`\r` and `\0` are new).
+    `\0` is for byte buffers only — `len()` is `strlen`, so a NUL truncates
+    every string builtin.
+  - **`assert(cond[, message])`** prints `assertion failed at line N[: msg]`
+    (stdout, like the uncaught-exception report — the runtime never writes to
+    stderr) and exits 1. Not catchable, and it does not count as an exit for
+    the all-paths-return rule.
+  - **`exit(code)`**, and **`argc()`/`arg(i)`** for the command line. `argc()`
+    excludes the program path; `arg(i)` is 0-based and returns `""` out of
+    range. **The `main(argc, argv)` wrapper and the argv globals are emitted
+    ONLY when the program calls those two builtins** — every other program's C
+    text is byte-identical, which is why the self-host fixed point needs no
+    `selfhost/codegen.ax` mirror for argv (stage-2 does not know the builtins,
+    same status as the v0.40.0 features). `def main(argc: int)` is now a
+    `type` error naming the builtins (it used to reach clang and surface as
+    `internal`); `main` returns `int` or `void`, with the TS front end's
+    `function main(): number` explicitly exempt.
 - **`vec_push` delegates again (v0.39.2) — the "self-host trap" is
   ROOT-CAUSED, and it was never a compiler bug.** The culprit is
   `struct_cycle` in `selfhost/typecheck.ax`: the cycle detector threaded its
@@ -772,9 +806,10 @@ crates/aoxn-pkg       package manager crate (its own dependency set; see above)
   SDK's content blocks (a discriminated union with no union type in the
   language) are the worked example of how far JSON text carries you. The tagged-slab
   design in `stdlib/net/json.ax` (kind / i64 / f64 / ptrA / ptrB) is the
-  in-repo pattern for dynamic values. Also: argv is still absent
-  (`int main(void)` in `src/codegen_c.rs:653`), blocking `sys`/`argparse`;
-  and **there is no `inf`/`nan` literal and float division by zero is emitted
+  in-repo pattern for dynamic values. (argv landed in v0.42.0 — `argc()` /
+  `arg(i)`, see the language rules above — so `sys`/`argparse` are unblocked;
+  what is still missing is a test runner, see `docs/stdlib-todo.md` §0.7.)
+  And **there is no `inf`/`nan` literal and float division by zero is emitted
   raw** (`Div => "/"`), so every numeric library must ship a guarded `fdiv`
   and synthesize NaN via `log(-1.0)`.
 - **`docs/language-gaps.md` is the "why" behind that "what"** — every
