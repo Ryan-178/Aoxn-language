@@ -106,7 +106,7 @@ v0.40.0 的唯一联合形式是 `T | None`，且 `dict[V]` 的**值类型只有
 |---|---|---|---|
 | **P0** | 基座 + 纯 extern/math 能吃的 | `vec` 基座、`time`、`datetime`、`calendar`、`hashlib`、`hmac`、`base64`(补 decode)、`os`(核心)、`pathlib`、`glob` | 立刻能做，风险最低 |
 | **P1** | 解析与序列化 | `json`(已有，需提升)、`csv`、`re`、`shutil`、`bisect`、`heapq`、`socket`(已有需上提) | 有工程量但形状清晰 |
-| **P2** | 容器与并发 | `collections`、`itertools`、`urllib`、`threading`、`concurrent.futures` | 前两个依赖 P0 基座；线程有真实阻塞 |
+| **P2** | 容器与并发 | `collections`、`itertools`、`urllib`、`threading`、`concurrent.futures` | 前两个依赖 P0 基座；线程可行（见 #18），但同步原语要从 extern 起步 |
 | **P3** | 语言级阻塞 | `sys`、`argparse`、`multiprocessing`、`pickle`、`logging`、`traceback`、`typing`、`unittest` | 需要先改语言或改需求形态 |
 
 第二份清单（第三方 / 大型库，见 §5）**不套用这四个批次**——它们不是标准库
@@ -154,7 +154,7 @@ v0.40.0 的唯一联合形式是 `T | None`，且 `dict[V]` 的**值类型只有
 
 | # | 模块 | 批次 | 可行性 | 备注 |
 |---|---|---|---|---|
-| 12 | `collections` | P2 | ⚠️ 依赖 P0 `Vec[T]` | `deque`（环形缓冲）、`defaultdict`、`Counter`、`OrderedDict`。注意 `dict[V]` 是**堆句柄**（v0.40.0），复制句柄=共享同一个 dict —— `OrderedDict` 的插入序要自己维护一个索引 `Vec`，不能指望底层有序。 |
+| 12 | `collections` | P2 | ⚠️ 依赖 P0 `Vec[T]` | `deque`（环形缓冲）、`defaultdict`、`Counter`、`OrderedDict`。`dict[V]` 是**堆句柄**（v0.40.0），复制句柄=共享同一个 dict。**插入序底层已经有了**（`for k in d` 按插入序走 key 数组，`codegen_c.rs:1361`），所以 `OrderedDict` 的真正成本是**查找是 O(n) 线性扫描**（`ax_dict_find_T`，codegen_c.rs:789）——不是保序，是规模。超过几百条就要考虑换结构。 |
 | 13 | `itertools` | P2 | ⚠️ **没有 `yield`** | 惰性迭代器做不了（`yield` 在 spec roadmap 第 9 条）。**形态改成"批量返回数组"**：`chain(list, list) -> Vec[T]`、`permutations(n) -> Vec[Perm]`、`product(a, b) -> Vec[Tuple]`。无限迭代器（`count`/`cycle`）改为「带 `take(n)` 的生成函数」。**这个降级要在模块头注释里写明**。 |
 | 14 | `bisect` | P1 | ✅ | 便宜。`bisect_left/right` 对有序 `Vec[T]`（**注意：泛型按长度单态化，长度是类型的一部分** → 变长容器要用堆容器）。 |
 | 15 | `heapq` | P1 | ✅ | 标准二叉堆，`heap_push`/`heap_pop`/`heapify`。和 `bisect` 一起做。 |
@@ -170,9 +170,9 @@ v0.40.0 的唯一联合形式是 `T | None`，且 `dict[V]` 的**值类型只有
 
 | # | 模块 | 批次 | 可行性 | 备注 |
 |---|---|---|---|---|
-| 18 | `threading` | P2 | ⛔ **语言阻塞** | Win32 `CreateThread` 本身能 extern，但**线程入口必须是一个函数**。v0.40.0 的 fn-ptr 在**值位置**可用，`extern def` 的参数能不能收 fn-ptr **未验证**。若不能，`CreateThread` 就传不进去 —— 需要编译器侧给 extern 参数加 fn-ptr 类型。**先做这个最小验证实验再排期。** |
-| 19 | `multiprocessing` | P3 | ⛔ | 依赖 `threading` 的入口问题，外加共享内存 / 管道 / 句柄继承。语言没有共享可变状态的一切原语（没有类、没有闭包、没有 `with`）。**整体推到最后，甚至考虑不做。** |
-| 20 | `concurrent.futures` | P2 | ⛔ 依赖 18/19 | 线程池 = 18；进程池 = 19。**没有线程就没有这个模块。** |
+| 18 | `threading` | P2 | ✅ **可行** | `extern def` 确实拒绝 fn-ptr 参数（typecheck.rs:112），**但错误信息自己给了逃生口：把函数地址当 `int` 传**。`CreateThread(0, 0, to_int(worker), 0, 0, 0)` 在 x86-64 上 ABI 是通的（函数指针与数据指针同宽同寄存器）。真正缺的是上层同步原语：`CreateMutex` / `WaitForSingleObject` / `SRWLock` / `Interlocked*`，都能 extern。**详见 `docs/language-gaps.md` §3。** |
+| 19 | `multiprocessing` | P3 | ⛔ | 线程入口不再是问题，但**共享内存 / 管道 / 句柄继承**要写，语言没有共享可变状态的一切原语（没有类、没有闭包、没有 `with`）。**整体推到最后，甚至考虑不做** —— 替代方案是本地 socket（`web/sock_win.ax`）或子进程 + stdin/stdout。 |
+| 20 | `concurrent.futures` | P2 | ⚠️ 依赖 18 | 线程池建在 18 之上，现在可行了；进程池仍卡在 19。 |
 
 ### 7. 编码、哈希加密
 

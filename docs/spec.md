@@ -762,7 +762,9 @@ Ordered by how much they cost the language's Python parity.
    15 third-party libraries in §5) is in `docs/stdlib-todo.md`; its §0 lists the
    language-level constraints each module runs into (the self-host critical
    path, argv, the int-only `Vec`, the absence of `enum`/tagged unions, and the
-   missing `inf`/`nan` literals).
+   missing `inf`/`nan` literals). **`docs/language-gaps.md` is the companion**:
+   it maps every gap in this roadmap to the libraries it blocks, the files a
+   change would touch, its cost, and a ranked order for closing them.
 8. Top-level statements as an implicit `main` (module-script mode).
 9. Larger Python features, each of which is a real language design (not just
    syntax): `with`, generators and `yield`, closures and decorators, classes,

@@ -416,6 +416,7 @@ program. It also compiles the real stdlib and the full `examples/` suite. See
 | `docs/ide.md` | the IDE: architecture, security boundary, development workflow |
 | `docs/spec.md` | full language specification |
 | `docs/stdlib-todo.md` | the standard-library roadmap: the 31 remaining Python stdlib modules batched P0–P3, plus the 15 third-party libraries (`numpy`, `pandas`, `flask`, `matplotlib`, `pytorch`, …) ordered by dependency chain — each with the language constraints it runs into |
+| `docs/language-gaps.md` | why some of those cannot be built: every missing language feature (no references, no `enum`/tagged unions, no tuples, no namespaces, no GC, …) with what it blocks, which files a change touches, its cost, and a ranked order for closing them |
 | `wiki/` | bilingual (中文/English) wiki — frozen since v0.29.3; `docs/` is the living documentation |
 
 ## Testing & CI

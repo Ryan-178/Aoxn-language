@@ -707,6 +707,21 @@ crates/aoxn-pkg       package manager crate (its own dependency set; see above)
   and **there is no `inf`/`nan` literal and float division by zero is emitted
   raw** (`Div => "/"`), so every numeric library must ship a guarded `fdiv`
   and synthesize NaN via `log(-1.0)`.
+- **`docs/language-gaps.md` is the "why" behind that "what"** — every
+  missing language feature with what it blocks, which files a change must
+  touch, its cost, and a ranked order for closing them. Read it before
+  proposing a language change; it also carries a cost model (§4) that makes
+  the price of a feature predictable (a feature that emits NEW C text also
+  has to be mirrored in `selfhost/codegen.ax`, so it costs ~2x). Two
+  entries there correct easy-to-misread facts: **threads are NOT blocked**
+  (`extern def` rejects an fn-pointer parameter, but its own error message
+  says "pass its address as an int" — `CreateThread(0,0,to_int(f),0,0,0)`
+  is ABI-fine on x64), and **`dict` DOES preserve insertion order** — its
+  cost is the O(n) linear scan (`ax_dict_find_T`, `codegen_c.rs:789`), not
+  ordering. The ranked shortlist (§5) puts module namespaces first, because
+  every `import` merges into ONE namespace and a duplicate `def` name is a
+  HARD error (`typecheck.rs:94`) — which is why `ui_`/`oa_`/`plat_` are
+  hand-prefixed everywhere today.
 - Client defaults mirror openai-python: base URL `https://api.openai.com/v1`
   (env `OPENAI_BASE_URL`), key from `OPENAI_API_KEY`, org `OPENAI_ORG_ID`,
   project `OPENAI_PROJECT_ID`, 600 s receive / 5 s connect timeouts, 2
