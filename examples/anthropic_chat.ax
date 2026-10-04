@@ -1,0 +1,140 @@
+# Anthropic Messages — the Aoxn Anthropic SDK in action (stdlib/anthropic/, v0.41.0).
+#
+# Four things, in the order you would meet them: a plain message, the same
+# prompt streamed token-by-token, a tool loop (the model asks for a tool,
+# you answer, it finishes), and a token count. Run it with a key:
+#
+#   $env:ANTHROPIC_API_KEY = "sk-ant-..."
+#   cargo run -- run examples\anthropic_chat.ax -l winhttp
+#
+# Optional: ANTHROPIC_BASE_URL (a gateway or a proxy). Without a key the
+# demo says so and exits 0 — CI runs it to prove the SDK links and the
+# client surface works.
+
+import * from "stdlib/anthropic/client"
+
+def one_message(c: AnClient, model: string, prompt: string) -> int:
+    m = an_msgs_new()
+    m = an_msgs_push_text(m, "user", prompt)
+    opts = an_opts_new()
+    opts.system = "Answer in one short sentence."
+    r = an_messages_create(c, model, m, 256, opts)
+    if not an_resp_ok(r):
+        print("messages failed: " + an_err_msg(r))
+        return 1
+    print("assistant: " + an_msg_text(r))
+    print("(model " + an_msg_model(r) + ", stop=" + an_msg_stop_reason(r) + ", " + an_usage_line(r) + ")")
+    return 0
+
+# The streaming path. Two things to notice:
+#   - an_stream_text gives the text_delta of ONE event, which is the piece
+#     to print as it arrives;
+#   - the accumulator keeps folding events into a finished Message, so
+#     after the loop `an_msg_text(st.acc)` still gives the whole answer —
+#     and, unlike the OpenAI SDK, a tool call's arguments, which exist
+#     nowhere else but in the deltas.
+def streamed(c: AnClient, model: string, prompt: string) -> int:
+    m = an_msgs_new()
+    m = an_msgs_push_text(m, "user", prompt)
+    st = an_messages_stream(c, model, m, 256, an_opts_new())
+    if st.err == 1:
+        print("stream failed: " + st.errmsg)
+        return 1
+    guard = 0
+    while not st.done and st.err == 0 and guard < 10000:
+        st = an_stream_next(st)
+        if st.res != "":
+            print(an_stream_text(st.res))
+        guard = guard + 1
+    an_stream_close(st)
+    print("")
+    print("(streamed " + str(len(an_msg_text(an_acc_resp(st.acc)))) + " chars, " + an_usage_line(an_acc_resp(st.acc)) + ")")
+    return 0
+
+# A tool the model can call. `get_weather` is a stub: the point is the
+# SHAPE of the exchange, not the weather.
+def run_tool(c: AnClient, model: string) -> int:
+    sc = an_schema_new()
+    sc = an_schema_str(sc, "city", "City name, e.g. \"Paris\"")
+    sc = an_schema_required(sc, an_str_vec("city"))
+    tools = vec_new()
+    tools = vec_push_str(tools, an_tool("get_weather", "Current weather for a city.", an_schema_json(sc)))
+
+    opts = an_opts_new()
+    opts.tools = tools
+    opts.tool_choice = an_tool_choice_auto(False)
+
+    m = an_msgs_new()
+    m = an_msgs_push_text(m, "user", "What is the weather in Paris? Use the tool.")
+
+    r = an_messages_create(c, model, m, 512, opts)
+    if not an_resp_ok(r):
+        print("tool loop failed: " + an_err_msg(r))
+        return 1
+    ti = an_find_tool_use(r)
+    if ti < 0:
+        # not an error: the model may simply have answered in prose
+        print("assistant: " + an_msg_text(r))
+        return 0
+    city = an_block_tool_input_str(r, ti, "city")
+    call_id = an_block_tool_id(r, ti)
+    print("model asked for " + an_block_tool_name(r, ti) + "(" + city + ")")
+
+    # answer the tool: the whole assistant turn goes back verbatim, then the
+    # result rides in a user-role message
+    reply = vec_new()
+    reply = vec_push_str(reply, an_block_tool_use(call_id, an_block_tool_name(r, ti), an_block_tool_input(r, ti)))
+    m = an_msgs_push_blocks(m, "assistant", reply)
+    result = vec_new()
+    result = vec_push_str(result, an_block_tool_result(call_id, "18C, light rain"))
+    m = an_msgs_push_blocks(m, "user", result)
+
+    r2 = an_messages_create(c, model, m, 512, opts)
+    if not an_resp_ok(r2):
+        print("tool follow-up failed: " + an_err_msg(r2))
+        return 1
+    print("assistant: " + an_msg_text(r2))
+    print("(" + an_usage_line(r2) + ")")
+    return 0
+
+# count_tokens answers "what will this conversation cost" without sending it
+def count(c: AnClient, model: string, prompt: string) -> int:
+    m = an_msgs_new()
+    m = an_msgs_push_text(m, "user", prompt)
+    r = an_messages_count_tokens(c, model, m, an_opts_new())
+    if not an_resp_ok(r):
+        print("count_tokens failed: " + an_err_msg(r))
+        return 1
+    print("input tokens: " + str(an_count_tokens_value(r)))
+    return 0
+
+def main() -> int:
+    c = an_client_env()
+    if not an_client_ok(c):
+        print("set ANTHROPIC_API_KEY to run this demo against the live API")
+        print("(the SDK itself is exercised offline by cargo test --test anthropic_sdk)")
+        return 0
+    model = "claude-sonnet-4-5"
+    prompt = "Name three sorting algorithms, one line, comma separated."
+    if one_message(c, model, prompt) == 1:
+        return 1
+    print("== streaming ==")
+    if streamed(c, model, prompt) == 1:
+        return 1
+    print("== tools ==")
+    if run_tool(c, model) == 1:
+        return 1
+    print("== token count ==")
+    if count(c, model, prompt) == 1:
+        return 1
+    # the plain-models round trip
+    r = an_models_list(c)
+    if an_resp_ok(r):
+        n = an_data_len(r)
+        if n > 0:
+            print("models: " + str(n) + " listed; first: " + an_data_id(r, 0))
+        else:
+            print("models: " + str(n) + " listed")
+    else:
+        print("models failed: " + an_err_msg(r))
+    return 0

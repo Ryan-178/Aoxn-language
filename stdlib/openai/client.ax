@@ -1,4 +1,4 @@
-# Aoxn OpenAI SDK — client (v0.40.1).
+# Aoxn OpenAI SDK — client (v0.41.0).
 #
 # The Python SDK's surface, flattened into the Aoxn idiom: one `OaClient`
 # value carries the configuration (key, base URL, org/project, timeouts,
@@ -16,15 +16,20 @@
 # Errors follow the repo's Err-value channel (v0.39.0): nothing raises.
 # `oa_resp_ok` is the gate; `oa_err_msg` renders transport failures, HTTP
 # statuses and the API's `error.message` into one string. Streaming keeps
-# the WinHTTP request open and feeds SSE frames through sse.ax.
+# the WinHTTP request open and feeds SSE frames through net/sse.ax.
 #
-# Link requirement: -l winhttp (http.ax). Plain Aoxn throughout.
+# This file is the OpenAI-SPECIFIC half. The transport, the JSON DOM, the
+# codecs and the SSE filter live in stdlib/net/ and are shared with the
+# Anthropic SDK (stdlib/anthropic/) — v0.40.1 kept all five files here,
+# before there was a second SDK to share them with.
+#
+# Link requirement: -l winhttp (net/http.ax). Plain Aoxn throughout.
 
 import * from "../stdlib.ax"
-import * from "./codec.ax"
-import * from "./json.ax"
-import * from "./http.ax"
-import * from "./sse.ax"
+import * from "../net/codec.ax"
+import * from "../net/json.ax"
+import * from "../net/http.ax"
+import * from "../net/sse.ax"
 
 extern def getenv(name: string) -> string
 
@@ -35,6 +40,31 @@ def oa_env(name: string) -> string:
     if as_ptr(p) == 0:
         return ""
     return p
+
+# ---- OpenAI's own wire identity ----
+
+# the SDK version, spelled once (kept in step with the compiler release)
+def oa_version() -> string:
+    return "0.41.0"
+
+# what we send as User-Agent, and what WinHttpOpen is registered under
+def oa_user_agent() -> string:
+    return "aoxn-openai/" + oa_version()
+
+# the standard header block every request carries. `org` / `project` empty
+# means omit (the Python SDK omits them when unset).
+def oa_headers_build(api_key: string, org: string, project: string, body: string) -> string:
+    nl = net_crlf()
+    h = "Authorization: Bearer " + api_key + nl
+    if len(org) > 0:
+        h = h + "OpenAI-Organization: " + org + nl
+    if len(project) > 0:
+        h = h + "OpenAI-Project: " + project + nl
+    if len(body) > 0:
+        h = h + "Content-Type: application/json" + nl
+    h = h + "Accept: application/json" + nl
+    h = h + "User-Agent: " + oa_user_agent() + nl
+    return h
 
 # ---- the client ----
 
@@ -49,7 +79,7 @@ struct OaClient:
 
 def oa_client_new(api_key: string) -> OaClient:
     return OaClient(api_key=api_key, base_url="https://api.openai.com/v1", org="", project="",
-        connect_ms=OA_DEFAULT_CONNECT_MS(), timeout_ms=OA_DEFAULT_TIMEOUT_MS(), max_retries=OA_DEFAULT_RETRIES())
+        connect_ms=NET_DEFAULT_CONNECT_MS(), timeout_ms=NET_DEFAULT_TIMEOUT_MS(), max_retries=NET_DEFAULT_RETRIES())
 
 # explicit base URL (Azure-style gateways, local proxies, reseldon endpoints)
 def oa_client_at(api_key: string, base_url: string) -> OaClient:
@@ -83,6 +113,7 @@ struct OaResp:
     pok: int          # 1 = body parsed as JSON
     pmsg: string      # JSON parse error message
     raw: string       # raw body text
+    request_id: string   # the server's x-request-id ("" when absent)
     terr: int         # 1 = transport-level failure
     tmsg: string      # transport error message
     retries: int      # retry attempts consumed
@@ -112,26 +143,27 @@ def oa_request(c: OaClient, method: string, path: string, body: string) -> OaRes
     headers = oa_headers_build(c.api_key, c.org, c.project, body)
     attempt = 0
     while attempt <= c.max_retries:
-        r0 = oa_http_request(method, url, headers, body, c.connect_ms, c.timeout_ms)
+        r0 = net_http_request(method, url, headers, body, oa_user_agent(), c.connect_ms, c.timeout_ms)
         if r0.err == 1:
-            delay = oa_retry_delay(attempt, c.max_retries, 0, 0)
+            delay = net_retry_delay(attempt, c.max_retries, 0, 0)
             if delay >= 0:
                 Sleep(delay)
                 attempt = attempt + 1
                 continue
-            return OaResp(status=0, dom=jdom_new(), pok=0, pmsg="", raw="", terr=1, tmsg=r0.errmsg, retries=attempt)
+            return OaResp(status=0, dom=jdom_new(), pok=0, pmsg="", raw="", request_id="", terr=1, tmsg=r0.errmsg, retries=attempt)
         p = j_parse(r0.body)
         pok = 1
         if p.err == 1:
             pok = 0
-        resp = OaResp(status=r0.status, dom=p.dom, pok=pok, pmsg=p.errmsg, raw=r0.body, terr=0, tmsg="", retries=attempt)
-        delay = oa_retry_delay(attempt, c.max_retries, r0.status, 0)
+        resp = OaResp(status=r0.status, dom=p.dom, pok=pok, pmsg=p.errmsg, raw=r0.body, request_id=r0.request_id, terr=0, tmsg="", retries=attempt)
+        # Retry-After wins over our own backoff when the server sent one
+        delay = net_retry_delay(attempt, c.max_retries, r0.status, r0.retry_after)
         if delay >= 0:
             Sleep(delay)
             attempt = attempt + 1
             continue
         return resp
-    return OaResp(status=0, dom=jdom_new(), pok=0, pmsg="", raw="", terr=1, tmsg="gave up after retries", retries=c.max_retries)
+    return OaResp(status=0, dom=jdom_new(), pok=0, pmsg="", raw="", request_id="", terr=1, tmsg="gave up after retries", retries=c.max_retries)
 
 # ---- request bodies (pure; testable without network) ----
 
@@ -223,10 +255,10 @@ def oa_models_list(c: OaClient) -> OaResp:
     return oa_request(c, "GET", "/models", "")
 
 def oa_models_retrieve(c: OaClient, model: string) -> OaResp:
-    return oa_request(c, "GET", "/models/" + oa_url_encode(model), "")
+    return oa_request(c, "GET", "/models/" + net_url_encode(model), "")
 
 def oa_models_delete(c: OaClient, model: string) -> OaResp:
-    return oa_request(c, "DELETE", "/models/" + oa_url_encode(model), "")
+    return oa_request(c, "DELETE", "/models/" + net_url_encode(model), "")
 
 # ---- resources: moderations ----
 
@@ -313,8 +345,8 @@ def oa_embedding_at(r: OaResp, i: int, k: int) -> float:
 # ---- streaming (chat.completions with stream=true) ----
 
 struct OaStream:
-    hs: OaHttpStream
-    sse: OaSse
+    hs: NetHttpStream
+    sse: NetSse
     rbuf: int        # network read scratch
     done: bool       # [DONE] seen or connection closed
     res: string      # the latest event's JSON payload ("" between events)
@@ -328,8 +360,8 @@ def oa_chat_stream(c: OaClient, model: string, roles: Vec, contents: Vec, temper
     body = oa_body_chat(model, roles, contents, True, temperature, has_temp, max_tokens)
     headers = oa_headers_build(c.api_key, c.org, c.project, body)
     url = c.base_url + "/chat/completions"
-    hs = oa_http_stream_open("POST", url, headers, body, c.connect_ms, c.timeout_ms)
-    s = OaStream(hs=hs, sse=oa_sse_new(), rbuf=malloc(16384), done=False, res="", status=hs.status, err=0, errmsg="")
+    hs = net_http_stream_open("POST", url, headers, body, oa_user_agent(), c.connect_ms, c.timeout_ms)
+    s = OaStream(hs=hs, sse=net_sse_new(), rbuf=malloc(16384), done=False, res="", status=hs.status, err=0, errmsg="")
     if hs.err == 1:
         s.err = 1
         s.errmsg = hs.errmsg
@@ -340,7 +372,7 @@ def oa_chat_stream(c: OaClient, model: string, roles: Vec, contents: Vec, temper
         total = 0
         ebuf = malloc(16384)
         while total < 16383:
-            hs = oa_http_stream_read(hs, ebuf + total, 16383 - total)
+            hs = net_http_stream_read(hs, ebuf + total, 16383 - total)
             if hs.err == 1 or hs.got == 0:
                 break
             total = total + hs.got
@@ -353,8 +385,8 @@ def oa_chat_stream(c: OaClient, model: string, roles: Vec, contents: Vec, temper
         if e >= 0:
             s.errmsg = "openai " + str(hs.status) + ": " + j_get_str(p.dom, e, "message", "request failed")
         s.done = True
-        oa_http_stream_close(hs)
-        s.hs = OaHttpStream(session=0, conn=0, req=0, status=0, got=0, err=0, errmsg="")
+        net_http_stream_close(hs)
+        s.hs = NetHttpStream(session=0, conn=0, req=0, status=0, got=0, request_id="", err=0, errmsg="")
         return s
     return s
 
@@ -371,7 +403,7 @@ def oa_stream_next(s: OaStream) -> OaStream:
     if s.err == 1 or s.done:
         return s
     while True:
-        s.sse = oa_sse_next(s.sse)
+        s.sse = net_sse_next(s.sse)
         if s.sse.done:
             s.done = True
             s.res = ""
@@ -379,7 +411,7 @@ def oa_stream_next(s: OaStream) -> OaStream:
         if s.sse.res != "":
             s.res = s.sse.res
             return s
-        s.hs = oa_http_stream_read(s.hs, s.rbuf, 16384)
+        s.hs = net_http_stream_read(s.hs, s.rbuf, 16384)
         if s.hs.err == 1:
             s.err = 1
             s.errmsg = s.hs.errmsg
@@ -388,11 +420,11 @@ def oa_stream_next(s: OaStream) -> OaStream:
             s.done = True
             s.res = ""
             return s
-        s.sse = oa_sse_feed(s.sse, s.rbuf, s.hs.got)
+        s.sse = net_sse_feed(s.sse, s.rbuf, s.hs.got)
     return s
 
 def oa_stream_close(s: OaStream):
-    oa_http_stream_close(s.hs)
+    net_http_stream_close(s.hs)
     free(s.rbuf)
 
 # pure helpers over one chunk's JSON (offline-testable)

@@ -1,4 +1,5 @@
-# Aoxn OpenAI SDK — JSON (v0.40.1).
+# Aoxn net layer — JSON (v0.41.0; first shipped as stdlib/openai/json.ax in
+# v0.40.1 — it was provider-neutral all along, and the Anthropic SDK shares it).
 #
 # Aoxn has no dict, no `None`, no `sizeof`, and no address-of-struct. A general
 # JSON DOM therefore cannot live in a `Vec` of `JVal` structs (Vec moves 8-byte
@@ -101,25 +102,29 @@ def jdom_push(dom: JDom, kind: int, ival: int, fval: float, ptr_a: int, ptr_b: i
 
 # ---- accessors ----
 # Every accessor tolerates an EMPTY dom (`j_parse` failure leaves slab == 0):
-# it reads as a null node instead of dereferencing NULL.
+# it reads as a null node instead of dereferencing NULL. It also tolerates a
+# NEGATIVE index: -1 is this module's "absent" answer everywhere (j_obj_get,
+# j_arr_get, j_obj_val_idx), and callers routinely pipe it straight into
+# another accessor — `j_dumps(dom, j_obj_get(dom, i, "input"))` is the
+# idiom the SDKs use. Without the guard that reads 40 bytes BEFORE the slab.
 
 def j_kind(dom: JDom, i: int) -> int:
-    if dom.slab == 0:
+    if dom.slab == 0 or i < 0:
         return J_NULL()
     return load_i64(dom.slab + i * 40)
 
 def j_ival(dom: JDom, i: int) -> int:
-    if dom.slab == 0:
+    if dom.slab == 0 or i < 0:
         return 0
     return load_i64(dom.slab + i * 40 + 8)
 
 def j_fval(dom: JDom, i: int) -> float:
-    if dom.slab == 0:
+    if dom.slab == 0 or i < 0:
         return 0.0
     return load_f64(dom.slab + i * 40 + 16)
 
 def j_as_str(dom: JDom, i: int) -> string:
-    if dom.slab == 0:
+    if dom.slab == 0 or i < 0:
         return ""
     return as_string(load_i64(dom.slab + i * 40 + 24))
 
@@ -396,7 +401,7 @@ def jp_str(p: JParse) -> JParse:
                         return jp_fail(p, "lone surrogate")
                 elif cp >= 56320 and cp < 57344:
                     return jp_fail(p, "lone surrogate")
-                m = oa_cp_utf8(cp, out + oi)
+                m = net_cp_utf8(cp, out + oi)
                 oi = oi + m
             else:
                 return jp_fail(p, "bad escape")
@@ -590,7 +595,16 @@ def jp_obj(p: JParse) -> JParse:
 # parse a complete JSON document; the root node is `p.dom.last`. On failure
 # `p.err` is 1 and `p.errmsg` carries the message.
 def j_parse(src: string) -> JParse:
-    p = JParse(src=src, pos=0, dom=jdom_new(), err=0, errmsg="", res=0)
+    return j_parse_into(jdom_new(), src)
+
+# the same parse, but the nodes are APPENDED to a dom that already has
+# content instead of starting a fresh one. This is what lets the builder
+# below splice a hand-written fragment (`input_schema`, a tool input echoed
+# back verbatim) into a larger document: the fragment's nodes land in the
+# SAME slab, so their child indices are already correct and no remapping is
+# needed. `p.dom.last` is the fragment's root.
+def j_parse_into(dom: JDom, src: string) -> JParse:
+    p = JParse(src=src, pos=0, dom=dom, err=0, errmsg="", res=0)
     p = jp_value(p)
     if p.err == 1:
         return p
@@ -704,8 +718,8 @@ def j_quote(s: string) -> string:
             store_u8(out, oi + 1, 117)
             store_u8(out, oi + 2, 48)
             store_u8(out, oi + 3, 48)
-            store_u8(out, oi + 4, oa_hex_digit(c / 16))
-            store_u8(out, oi + 5, oa_hex_digit(c % 16))
+            store_u8(out, oi + 4, net_hex_digit(c / 16))
+            store_u8(out, oi + 5, net_hex_digit(c % 16))
             oi = oi + 6
         else:
             store_u8(out, oi, c)
@@ -758,3 +772,161 @@ def j_roundtrip(src: string) -> string:
     if p.err == 1:
         return ""
     return j_dumps(p.dom, p.dom.last)
+
+# ============================================================
+# builder (the other direction: DOM -> JSON text)
+# ============================================================
+#
+# The parser answers "what does this JSON say"; the builder answers "make me
+# this JSON". It exists because the Anthropic SDK (v0.41.0) has to EMIT
+# nested structures — a tool's input_schema, a tool_use block's `input`, a
+# metadata object — and hand-assembling those as escaped string literals is
+# where a missing backslash turns into a 400 from the server. Everything
+# below routes through `j_quote`, so escaping is the parser's problem again.
+#
+# It writes into the SAME slab the parser produces, so a built DOM can be
+# read with every accessor above and serialized with `j_dumps`. A builder
+# node and a parsed node are the same thing; only their provenance differs.
+#
+# Capacity lives in the +16 slot of an ARR/OBJ node, which the parser leaves
+# at 0.0 because neither kind stores a float there. `j_fval` on such a node
+# is meaningless anyway (floats live in FLOAT nodes), so nothing that read
+# the DOM before can be confused by it. A node the PARSER made has capacity
+# 0 and no child buffers sized for appending, so `jb_grow` treats 0 as "give
+# me the default" — a parsed object can still be extended, just not for free.
+
+def JB_MIN_CAP() -> int:
+    return 8
+
+# make room for one more child on node `i`, doubling from its stored
+# capacity. Objects move BOTH buffers (values then keys); arrays move one.
+def jb_grow_arr(dom: JDom, i: int) -> JDom:
+    base = dom.slab + i * 40
+    cap = to_int(load_f64(base + 16))
+    if cap <= 0:
+        cap = JB_MIN_CAP()
+    newcap = cap * 2
+    store_i64(base + 24, realloc(load_i64(base + 24), newcap * 8))
+    store_f64(base + 16, to_float(newcap))
+    return dom
+
+def jb_grow_obj(dom: JDom, i: int) -> JDom:
+    base = dom.slab + i * 40
+    cap = to_int(load_f64(base + 16))
+    if cap <= 0:
+        cap = JB_MIN_CAP()
+    newcap = cap * 2
+    store_i64(base + 24, realloc(load_i64(base + 24), newcap * 8))
+    store_i64(base + 32, realloc(load_i64(base + 32), newcap * 8))
+    store_f64(base + 16, to_float(newcap))
+    return dom
+
+# push an empty object; its index lands in `dom.last`
+def jb_obj(dom: JDom) -> JDom:
+    dom = jdom_push(dom, J_OBJ(), 0, 0.0, malloc(JB_MIN_CAP() * 8), malloc(JB_MIN_CAP() * 8))
+    store_f64(dom.slab + dom.last * 40 + 16, to_float(JB_MIN_CAP()))
+    return dom
+
+# push an empty array; its index lands in `dom.last`
+def jb_arr(dom: JDom) -> JDom:
+    dom = jdom_push(dom, J_ARR(), 0, 0.0, malloc(JB_MIN_CAP() * 8), 0)
+    store_f64(dom.slab + dom.last * 40 + 16, to_float(JB_MIN_CAP()))
+    return dom
+
+# append the node `child` (an existing index) to the array `i`
+def jb_push(dom: JDom, i: int, child: int) -> JDom:
+    if j_kind(dom, i) != J_ARR():
+        return dom
+    base = dom.slab + i * 40
+    n = load_i64(base + 8)
+    cap = to_int(load_f64(base + 16))
+    if n >= cap:
+        dom = jb_grow_arr(dom, i)
+        base = dom.slab + i * 40
+    store_i64(load_i64(base + 24) + n * 8, child)
+    store_i64(base + 8, n + 1)
+    return dom
+
+# append `key` = node `child` to the object `i`. A duplicate key is appended
+# like any other — JSON objects are not maps here, and a repeated key is the
+# caller's bug, not something to silently paper over.
+def jb_set(dom: JDom, i: int, key: string, child: int) -> JDom:
+    if j_kind(dom, i) != J_OBJ():
+        return dom
+    base = dom.slab + i * 40
+    n = load_i64(base + 8)
+    cap = to_int(load_f64(base + 16))
+    if n >= cap:
+        dom = jb_grow_obj(dom, i)
+    dom = jdom_push(dom, J_STR(), 0, 0.0, as_ptr(key), 0)
+    ki = dom.last
+    base = dom.slab + i * 40
+    store_i64(load_i64(base + 32) + n * 8, ki)
+    store_i64(load_i64(base + 24) + n * 8, child)
+    store_i64(base + 8, n + 1)
+    return dom
+
+# ---- leaf nodes ----
+
+def jb_null(dom: JDom) -> JDom:
+    return jdom_push(dom, J_NULL(), 0, 0.0, 0, 0)
+
+def jb_bool(dom: JDom, v: bool) -> JDom:
+    if v:
+        return jdom_push(dom, J_BOOL(), 1, 0.0, 0, 0)
+    return jdom_push(dom, J_BOOL(), 0, 0.0, 0, 0)
+
+def jb_int(dom: JDom, v: int) -> JDom:
+    return jdom_push(dom, J_INT(), v, 0.0, 0, 0)
+
+def jb_num(dom: JDom, v: float) -> JDom:
+    return jdom_push(dom, J_FLOAT(), 0, v, 0, 0)
+
+# a string node aliases `s` directly — strings are immutable and shared, and
+# the builder does not outlive the caller's buffer anyway
+def jb_str(dom: JDom, s: string) -> JDom:
+    return jdom_push(dom, J_STR(), 0, 0.0, as_ptr(s), 0)
+
+# ---- typed object members (build the child, then attach it) ----
+
+def jb_set_null(dom: JDom, i: int, key: string) -> JDom:
+    dom = jb_null(dom)
+    return jb_set(dom, i, key, dom.last)
+
+def jb_set_bool(dom: JDom, i: int, key: string, v: bool) -> JDom:
+    dom = jb_bool(dom, v)
+    return jb_set(dom, i, key, dom.last)
+
+def jb_set_int(dom: JDom, i: int, key: string, v: int) -> JDom:
+    dom = jb_int(dom, v)
+    return jb_set(dom, i, key, dom.last)
+
+def jb_set_num(dom: JDom, i: int, key: string, v: float) -> JDom:
+    dom = jb_num(dom, v)
+    return jb_set(dom, i, key, dom.last)
+
+def jb_set_str(dom: JDom, i: int, key: string, v: string) -> JDom:
+    dom = jb_str(dom, v)
+    return jb_set(dom, i, key, dom.last)
+
+# attach a member whose value is raw JSON text. The text is PARSED INTO THE
+# SAME SLAB (j_parse_into), so it nests like any other value and every escape
+# inside it is validated — an `input_schema` written by hand, or a tool input
+# echoed back verbatim, both land here. Unparseable text attaches nothing,
+# leaving the key absent rather than emitting something invalid.
+#
+# `p.dom`, never `dom`, is what goes on: parsing grows the slab, and
+# realloc frees the buffer the stale `dom.slab` still points at.
+def jb_set_raw(dom: JDom, i: int, key: string, json_text: string) -> JDom:
+    p = j_parse_into(dom, json_text)
+    if p.err == 1:
+        return p.dom
+    return jb_set(p.dom, i, key, p.dom.last)
+
+# append a raw JSON text as an array element (same parsing rule as above)
+def jb_push_raw(dom: JDom, i: int, json_text: string) -> JDom:
+    p = j_parse_into(dom, json_text)
+    if p.err == 1:
+        return p.dom
+    return jb_push(p.dom, i, p.dom.last)
+

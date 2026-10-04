@@ -650,42 +650,110 @@ crates/aoxn-pkg       package manager crate (its own dependency set; see above)
 - Same-machine benchmark caveat: client + server share the 4C8T i5-1135G7;
   Node p50 jumps 4→9.7ms under 2-client load while Aoxn stays at 0.1ms.
 
-## OpenAI SDK (stdlib/openai/) — v0.40.1
+## API SDKs (stdlib/net/ + stdlib/openai/ + stdlib/anthropic/) — v0.41.0
 
-- **FIVE modules, all plain Aoxn** (selfhost-compilable: no dict/None/fn-ptr/
-  raise anywhere): `codec.ax` (base64 RFC 4648, percent-encoding, UTF-8 ↔
-  UTF-16LE), `json.ax` (the JSON DOM), `http.ax` (WinHTTP transport), `sse.ax`
-  (the SSE pull filter), `client.ax` (`OaClient`, resources, accessors).
-  Reference: `docs/openai-sdk.md`; tests `tests/openai_sdk.rs` (2 drivers);
-  example `examples/openai_chat.ax`. Programs link `-l winhttp`.
+- **A shared transport under two SDKs.** `stdlib/net/` holds the four
+  provider-neutral modules (`codec.ax`, `json.ax`, `http.ax`, `sse.ax`,
+  prefix `net_`/type `Net*`); `stdlib/openai/` and `stdlib/anthropic/` add
+  only their own files. Those four shipped inside `stdlib/openai/` in
+  v0.40.1 and moved in v0.41.0 purely because a second SDK needed them —
+  **do not move them back, and do not put a provider name on a `net_`
+  function**. OpenAI's public surface (`oa_*`) is unchanged by the move.
+- **Everything is plain Aoxn** (selfhost-compilable: no dict/None/fn-ptr/
+  raise anywhere). References: `docs/openai-sdk.md` + `docs/anthropic-sdk.md`;
+  tests `tests/openai_sdk.rs` and `tests/anthropic_sdk.rs` (2 drivers each);
+  examples `examples/openai_chat.ax` / `examples/anthropic_chat.ax`.
+  Programs link `-l winhttp`.
 - **The JSON DOM is a slab of 40-byte nodes** (kind / i64 / f64 / ptrA / ptrB),
   child buffers are adopted `Vec.data` arrays of slab indices, and the parser
   follows the write-back discipline (`p = jp_value(p)`, extra results through
   `p.res` / `dom.last`). **Empty-dom accessors are guarded** (`slab == 0`
   reads as null) — a failed `j_parse` hands back an empty dom and every
   getter/dumps must tolerate it; the original draft dereferenced NULL there
-  and the crash looked like a parser bug.
+  and the crash looked like a parser bug. **`-1` must be guarded too** (v0.41.0
+  fix): `-1` is the "absent" answer of `j_obj_get`/`j_arr_get`, and the SDK
+  idiom `j_dumps(dom, j_obj_get(dom, i, "input"))` handed it straight to
+  `j_kind`, which read 40 bytes BEFORE the slab.
+- **The DOM gained a BUILDER in v0.41.0** (`jb_obj`, `jb_arr`, `jb_set`,
+  `jb_push`, `jb_set_str/int/num/bool/null/raw`). A tool's `input_schema` is
+  nested; hand-escaping it into a string literal is how a missing backslash
+  becomes a 400. **Capacity for an OBJ/ARR node lives in its +16 slot** (the
+  parser leaves `fval` at 0.0 because neither kind stores a float there),
+  and **a PARSED node has capacity 0** — `jb_grow_*` must treat 0 as "give me
+  the default". `j_parse_into(dom, src)` parses a fragment into an EXISTING
+  slab so its child indices are already correct and no remapping is needed.
+- **THE WRITE-BACK RULE, violated once already**: `jb_set_raw`/`jb_push_raw`
+  used `dom` after `j_parse_into` had realloc'd the slab — the stale
+  `dom.slab` was freed, and the next write was heap corruption (0xC0000374).
+  They must continue from `p.dom`. Same shape as the `vec_push` delegation
+  trap below: a callee that may grow a buffer hands back the live handle.
 - **`snprintf` CANNOT be used from an Aoxn extern.** Aoxn externs are
   fixed-arity, but printf-family is variadic: the prologue reads its float
   varargs from the XMM spill slots, which a fixed-arity call site never
   fills — `j_fmt_f(3.25)` printed `2.47e-323` (the bit pattern of 5). Float
   formatting is hand-rolled integer math (`j_fmt_f`, ~%.15g). The same trap
   waits for anyone declaring `printf`/`sprintf`/`fprintf`.
+- **`len()` ON A STRING IS `strlen`.** A string cannot carry a body with a
+  NUL byte — which is every multipart upload of a binary file. Request
+  bodies therefore have TWO entry points: `net_http_request` /
+  `net_http_stream_open` (string) and `net_http_request_bytes` /
+  `net_http_stream_open_bytes` (ptr + len). The `_bytes` pair holds the
+  implementation; the string pair is a wrapper. Do not duplicate either body.
+- **`WINHTTP_QUERY_CUSTOM` (81) DOES NOT WORK HERE.** Reading one header by
+  name returns `ERROR_INVALID_PARAMETER` (87) on this platform for every
+  name tried — including with a real buffer and a real `lpdwIndex`. The
+  transport uses `WINHTTP_QUERY_RAW_HEADERS` (22) once per response and
+  `net_header_value` / `net_header_int` scan the block, which also makes the
+  parsing pure and offline-testable. Do not "optimize" it back to a by-name
+  query.
+- **`net_url_split` KEEPS the query string** (v0.41.0 fix). The object name
+  `WinHttpOpenRequest` takes includes it — the normal WinHTTP spelling.
+  v0.40.1 stripped it, which was invisible while the only caller was the
+  OpenAI SDK (no query in its paths) and would have made every paginated
+  endpoint silently fetch the default page.
+- **Anthropic's SSE frames are NAMED.** `event:` carries the event name and
+  the payload repeats it in `type`. `NetSse` keeps both (`res` + `event`); a
+  frame with a name but NO data line is dropped, not dispatched. OpenAI is
+  data-only and unaffected.
+- **A tool call's arguments arrive ONLY as JSON text fragments**
+  (`input_json_delta.partial_json`) and are valid JSON only once the block
+  stops. That is what `AnAcc` exists for: it reassembles the stream into a
+  finished Message so the ordinary accessors read a streamed and a
+  non-streamed answer through one API. **The `{}` that
+  `content_block_start` carries is a PLACEHOLDER, not a prefix** —
+  `open_acc` holds the fragments and replaces it at flush time; appending to
+  the placeholder yields `{}{"city":"Paris"}`.
+- **A content block is a JSON TEXT string, not a struct.** The language has
+  no sum types, and text is the one representation that survives the whole
+  round trip (it composes into an array and comes back out of the
+  accumulator readable by the same accessors). Do not "improve" this into a
+  struct-per-kind.
+- **`AnOpts` is the stand-in for keyword arguments.** Fifteen optional
+  `messages.create` parameters, no defaults/kwargs/overloading in the
+  language: an empty string, empty `Vec` or zero means "omit this member",
+  which is exactly the absent-vs-empty distinction the API draws. The
+  vendored reference is a FORK whose body has no `temperature`/`top_p`/
+  `top_k` — do not add them.
 - **No `\r` escape — again.** Header blocks (HTTP CRLF) and SSE CRLF
-  fixtures must spell byte 13 via `store_u8` (`oa_crlf()` in http.ax). This
-  bit twice in one session (transport, then the test fixture).
+  fixtures must spell byte 13 via `store_u8` (`net_crlf()` in net/http.ax).
+  This bit twice in the OpenAI session and again in the Anthropic one.
 - **The JSON serializer failed silently at first**: `j_quote` escaped
   content but never emitted the surrounding `"` — `j_dumps` produced
   `{model:gpt-4o}` (invalid JSON) and the round-trip test crashed on the
   empty-dom NULL above. Round-trip tests (parse → dumps → parse → dumps)
   are the pin that caught both.
-- **The end-to-end test needs NO network**: a mock OpenAI server written in
+- **The end-to-end tests need NO network**: a mock API server written in
   Aoxn (`web/sock_win.ax`, ws2_32) is spawned on a loopback port (env
   `MOCK_PORT`, `MOCK_COUNT` = requests to serve before exit) and the real
-  WinHTTP path walks a chat completion, a full SSE stream and a 401 body.
-  **The port-poll consumes a mock slot** — the poll `TcpStream::connect`
-  lands as a request (400 response), so `MOCK_COUNT` must exceed the
-  client's request count by at least one.
+  WinHTTP path walks the flows. **The port-poll consumes a mock slot** — the
+  poll `TcpStream::connect` lands as a request (400 response), so
+  `MOCK_COUNT` must exceed the client's request count by at least one —
+  plus one per RETRY (a retried 429 costs two).
+- **Expectation tables drift; report every mismatch.** The pure drivers
+  print one `PASS <name> <value>` line per check and the Rust side collects
+  ALL missing markers into a list before asserting. Asserting inside the
+  loop reports one drifted line per test run, which is a slow way to fix a
+  hand-transcribed table.
 - **The next 30+ stdlib modules are ROADMAPED in `docs/stdlib-todo.md`**
   (§2: all 31 Python stdlib modules, batched P0–P3; §5: 15 third-party /
   large libraries — `numpy`/`pandas`/`flask`/`matplotlib`/`pytorch`… —
@@ -700,8 +768,10 @@ crates/aoxn-pkg       package manager crate (its own dependency set; see above)
   numeric container need a generic heap container built first; and there is
   **no `enum` / no runtime-tagged union / no `Any`** (the only union is
   `T | None`, and `dict[V]` has one value type), so heterogeneous records are
-  inexpressible — that is what kills DataFrame and every ORM. The tagged-slab
-  design in `stdlib/openai/json.ax` (kind / i64 / f64 / ptrA / ptrB) is the
+  inexpressible — that is what kills DataFrame and every ORM. The Anthropic
+  SDK's content blocks (a discriminated union with no union type in the
+  language) are the worked example of how far JSON text carries you. The tagged-slab
+  design in `stdlib/net/json.ax` (kind / i64 / f64 / ptrA / ptrB) is the
   in-repo pattern for dynamic values. Also: argv is still absent
   (`int main(void)` in `src/codegen_c.rs:653`), blocking `sys`/`argparse`;
   and **there is no `inf`/`nan` literal and float division by zero is emitted
@@ -720,15 +790,21 @@ crates/aoxn-pkg       package manager crate (its own dependency set; see above)
   cost is the O(n) linear scan (`ax_dict_find_T`, `codegen_c.rs:789`), not
   ordering. The ranked shortlist (§5) puts module namespaces first, because
   every `import` merges into ONE namespace and a duplicate `def` name is a
-  HARD error (`typecheck.rs:94`) — which is why `ui_`/`oa_`/`plat_` are
-  hand-prefixed everywhere today.
-- Client defaults mirror openai-python: base URL `https://api.openai.com/v1`
-  (env `OPENAI_BASE_URL`), key from `OPENAI_API_KEY`, org `OPENAI_ORG_ID`,
-  project `OPENAI_PROJECT_ID`, 600 s receive / 5 s connect timeouts, 2
-  retries after the first attempt (0.5 s, 1 s; `Retry-After` ≤ 120 s wins;
-  only transport errors, 429 and 5xx retry). Errors follow the v0.39.0
-  Err-value channel: `oa_resp_ok` gates, `oa_err_msg` renders transport /
-  HTTP / `error.message` — nothing raises.
+  HARD error (`typecheck.rs:94`) — which is why `ui_`/`net_`/`oa_`/`an_`/
+  `plat_` are hand-prefixed everywhere today.
+- Client defaults mirror the reference clients: 600 s receive / 5 s connect
+  timeouts, 2 retries after the first attempt (0.5 s, 1 s; `Retry-After` ≤
+  120 s wins; transport errors, 409/429/5xx retry — note v0.40.1 parsed
+  `Retry-After` and then always passed 0, so OpenAI ignored it until
+  v0.41.0). OpenAI: base `https://api.openai.com/v1` (`OPENAI_API_KEY`,
+  `OPENAI_BASE_URL`, `OPENAI_ORG_ID`, `OPENAI_PROJECT_ID`). Anthropic: base
+  `https://api.anthropic.com` with **no `/v1`** (`ANTHROPIC_API_KEY`,
+  `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_BASE_URL`), plus the REQUIRED
+  `anthropic-version: 2023-06-01` header. Errors follow the v0.39.0
+  Err-value channel: `oa_resp_ok`/`an_resp_ok` gate and
+  `oa_err_msg`/`an_err_msg` render transport / HTTP / the body's `error`
+  object — nothing raises. `an_status_class`/`an_err_type` expose the
+  reference's exception taxonomy as data.
 
 
 ## IDE (ide/) — Tauri 2 + Next.js + Monaco workbench (v0.31.0, continued v0.31.1)

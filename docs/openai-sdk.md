@@ -1,4 +1,4 @@
-# The OpenAI SDK (`stdlib/openai/`) — v0.40.1
+# The OpenAI SDK (`stdlib/openai/`) — v0.40.1 (transport shared since v0.41.0)
 
 An OpenAI API client written in Aoxn and shipped as a stdlib subpackage —
 the Aoxn answer to `openai-python`. It covers the core REST surface
@@ -9,6 +9,11 @@ Python SDK: `https://api.openai.com/v1` base URL, 600 s receive timeout,
 
 Everything is plain Aoxn over raw memory — the self-hosted compiler can
 compile the whole package (no dict/None/fn-ptr/raise anywhere).
+
+> **v0.41.0:** the four provider-neutral modules moved to `stdlib/net/`
+> (prefix `oa_` → `net_`) because the Anthropic SDK shares them. The names
+> in this page are the v0.41.0 ones. `client.ax` — and with it this SDK's
+> entire public surface — is unchanged.
 
 ## Quick start
 
@@ -40,15 +45,18 @@ gateways and local proxies work through `oa_client_at(key, base_url)` or
 `OPENAI_BASE_URL` (plain `http://` included, which is what the test suite's
 mock server uses).
 
-## The five modules
+## The modules
 
 | File | What lives there |
 |---|---|
-| `stdlib/openai/codec.ax` | base64 (RFC 4648), percent-encoding (RFC 3986), UTF-8 ↔ UTF-16LE — everything WinHTTP and Basic auth need |
-| `stdlib/openai/json.ax` | the JSON DOM: 40-byte nodes in one slab, recursive-descent parser, serializer, typed getters with defaults |
-| `stdlib/openai/http.ax` | WinHTTP transport (one-shot + streaming), URL split, header assembly, retry policy, error names |
-| `stdlib/openai/sse.ax` | server-sent-events parser: feed bytes, pull `data:` payloads, `[DONE]` detection, CRLF/LF, comment lines |
-| `stdlib/openai/client.ax` | `OaClient`, the request/retry core, resource functions, response accessors, `OaStream` |
+| `stdlib/net/codec.ax` | base64 (RFC 4648), percent-encoding (RFC 3986), UTF-8 ↔ UTF-16LE — everything WinHTTP and Basic auth need |
+| `stdlib/net/json.ax` | the JSON DOM: 40-byte nodes in one slab, recursive-descent parser, serializer, typed getters with defaults, and a builder (`jb_*`) |
+| `stdlib/net/http.ax` | WinHTTP transport (one-shot + streaming), URL split, header assembly, raw-header parsing, retry policy, error names |
+| `stdlib/net/sse.ax` | server-sent-events parser: feed bytes, pull `data:` payloads and `event:` names, `[DONE]` detection, CRLF/LF, comment lines |
+| `stdlib/openai/client.ax` | `OaClient`, OpenAI's headers and User-Agent, the request/retry core, resource functions, response accessors, `OaStream` |
+
+The first four are shared with the Anthropic SDK — see
+`docs/anthropic-sdk.md`.
 
 ## The client and its defaults
 
@@ -121,7 +129,7 @@ the offline tests pin.
 
 | Layer | Signal | Message source |
 |---|---|---|
-| transport | `r.status == 0`, `r.terr == 1` | `oa_winhttp_err` (timeout, dns failure, connection refused, …) |
+| transport | `r.status == 0`, `r.terr == 1` | `net_winhttp_err` (timeout, dns failure, connection refused, …) |
 | HTTP | `r.status >= 400` | the parsed body's `error.message`, else `http <status>` |
 | body | `r.pok == 0` | the JSON parser's message |
 
@@ -151,3 +159,8 @@ is missing and exits 0, so CI can always run it.
   jitter (the reference SDK's backoff constants are used as-is).
 - Files, uploads (multipart), audio, images and realtime/websockets are
   not covered yet; `oa_request` + the JSON DOM are the escape hatch.
+  (v0.41.0 added a pointer-and-length request body,
+  `net_http_request_bytes`, for callers that need to send binary — the
+  Anthropic SDK's file upload uses it.)
+- List endpoints are unpaginated: the SDK sends no `limit`/`after_id`
+  query parameters, so `oa_models_list` takes the server's default page.

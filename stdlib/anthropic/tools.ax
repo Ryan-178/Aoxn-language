@@ -1,0 +1,267 @@
+# Aoxn Anthropic SDK — tools, schemas, tool_choice, thinking (v0.41.0).
+#
+# Tool use is the feature that makes the Messages API worth wrapping: the
+# model stops answering and starts ASKING, by emitting a `tool_use` block
+# naming one of the tools you advertised. You run the tool, send the result
+# back as a `tool_result` block, and the model continues.
+#
+# A tool is {name, description, input_schema} where input_schema is a JSON
+# Schema. Writing one as a string literal means hand-escaping every
+# description inside it, so the schema builder below assembles one field at
+# a time and lets net/json.ax do the escaping. `an_tool_raw` is the escape
+# hatch for a schema you would rather paste verbatim.
+#
+#   tools = vec_new()
+#   sc = an_schema_new()
+#   sc = an_schema_str(sc, "city", "City name, e.g. \"Paris\"")
+#   sc = an_schema_prop(sc, "unit", "string", "c or f", "[\"c\",\"f\"]")
+#   sc = an_schema_required(sc, an_str_vec("city"))
+#   tools = vec_push_str(tools, an_tool("get_weather", "Current weather.", an_schema_json(sc)))
+#   opts.tools = tools
+#
+# Feature budget: plain Aoxn only (no dict/None/fn-ptr/raise).
+
+import * from "../stdlib.ax"
+import * from "./blocks.ax"
+import * from "../net/json.ax"
+
+# a string Vec from literals — the shape every "list of names" argument here
+# wants, spelled once so callers do not hand-roll the vec_new dance
+def an_str_vec(a: string) -> Vec:
+    v = vec_new()
+    return vec_push_str(v, a)
+
+def an_str_vec2(a: string, b: string) -> Vec:
+    v = vec_new()
+    v = vec_push_str(v, a)
+    return vec_push_str(v, b)
+
+# ---- input_schema ----
+
+# A schema under construction. A property is a NAME plus a rendered schema
+# object, kept in two parallel `Vec`s: Aoxn's Vec moves 8-byte slots, so a
+# struct element would be copied by value on every push and the caller's
+# copy would stop tracking the builder's. `req` holds the required names.
+struct AnSchema:
+    names: Vec
+    schemas: Vec
+    req: Vec
+
+def an_schema_new() -> AnSchema:
+    return AnSchema(names=vec_new(), schemas=vec_new(), req=vec_new())
+
+# the general form: `enum_json` is a raw JSON array restricting the allowed
+# values ("[\"c\",\"f\"]"), or "" for no restriction.
+def an_schema_prop(s: AnSchema, name: string, jtype: string, description: string, enum_json: string) -> AnSchema:
+    d = jdom_new()
+    d = jb_obj(d)
+    o = d.last
+    d = jb_set_str(d, o, "type", jtype)
+    if len(description) > 0:
+        d = jb_set_str(d, o, "description", description)
+    if len(enum_json) > 0:
+        d = jb_set_raw(d, o, "enum", enum_json)
+    s.names = vec_push_str(s.names, name)
+    s.schemas = vec_push_str(s.schemas, j_dumps(d, o))
+    return s
+
+# one property of type string
+def an_schema_str(s: AnSchema, name: string, description: string) -> AnSchema:
+    return an_schema_prop(s, name, "string", description, "")
+
+# one property of type integer
+def an_schema_int(s: AnSchema, name: string, description: string) -> AnSchema:
+    return an_schema_prop(s, name, "integer", description, "")
+
+# one property of type number
+def an_schema_num(s: AnSchema, name: string, description: string) -> AnSchema:
+    return an_schema_prop(s, name, "number", description, "")
+
+# one property of type boolean
+def an_schema_bool(s: AnSchema, name: string, description: string) -> AnSchema:
+    return an_schema_prop(s, name, "boolean", description, "")
+
+# one property of type array; `items_json` is the item schema as raw JSON
+# text (e.g. "{\"type\":\"string\"}")
+def an_schema_arr(s: AnSchema, name: string, description: string, items_json: string) -> AnSchema:
+    d = jdom_new()
+    d = jb_obj(d)
+    o = d.last
+    d = jb_set_str(d, o, "type", "array")
+    if len(description) > 0:
+        d = jb_set_str(d, o, "description", description)
+    d = jb_set_raw(d, o, "items", items_json)
+    s.names = vec_push_str(s.names, name)
+    s.schemas = vec_push_str(s.schemas, j_dumps(d, o))
+    return s
+
+# a property whose schema you wrote yourself, as raw JSON text
+def an_schema_raw(s: AnSchema, name: string, schema_json: string) -> AnSchema:
+    s.names = vec_push_str(s.names, name)
+    s.schemas = vec_push_str(s.schemas, schema_json)
+    return s
+
+# mark names as required (names is a string Vec; duplicates are harmless,
+# a name that was never declared simply is not a property)
+def an_schema_required(s: AnSchema, names: Vec) -> AnSchema:
+    i = 0
+    while i < names.len:
+        s.req = vec_push_str(s.req, vec_get_str(names, i))
+        i = i + 1
+    return s
+
+# the assembled schema object
+def an_schema_json(s: AnSchema) -> string:
+    d = jdom_new()
+    d = jb_obj(d)
+    o = d.last
+    d = jb_set_str(d, o, "type", "object")
+    d = jb_obj(d)
+    p = d.last
+    i = 0
+    while i < s.names.len:
+        d = jb_set_raw(d, p, vec_get_str(s.names, i), vec_get_str(s.schemas, i))
+        i = i + 1
+    d = jb_set(d, o, "properties", p)
+    if s.req.len > 0:
+        d = jb_arr(d)
+        a = d.last
+        i = 0
+        while i < s.req.len:
+            d = jb_str(d, vec_get_str(s.req, i))
+            d = jb_push(d, a, d.last)
+            i = i + 1
+        d = jb_set(d, o, "required", a)
+    return j_dumps(d, o)
+
+# a schema with no properties at all — the shape of a no-argument tool
+def an_schema_empty() -> string:
+    d = jdom_new()
+    d = jb_obj(d)
+    o = d.last
+    d = jb_set_str(d, o, "type", "object")
+    d = jb_obj(d)
+    p = d.last
+    d = jb_set(d, o, "properties", p)
+    return j_dumps(d, o)
+
+# ---- tools ----
+
+# a custom (client-side) tool. `input_schema` is a schema object as JSON
+# text — an_schema_json, an_schema_empty, or your own.
+def an_tool(name: string, description: string, input_schema: string) -> string:
+    d = jdom_new()
+    d = jb_obj(d)
+    o = d.last
+    d = jb_set_str(d, o, "name", name)
+    if len(description) > 0:
+        d = jb_set_str(d, o, "description", description)
+    d = jb_set_raw(d, o, "input_schema", input_schema)
+    return j_dumps(d, o)
+
+# a tool with a prompt-caching breakpoint on its schema
+def an_tool_cached(name: string, description: string, input_schema: string, ttl: string) -> string:
+    d = jdom_new()
+    d = jb_obj(d)
+    o = d.last
+    d = jb_set_str(d, o, "name", name)
+    if len(description) > 0:
+        d = jb_set_str(d, o, "description", description)
+    d = jb_set_raw(d, o, "input_schema", input_schema)
+    d = jb_set_raw(d, o, "cache_control", an_cache_control(ttl))
+    return j_dumps(d, o)
+
+# a SERVER-side tool: the API runs it, not you. The reference has a dated
+# type per tool and a `max_uses` cap; `tool_type` is that dated type string
+# (e.g. "web_search_20250305") and `name` the tool's own name.
+def an_server_tool(tool_type: string, name: string, max_uses: int) -> string:
+    d = jdom_new()
+    d = jb_obj(d)
+    o = d.last
+    d = jb_set_str(d, o, "type", tool_type)
+    d = jb_set_str(d, o, "name", name)
+    if max_uses > 0:
+        d = jb_set_int(d, o, "max_uses", max_uses)
+    return j_dumps(d, o)
+
+# a bare web-search server tool at the reference's default cap behaviour
+def an_tool_web_search(max_uses: int) -> string:
+    return an_server_tool("web_search_20250305", "web_search", max_uses)
+
+def an_tool_web_fetch(max_uses: int) -> string:
+    return an_server_tool("web_fetch_20250910", "web_fetch", max_uses)
+
+# ---- tool_choice ----
+
+# ToolChoiceParam. The four forms the API accepts:
+#   auto   the model decides whether to call a tool      (default)
+#   any    it must call some tool
+#   tool   it must call this one
+#   none   it must not call any
+# `disable_parallel` sets disable_parallel_tool_use on the first three.
+def an_tool_choice_auto(disable_parallel: bool) -> string:
+    d = jdom_new()
+    d = jb_obj(d)
+    o = d.last
+    d = jb_set_str(d, o, "type", "auto")
+    if disable_parallel:
+        d = jb_set_bool(d, o, "disable_parallel_tool_use", True)
+    return j_dumps(d, o)
+
+def an_tool_choice_any(disable_parallel: bool) -> string:
+    d = jdom_new()
+    d = jb_obj(d)
+    o = d.last
+    d = jb_set_str(d, o, "type", "any")
+    if disable_parallel:
+        d = jb_set_bool(d, o, "disable_parallel_tool_use", True)
+    return j_dumps(d, o)
+
+def an_tool_choice_tool(name: string, disable_parallel: bool) -> string:
+    d = jdom_new()
+    d = jb_obj(d)
+    o = d.last
+    d = jb_set_str(d, o, "type", "tool")
+    d = jb_set_str(d, o, "name", name)
+    if disable_parallel:
+        d = jb_set_bool(d, o, "disable_parallel_tool_use", True)
+    return j_dumps(d, o)
+
+def an_tool_choice_none() -> string:
+    d = jdom_new()
+    d = jb_obj(d)
+    o = d.last
+    d = jb_set_str(d, o, "type", "none")
+    return j_dumps(d, o)
+
+# ---- thinking (extended thinking) ----
+
+# ThinkingConfigParam. `budget_tokens` is the thinking budget and must be at
+# least 1024; the reference also accepts "adaptive" (the server picks) and
+# "disabled". Display "summarized" (default) or "omitted".
+
+def an_thinking_enabled(budget_tokens: int, display: string) -> string:
+    d = jdom_new()
+    d = jb_obj(d)
+    o = d.last
+    d = jb_set_str(d, o, "type", "enabled")
+    d = jb_set_int(d, o, "budget_tokens", budget_tokens)
+    if len(display) > 0:
+        d = jb_set_str(d, o, "display", display)
+    return j_dumps(d, o)
+
+def an_thinking_adaptive(display: string) -> string:
+    d = jdom_new()
+    d = jb_obj(d)
+    o = d.last
+    d = jb_set_str(d, o, "type", "adaptive")
+    if len(display) > 0:
+        d = jb_set_str(d, o, "display", display)
+    return j_dumps(d, o)
+
+def an_thinking_disabled() -> string:
+    d = jdom_new()
+    d = jb_obj(d)
+    o = d.last
+    d = jb_set_str(d, o, "type", "disabled")
+    return j_dumps(d, o)

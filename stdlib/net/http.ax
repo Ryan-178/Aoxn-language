@@ -1,0 +1,614 @@
+# Aoxn net layer — HTTP transport over WinHTTP (v0.41.0).
+#
+# The whole layer rides on ONE Windows system facility: winhttp.dll. It gives
+# TLS, the proxy configuration, redirects and chunked responses for free —
+# raw ws2_32 sockets (the web/ suite) cannot do HTTPS without a TLS stack,
+# and Aoxn has none. Programs using this module link with:
+#
+#   Aoxn run app.ax -l winhttp
+#
+# This module is PROVIDER-NEUTRAL: it moves bytes and knows nothing about any
+# API's authentication. The authentication headers are built by the provider
+# SDK on top (`oa_headers_build` in stdlib/openai, `an_headers_build` in
+# stdlib/anthropic) and arrive here as an opaque string. That split is what
+# lets one transport serve both SDKs — v0.40.1 shipped this file inside
+# stdlib/openai/ and the Anthropic SDK (v0.41.0) was the reason it moved to
+# stdlib/net/.
+#
+# Everything wide-char is converted at the boundary with `net_to_wide`
+# (codec.ax); request bodies stay UTF-8 bytes (APIs expect UTF-8 JSON).
+# WinHTTP string parameters are declared as `int` (raw pointers) on purpose —
+# declaring them `string` would promise C `char*` semantics for UTF-16 data.
+#
+# Offline code never links winhttp: the pure helpers (URL split, CRLF, retry
+# policy, error names) live here but take no WinHTTP handles; only
+# `net_http_request` / `net_http_stream_*` touch the DLL. The self-hosted
+# compiler can compile this file — plain Aoxn only.
+
+import * from "../stdlib.ax"
+import * from "./codec.ax"
+
+# ---- WinHTTP surface (-l winhttp) ----
+
+extern def WinHttpOpen(agent: int, access: int, proxy: int, bypass: int, flags: int) -> int
+extern def WinHttpConnect(session: int, host: int, port: int, flags: int) -> int
+extern def WinHttpOpenRequest(conn: int, verb: int, path: int, ver: int, ref: int, accept: int, flags: int) -> int
+extern def WinHttpAddRequestHeaders(req: int, hdrs: int, len: int, mods: int) -> int
+extern def WinHttpSendRequest(req: int, hdrs: int, hlen: int, opt: int, olen: int, total: int, ctx: int) -> int
+extern def WinHttpReceiveResponse(req: int, reserved: int) -> int
+extern def WinHttpQueryHeaders(req: int, level: int, name: int, buf: int, plen: int, idx: int) -> int
+extern def WinHttpQueryDataAvailable(req: int, avail: int) -> int
+extern def WinHttpReadData(req: int, buf: int, toread: int, read: int) -> int
+extern def WinHttpSetTimeouts(h: int, resolve: int, connect: int, send: int, recv: int) -> int
+extern def WinHttpCloseHandle(h: int) -> int
+extern def GetLastError() -> int
+extern def Sleep(ms: int)
+
+# ---- constants (decimal — the repo keeps byte/flag constants decimal) ----
+
+def WINHTTP_FLAG_SECURE() -> int:
+    return 8388608
+
+# WINHTTP_ADDREQ_FLAG_ADD | WINHTTP_ADDREQ_FLAG_REPLACE — "set this header"
+def NET_HDR_SET() -> int:
+    return 2684354560
+
+# WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER
+def NET_QUERY_STATUS() -> int:
+    return 536870931
+
+# WINHTTP_QUERY_RAW_HEADERS — the whole response header block as one string.
+#
+# NOT WINHTTP_QUERY_CUSTOM (81), which is the obvious way to ask for ONE
+# header by name: on this platform that call fails with
+# ERROR_INVALID_PARAMETER (87) for every name tried, while the raw-block
+# query works. So we take the block and scan it, which also moves the
+# parsing into pure, offline-testable functions below.
+def NET_QUERY_RAW_HEADERS() -> int:
+    return 22
+
+# WINHTTP_QUERY_NUMBER | WINHTTP_QUERY_FLAG_NUMBER
+def NET_QUERY_NUMBER() -> int:
+    return 2
+
+# The reference clients' defaults. Both the OpenAI and the Anthropic SDK use
+# a 5 s connect, a 600 s receive timeout and 2 retries after the first
+# attempt, so these live here rather than being duplicated per provider.
+def NET_DEFAULT_CONNECT_MS() -> int:
+    return 5000
+
+def NET_DEFAULT_TIMEOUT_MS() -> int:
+    return 600000
+
+def NET_DEFAULT_RETRIES() -> int:
+    return 2
+
+# ---- URL splitting (pure) ----
+
+struct NetUrl:
+    secure: bool
+    host: string
+    port: int
+    path: string      # starts with '/', no query string
+
+# split an absolute http(s) URL. Unresolvable shapes come back with host ""
+# and the caller reports a clear transport error instead of guessing.
+def net_url_split(url: string) -> NetUrl:
+    u = NetUrl(secure=True, host="", port=443, path="/")
+    if str_sub(url, 0, 8) == "https://":
+        rest = str_sub(url, 8, len(url))
+        u.secure = True
+        dport = 443
+    else:
+        if str_sub(url, 0, 7) == "http://":
+            rest = str_sub(url, 7, len(url))
+            u.secure = False
+            dport = 80
+        else:
+            return u
+    # The object name WinHttpOpenRequest takes INCLUDES the query string —
+    # that is the normal WinHTTP spelling ("GET", "/v1/models?limit=20").
+    # v0.40.1 threw the query away here, which was harmless while the only
+    # caller was the OpenAI SDK (none of its paths carry one) and silently
+    # wrong the moment a paginated endpoint needed it. Split it off only so
+    # the host scan below cannot be fooled by a ':' or '/' inside it.
+    qi = -1
+    i = 0
+    while i < len(rest):
+        if load_u8(rest, i) == 63 and qi == -1:
+            qi = i
+        i = i + 1
+    hostzone = rest
+    if qi >= 0:
+        hostzone = str_sub(rest, 0, qi)
+    slash = -1
+    colon = -1
+    i = 0
+    while i < len(hostzone):
+        c = load_u8(hostzone, i)
+        if c == 47 and slash == -1:
+            slash = i
+        if c == 58 and slash == -1:
+            colon = i
+        i = i + 1
+    hostpart = hostzone
+    path = "/"
+    if slash >= 0:
+        hostpart = str_sub(hostzone, 0, slash)
+        path = str_sub(hostzone, slash, len(hostzone))
+    if qi >= 0:
+        path = path + str_sub(rest, qi, len(rest))
+    host = hostpart
+    port = dport
+    if colon >= 0:
+        host = str_sub(hostpart, 0, colon)
+        ptxt = str_sub(hostpart, colon + 1, len(hostpart))
+        port = 0
+        i = 0
+        while i < len(ptxt):
+            c = load_u8(ptxt, i)
+            if c < 48 or c > 57:
+                port = 0
+                i = len(ptxt)
+            else:
+                port = port * 10 + (c - 48)
+                i = i + 1
+        if port == 0:
+            port = dport
+    u.host = host
+    u.port = port
+    u.path = path
+    return u
+
+# ---- header block (pure; testable) ----
+
+# CRLF as raw bytes — the language has no \r escape (only \n \t \\ \"),
+# so headers are assembled with this, exactly like web/http_buf.ax does.
+def net_crlf() -> string:
+    p = malloc(3)
+    store_u8(p, 0, 13)
+    store_u8(p, 1, 10)
+    store_u8(p, 2, 0)
+    return as_string(p)
+
+# ---- retry policy (pure) ----
+
+# milliseconds to wait before the retry after attempt `attempt` (0-based
+# after the first failure), or -1 = give up. `max_retries` is the client's
+# retry budget (retries AFTER the first attempt). `status` 0 means a
+# transport error (always retryable); Retry-After (seconds) wins when the
+# server sent one.
+#
+# 429 and 5xx are the retryable statuses both reference clients agree on.
+# 409 is here because the Anthropic client retries it too (a batch still
+# settling); OpenAI does not return it for anything a retry could fix, so
+# listing it costs that SDK nothing.
+def net_retry_delay(attempt: int, max_retries: int, status: int, retry_after_s: int) -> int:
+    if attempt >= max_retries:
+        return -1
+    if status == 0 or status == 429 or status == 500 or status == 502 or status == 503 or status == 504 or status == 409:
+        if retry_after_s > 0 and retry_after_s <= 120:
+            return retry_after_s * 1000
+        return 500 * (attempt + 1)
+    return -1
+
+# ---- WinHTTP error names ----
+
+def net_winhttp_err(code: int) -> string:
+    if code == 12002:
+        return "timeout"
+    if code == 12007:
+        return "dns failure"
+    if code == 12029:
+        return "connection refused"
+    if code == 12030 or code == 12031:
+        return "connection dropped"
+    if code == 12152:
+        return "invalid server response"
+    if code == 12005:
+        return "ssl failure"
+    if code == 12175:
+        return "ssl certificate authority failure"
+    return "winhttp error " + str(code)
+
+# ---- response records ----
+
+struct NetHttpResp:
+    status: int       # HTTP status; 0 = transport failure
+    body: string      # raw response body ("" when the transport failed)
+    request_id: string   # the server's request-id header ("" when absent)
+    retry_after: int     # Retry-After in seconds (0 when absent or not numeric)
+    err: int          # 1 = transport-level failure
+    errmsg: string
+
+struct NetHttpStream:
+    session: int
+    conn: int
+    req: int
+    status: int
+    got: int          # bytes of the last net_http_stream_read
+    request_id: string
+    err: int
+    errmsg: string
+
+# read the HTTP status off an open request; -1 when unavailable
+def net_query_status(req: int) -> int:
+    buf = malloc(8)
+    store_i64(buf, 0)
+    plen = malloc(8)
+    store_i64(plen, 8)
+    ok = WinHttpQueryHeaders(req, NET_QUERY_STATUS(), -1, buf, plen, 0)
+    if ok == 0:
+        free(buf)
+        free(plen)
+        return -1
+    st = load_u8(buf, 0) + load_u8(buf, 1) * 256 + load_u8(buf, 2) * 65536 + load_u8(buf, 3) * 16777216
+    free(buf)
+    free(plen)
+    return st
+
+# ---- response headers ----
+#
+# One WinHTTP call fetches the whole raw header block; the pure helpers then
+# pick a value out of it. Both the string and the numeric lookup go through
+# this, so a response costs ONE query no matter how many headers the caller
+# wants.
+
+# the raw response header block, CRLF-separated ("" when unavailable)
+def net_raw_headers(req: int) -> string:
+    cap = 1024
+    buf = malloc(cap)
+    # zeroed because net_from_wide scans for a NUL and WinHTTP does not
+    # promise to terminate a buffer it considers exactly full
+    fill_zero(buf, cap)
+    plen = malloc(8)
+    store_i64(plen, cap)
+    ok = WinHttpQueryHeaders(req, NET_QUERY_RAW_HEADERS(), 0, buf, plen, 0)
+    if ok == 0:
+        # 122 = ERROR_INSUFFICIENT_BUFFER: the block did not fit, and plen
+        # now holds the size it needs
+        if GetLastError() == 122:
+            need = to_int(load_i64(plen))
+            if need > cap:
+                free(buf)
+                cap = need + 8
+                buf = malloc(cap)
+                fill_zero(buf, cap)
+                store_i64(plen, cap)
+                ok = WinHttpQueryHeaders(req, NET_QUERY_RAW_HEADERS(), 0, buf, plen, 0)
+    free(plen)
+    if ok == 0:
+        free(buf)
+        return ""
+    out = net_from_wide(buf)
+    free(buf)
+    return out
+
+# ASCII lowercase of one byte — header names are case-insensitive and the
+# language has no character type
+def net_lower(c: int) -> int:
+    if c >= 65 and c <= 90:
+        return c + 32
+    return c
+
+# `name` equals `s[a..b)`, ignoring ASCII case
+def net_ieq(s: string, a: int, b: int, name: string) -> bool:
+    if b - a != len(name):
+        return False
+    i = 0
+    while i < len(name):
+        if net_lower(load_u8(s, a + i)) != net_lower(load_u8(name, i)):
+            return False
+        i = i + 1
+    return True
+
+# the value of `name` in a raw header block ("" when absent). The block
+# starts with the status line and is CRLF-separated; only a name at the
+# START of a line counts, so a header whose value happens to contain
+# "request-id:" cannot be mistaken for the header itself.
+def net_header_value(raw: string, name: string) -> string:
+    n = len(raw)
+    nl = len(name)
+    i = 0
+    while i < n:
+        if i + nl < n and load_u8(raw, i + nl) == 58 and net_ieq(raw, i, i + nl, name):
+            vs = i + nl + 1
+            j = vs
+            while j < n and load_u8(raw, j) != 10:
+                j = j + 1
+            ve = j
+            if ve > vs and load_u8(raw, ve - 1) == 13:
+                ve = ve - 1
+            # trim the optional whitespace after the colon
+            while vs < ve:
+                c = load_u8(raw, vs)
+                if c != 32 and c != 9:
+                    break
+                vs = vs + 1
+            if vs >= ve:
+                return ""
+            return str_sub(raw, vs, ve)
+        # advance to the next line
+        while i < n and load_u8(raw, i) != 10:
+            i = i + 1
+        if i < n:
+            i = i + 1
+    return ""
+
+# the value of `name` as a non-negative int (`dflt` when absent or not one).
+# `Retry-After` is the only numeric header either SDK reads, and both
+# reference clients accept it as whole seconds.
+def net_header_int(raw: string, name: string, dflt: int) -> int:
+    v = net_header_value(raw, name)
+    n = len(v)
+    if n == 0:
+        return dflt
+    out = 0
+    i = 0
+    while i < n:
+        c = load_u8(v, i)
+        if c < 48 or c > 57:
+            return dflt
+        out = out * 10 + (c - 48)
+        i = i + 1
+    return out
+
+# convenience wrappers for one header off an open request. Callers that want
+# several should take `net_raw_headers` once instead.
+def net_query_header_str(req: int, name: string) -> string:
+    return net_header_value(net_raw_headers(req), name)
+
+def net_query_header_int(req: int, name: string, dflt: int) -> int:
+    return net_header_int(net_raw_headers(req), name, dflt)
+
+# ---- the request core ----
+
+# `ua` is the User-Agent string, also used as the WinHttpOpen agent name.
+# Each SDK passes its own ("aoxn-openai/0.41.0", "aoxn-anthropic/0.41.0") so
+# a server can tell the ports apart, the way the Python clients' User-Agent
+# identifies them.
+def net_http_request(method: string, url: string, headers: string, body: string, ua: string, connect_ms: int, recv_ms: int) -> NetHttpResp:
+    p = 0
+    n = 0
+    if len(body) > 0:
+        p = as_ptr(body)
+        n = len(body)
+    return net_http_request_bytes(method, url, headers, p, n, ua, connect_ms, recv_ms)
+
+# The body as a POINTER AND A LENGTH rather than a string. Aoxn's `len` on a
+# string is strlen, so a body containing a NUL byte — which every
+# multipart/form-data upload of a binary file has — cannot travel as a
+# string: it would be silently truncated at the first zero byte. Callers
+# with real bytes (stdlib/anthropic's file upload) hand over the buffer
+# directly. `body_len` 0 means "no body" and `body_ptr` is then ignored.
+def net_http_request_bytes(method: string, url: string, headers: string, body_ptr: int, body_len: int, ua: string, connect_ms: int, recv_ms: int) -> NetHttpResp:
+    r = NetHttpResp(status=0, body="", request_id="", retry_after=0, err=0, errmsg="")
+    u = net_url_split(url)
+    if len(u.host) == 0:
+        r.err = 1
+        r.errmsg = "cannot parse URL: " + url
+        return r
+    agent = net_to_wide(ua)
+    session = WinHttpOpen(agent, 0, 0, 0, 0)
+    free(agent)
+    if session == 0:
+        code = GetLastError()
+        r.errmsg = net_winhttp_err(code)
+        r.err = 1
+        return r
+    WinHttpSetTimeouts(session, 15000, connect_ms, 30000, recv_ms)
+    whost = net_to_wide(u.host)
+    conn = WinHttpConnect(session, whost, u.port, 0)
+    free(whost)
+    if conn == 0:
+        code = GetLastError()
+        r.errmsg = net_winhttp_err(code)
+        r.err = 1
+        WinHttpCloseHandle(session)
+        return r
+    flags = 0
+    if u.secure:
+        flags = WINHTTP_FLAG_SECURE()
+    wpath = net_to_wide(u.path)
+    wverb = net_to_wide(method)
+    req = WinHttpOpenRequest(conn, wverb, wpath, 0, 0, 0, flags)
+    free(wpath)
+    free(wverb)
+    if req == 0:
+        code = GetLastError()
+        r.errmsg = net_winhttp_err(code)
+        r.err = 1
+        WinHttpCloseHandle(conn)
+        WinHttpCloseHandle(session)
+        return r
+    whdrs = net_to_wide(headers)
+    ok = WinHttpAddRequestHeaders(req, whdrs, -1, NET_HDR_SET())
+    free(whdrs)
+    if ok == 0:
+        code = GetLastError()
+        r.errmsg = net_winhttp_err(code)
+        r.err = 1
+        WinHttpCloseHandle(req)
+        WinHttpCloseHandle(conn)
+        WinHttpCloseHandle(session)
+        return r
+    ok = WinHttpSendRequest(req, 0, 0, body_ptr, body_len, body_len, 0)
+    if ok == 0:
+        code = GetLastError()
+        r.errmsg = net_winhttp_err(code)
+        r.err = 1
+        WinHttpCloseHandle(req)
+        WinHttpCloseHandle(conn)
+        WinHttpCloseHandle(session)
+        return r
+    ok = WinHttpReceiveResponse(req, 0)
+    if ok == 0:
+        code = GetLastError()
+        r.errmsg = net_winhttp_err(code)
+        r.err = 1
+        WinHttpCloseHandle(req)
+        WinHttpCloseHandle(conn)
+        WinHttpCloseHandle(session)
+        return r
+    r.status = net_query_status(req)
+    rawh = net_raw_headers(req)
+    r.request_id = net_header_value(rawh, "request-id")
+    r.retry_after = net_header_int(rawh, "retry-after", 0)
+    # drain the body
+    cap = 8192
+    buf = malloc(cap)
+    total = 0
+    while True:
+        abuf = malloc(8)
+        store_i64(abuf, 0)
+        ok = WinHttpQueryDataAvailable(req, abuf)
+        if ok == 0:
+            free(abuf)
+            break
+        avail = load_i64(abuf)
+        free(abuf)
+        if avail == 0:
+            break
+        if total + avail + 1 > cap:
+            cap = (total + avail + 1) * 2
+            buf = realloc(buf, cap)
+        rbuf = malloc(8)
+        store_i64(rbuf, 0)
+        ok = WinHttpReadData(req, buf + total, avail, rbuf)
+        if ok == 0:
+            free(rbuf)
+            break
+        got = load_i64(rbuf)
+        free(rbuf)
+        total = total + got
+        if got == 0:
+            break
+    store_u8(buf, total, 0)
+    r.body = as_string(buf)
+    WinHttpCloseHandle(req)
+    WinHttpCloseHandle(conn)
+    WinHttpCloseHandle(session)
+    return r
+
+# ---- streaming ----
+
+# open a request and receive the response headers, but keep the connection
+# open: the body streams through net_http_stream_read. Caller closes with
+# net_http_stream_close (which releases all three handles).
+def net_http_stream_open(method: string, url: string, headers: string, body: string, ua: string, connect_ms: int, recv_ms: int) -> NetHttpStream:
+    p = 0
+    n = 0
+    if len(body) > 0:
+        p = as_ptr(body)
+        n = len(body)
+    return net_http_stream_open_bytes(method, url, headers, p, n, ua, connect_ms, recv_ms)
+
+# the pointer-and-length body twin of net_http_stream_open, for the same
+# reason as net_http_request_bytes: a body with a NUL byte in it cannot be
+# carried by a string.
+def net_http_stream_open_bytes(method: string, url: string, headers: string, body_ptr: int, body_len: int, ua: string, connect_ms: int, recv_ms: int) -> NetHttpStream:
+    s = NetHttpStream(session=0, conn=0, req=0, status=0, got=0, request_id="", err=0, errmsg="")
+    u = net_url_split(url)
+    if len(u.host) == 0:
+        s.err = 1
+        s.errmsg = "cannot parse URL: " + url
+        return s
+    agent = net_to_wide(ua)
+    session = WinHttpOpen(agent, 0, 0, 0, 0)
+    free(agent)
+    if session == 0:
+        s.err = 1
+        s.errmsg = net_winhttp_err(GetLastError())
+        return s
+    WinHttpSetTimeouts(session, 15000, connect_ms, 30000, recv_ms)
+    whost = net_to_wide(u.host)
+    conn = WinHttpConnect(session, whost, u.port, 0)
+    free(whost)
+    if conn == 0:
+        s.err = 1
+        s.errmsg = net_winhttp_err(GetLastError())
+        WinHttpCloseHandle(session)
+        return s
+    flags = 0
+    if u.secure:
+        flags = WINHTTP_FLAG_SECURE()
+    wpath = net_to_wide(u.path)
+    wverb = net_to_wide(method)
+    req = WinHttpOpenRequest(conn, wverb, wpath, 0, 0, 0, flags)
+    free(wpath)
+    free(wverb)
+    if req == 0:
+        s.err = 1
+        s.errmsg = net_winhttp_err(GetLastError())
+        WinHttpCloseHandle(conn)
+        WinHttpCloseHandle(session)
+        return s
+    whdrs = net_to_wide(headers)
+    ok = WinHttpAddRequestHeaders(req, whdrs, -1, NET_HDR_SET())
+    free(whdrs)
+    if ok == 0:
+        s.err = 1
+        s.errmsg = net_winhttp_err(GetLastError())
+        WinHttpCloseHandle(req)
+        WinHttpCloseHandle(conn)
+        WinHttpCloseHandle(session)
+        return s
+    ok = WinHttpSendRequest(req, 0, 0, body_ptr, body_len, body_len, 0)
+    if ok == 0:
+        s.err = 1
+        s.errmsg = net_winhttp_err(GetLastError())
+        WinHttpCloseHandle(req)
+        WinHttpCloseHandle(conn)
+        WinHttpCloseHandle(session)
+        return s
+    ok = WinHttpReceiveResponse(req, 0)
+    if ok == 0:
+        s.err = 1
+        s.errmsg = net_winhttp_err(GetLastError())
+        WinHttpCloseHandle(req)
+        WinHttpCloseHandle(conn)
+        WinHttpCloseHandle(session)
+        return s
+    s.session = session
+    s.conn = conn
+    s.req = req
+    s.status = net_query_status(req)
+    s.request_id = net_header_value(net_raw_headers(req), "request-id")
+    return s
+
+# one read into `buf` (capacity `cap`); byte count lands in s.got (0 = end)
+def net_http_stream_read(s: NetHttpStream, buf: int, cap: int) -> NetHttpStream:
+    s.got = 0
+    abuf = malloc(8)
+    store_i64(abuf, 0)
+    ok = WinHttpQueryDataAvailable(s.req, abuf)
+    if ok == 0:
+        s.err = 1
+        s.errmsg = net_winhttp_err(GetLastError())
+        free(abuf)
+        return s
+    avail = load_i64(abuf)
+    free(abuf)
+    if avail == 0:
+        return s
+    if avail > cap:
+        avail = cap
+    rbuf = malloc(8)
+    store_i64(rbuf, 0)
+    ok = WinHttpReadData(s.req, buf, avail, rbuf)
+    if ok == 0:
+        s.err = 1
+        s.errmsg = net_winhttp_err(GetLastError())
+        free(rbuf)
+        return s
+    s.got = load_i64(rbuf)
+    free(rbuf)
+    return s
+
+def net_http_stream_close(s: NetHttpStream):
+    if s.req != 0:
+        WinHttpCloseHandle(s.req)
+    if s.conn != 0:
+        WinHttpCloseHandle(s.conn)
+    if s.session != 0:
+        WinHttpCloseHandle(s.session)

@@ -1,6 +1,6 @@
-# Aoxn OpenAI SDK — codecs (v0.40.1).
+# Aoxn net layer — codecs (v0.41.0).
 #
-# Three encoders the SDK needs that the language does not ship:
+# Three encoders the SDKs need that the language does not ship:
 #   - base64 (RFC 4648, with `=` padding) — audio/image bodies, Basic auth
 #   - percent-encoding (RFC 3986 unreserved kept, everything else `%XX`)
 #   - UTF-8 <-> UTF-16LE  (WinHTTP speaks wide strings; Aoxn strings are UTF-8)
@@ -10,17 +10,19 @@
 # stdlib/ui.ax; it is duplicated here on purpose so the SDK does not pull the
 # UI toolkit (and its 1024-slot heap block) just to talk to WinHTTP.
 #
-# Naming: SDK-internal helpers use the `oa_` prefix; user-facing struct types
-# use the `Oa` prefix. This is the Aoxn flat-namespace convention (cf. `bb_`
-# in web/http_buf.ax, `ui_` in stdlib/ui.ax) — `import *` merges everything
-# into one scope, so distinctive prefixes are how a library stays collision-free.
+# Naming: helpers here use the `net_` prefix and user-facing struct types the
+# `Net` prefix. This is the Aoxn flat-namespace convention (cf. `bb_` in
+# web/http_buf.ax, `ui_` in stdlib/ui.ax) — `import *` merges everything into
+# one scope, so distinctive prefixes are how a library stays collision-free.
+# A provider SDK adds its own prefix on top (`oa_` OpenAI, `an_` Anthropic)
+# and never reuses a `net_` name for something with different behaviour.
 
 import * from "../stdlib.ax"
 
 # ---- codepoints <-> UTF-8 bytes (needed by the UTF-16 reader) ----
 
 # write one codepoint as UTF-8 at p, return the byte count
-def oa_cp_utf8(cp: int, p: int) -> int:
+def net_cp_utf8(cp: int, p: int) -> int:
     if cp < 128:
         store_u8(p, 0, cp)
         return 1
@@ -42,7 +44,7 @@ def oa_cp_utf8(cp: int, p: int) -> int:
 # ---- UTF-8 -> UTF-16LE ----
 
 # write s as UTF-16LE (surrogate pairs included) at p; return BYTE count
-def oa_utf16_write(s: string, p: int) -> int:
+def net_utf16_write(s: string, p: int) -> int:
     i = 0
     n = 0
     while i < len(s):
@@ -76,9 +78,9 @@ def oa_utf16_write(s: string, p: int) -> int:
 
 # one-shot UTF-16LE NUL-terminated buffer (caller frees). Used for every
 # wide-string parameter WinHTTP takes.
-def oa_to_wide(s: string) -> int:
+def net_to_wide(s: string) -> int:
     p = malloc(len(s) * 2 + 2)
-    n = oa_utf16_write(s, p)
+    n = net_utf16_write(s, p)
     store_u8(p, n, 0)
     store_u8(p, n + 1, 0)
     return p
@@ -87,7 +89,7 @@ def oa_to_wide(s: string) -> int:
 
 # read a NUL-terminated UTF-16LE buffer at p into a fresh UTF-8 string.
 # WinHTTP returns wide strings for queried headers.
-def oa_from_wide(p: int) -> string:
+def net_from_wide(p: int) -> string:
     n = 0
     more = True
     while more and n < 65535:
@@ -107,7 +109,7 @@ def oa_from_wide(p: int) -> string:
             if u2 >= 56320 and u2 < 57344:
                 cp = 65536 + (u - 55296) * 1024 + (u2 - 56320)
                 i = i + 1
-        m = m + oa_cp_utf8(cp, out + m)
+        m = m + net_cp_utf8(cp, out + m)
         i = i + 1
     store_u8(out, m, 0)
     return as_string(out)
@@ -115,12 +117,12 @@ def oa_from_wide(p: int) -> string:
 # ---- base64 (RFC 4648) ----
 
 # the standard alphabet as a literal; indexed with load_u8
-def oa_b64_table() -> string:
+def net_b64_table() -> string:
     return "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
 
 # encode `len` bytes at `data` into a fresh NUL-terminated string
-def oa_b64_encode(data: int, length: int) -> string:
-    tbl = oa_b64_table()
+def net_b64_encode(data: int, length: int) -> string:
+    tbl = net_b64_table()
     out = malloc((length + 2) / 3 * 4 + 1)
     oi = 0
     i = 0
@@ -157,13 +159,13 @@ def oa_b64_encode(data: int, length: int) -> string:
     return as_string(out)
 
 # encode an Aoxn string's bytes (convenience for `input: <base64>` fields)
-def oa_b64_encode_str(s: string) -> string:
-    return oa_b64_encode(as_ptr(s), len(s))
+def net_b64_encode_str(s: string) -> string:
+    return net_b64_encode(as_ptr(s), len(s))
 
 # ---- percent-encoding (RFC 3986) ----
 
 # one uppercase hex digit of the low nibble n (0..15)
-def oa_hex_digit(n: int) -> int:
+def net_hex_digit(n: int) -> int:
     if n < 10:
         return 48 + n
     return 65 + (n - 10)
@@ -171,7 +173,7 @@ def oa_hex_digit(n: int) -> int:
 # percent-encode s for a query parameter or URL path segment. Unreserved set
 # is A-Z a-z 0-9 - _ . ~; everything else becomes %XX with uppercase hex.
 # Space is %20 (not `+`), matching the OpenAI server's expectations.
-def oa_url_encode(s: string) -> string:
+def net_url_encode(s: string) -> string:
     # worst case: every byte becomes three (``%XX``)
     out = malloc(len(s) * 3 + 1)
     oi = 0
@@ -183,8 +185,8 @@ def oa_url_encode(s: string) -> string:
             oi = oi + 1
         else:
             store_u8(out, oi, 37)
-            store_u8(out, oi + 1, oa_hex_digit(c / 16))
-            store_u8(out, oi + 2, oa_hex_digit(c % 16))
+            store_u8(out, oi + 1, net_hex_digit(c / 16))
+            store_u8(out, oi + 2, net_hex_digit(c % 16))
             oi = oi + 3
         i = i + 1
     store_u8(out, oi, 0)
@@ -194,14 +196,14 @@ def oa_url_encode(s: string) -> string:
 # The pairs are flattened into two parallel `Vec`s of string pointers. A key
 # with an empty value still emits `key=`; this matches the Python SDK, which
 # lets the caller pass `""` deliberately.
-def oa_url_encode_pairs(keys: Vec, vals: Vec) -> string:
+def net_url_encode_pairs(keys: Vec, vals: Vec) -> string:
     out = ""
     i = 0
     while i < keys.len:
         if i > 0:
             out = out + "&"
-        k = oa_url_encode(vec_get_str(keys, i))
-        v = oa_url_encode(vec_get_str(vals, i))
+        k = net_url_encode(vec_get_str(keys, i))
+        v = net_url_encode(vec_get_str(vals, i))
         out = out + k + "=" + v
         i = i + 1
     return out

@@ -1,0 +1,1068 @@
+# Aoxn Anthropic SDK — client (v0.41.0).
+#
+# A port of the Anthropic Python SDK's core surface to the Aoxn idiom: one
+# `AnClient` carries the configuration, resource functions build the JSON
+# body and post it, and an `AnResp` whose `dom` is the parsed response comes
+# back. Accessors pull the fields people actually use:
+#
+#   c = an_client_env()                        # ANTHROPIC_API_KEY
+#   m = an_msgs_new()
+#   m = an_msgs_push_text(m, "user", "Say hello in one word")
+#   r = an_messages_create(c, "claude-sonnet-4-5", m, 64, an_opts_new())
+#   if an_resp_ok(r):
+#       print(an_msg_text(r))                 # -> "Hello!"
+#
+# Three things differ from a straight transliteration of the Python client,
+# each for a reason the language forces:
+#
+#   - NO KEYWORD ARGUMENTS. `messages.create` has fifteen optional
+#     parameters. Aoxn has no defaults, no kwargs and no overloading, so
+#     the optional half is an `AnOpts` struct built by `an_opts_new()` and
+#     filled in by field assignment. An empty member means "omit it", which
+#     is exactly the wire distinction the API draws.
+#   - NO EXCEPTIONS. The reference raises a typed exception per failure;
+#     here `an_resp_ok` is the gate and `an_err_msg` renders whichever
+#     layer failed into one line (the repo's Err-value channel, v0.39.0).
+#   - NO CLASSES. Resources are free functions with an `an_` prefix.
+#
+# Streaming keeps the WinHTTP request open and feeds SSE frames through
+# net/sse.ax. The event payloads arrive out of order relative to what you
+# want (a tool call is a start frame, N partial-JSON deltas and a stop
+# frame), so `AnAcc` reassembles them into a finished Message that the SAME
+# accessors read — see an_acc_feed / an_acc_resp at the bottom.
+#
+# Link requirement: -l winhttp (net/http.ax). Plain Aoxn throughout: no
+# dict, no None, no function pointers, no raise.
+
+import * from "../stdlib.ax"
+import * from "../net/codec.ax"
+import * from "../net/json.ax"
+import * from "../net/http.ax"
+import * from "../net/sse.ax"
+import * from "./blocks.ax"
+import * from "./tools.ax"
+
+extern def getenv(name: string) -> string
+
+# ---- environment ("" when unset; getenv may return NULL) ----
+
+def an_env(name: string) -> string:
+    p = getenv(name)
+    if as_ptr(p) == 0:
+        return ""
+    return p
+
+# ---- the client ----
+
+struct AnClient:
+    api_key: string
+    auth_token: string   # "" = omit the Authorization header
+    base_url: string     # https://api.anthropic.com — note: NO /v1, the paths carry it
+    betas: string        # comma-joined anthropic-beta value; "" = omit
+    connect_ms: int
+    timeout_ms: int      # receive timeout (the reference default is 600s)
+    max_retries: int     # retries AFTER the first attempt (reference: 2)
+
+# ---- Anthropic's own wire identity ----
+
+def an_version() -> string:
+    return "0.41.0"
+
+def an_user_agent() -> string:
+    return "aoxn-anthropic/" + an_version()
+
+# The API REQUIRES this header; it is not optional and it is not inferred
+# from the key. The reference client inlines the literal "2023-06-01"
+# rather than keeping a constant, so this is the one place Aoxn spells it.
+def an_api_version() -> string:
+    return "2023-06-01"
+
+# `accept` is "application/json" or "text/event-stream"; the API rejects a
+# streaming request that does not ask for the event stream.
+def an_headers_build(c: AnClient, body: string, accept: string) -> string:
+    nl = net_crlf()
+    h = ""
+    if len(c.api_key) > 0:
+        h = h + "x-api-key: " + c.api_key + nl
+    if len(c.auth_token) > 0:
+        h = h + "Authorization: Bearer " + c.auth_token + nl
+    h = h + "anthropic-version: " + an_api_version() + nl
+    if len(c.betas) > 0:
+        h = h + "anthropic-beta: " + c.betas + nl
+    if len(body) > 0:
+        h = h + "Content-Type: application/json" + nl
+    h = h + "Accept: " + accept + nl
+    h = h + "User-Agent: " + an_user_agent() + nl
+    return h
+
+# the same, for a multipart upload (the Files API takes form data, not JSON)
+def an_headers_multipart(c: AnClient, content_type: string) -> string:
+    nl = net_crlf()
+    h = ""
+    if len(c.api_key) > 0:
+        h = h + "x-api-key: " + c.api_key + nl
+    if len(c.auth_token) > 0:
+        h = h + "Authorization: Bearer " + c.auth_token + nl
+    h = h + "anthropic-version: " + an_api_version() + nl
+    if len(c.betas) > 0:
+        h = h + "anthropic-beta: " + c.betas + nl
+    h = h + "Content-Type: " + content_type + nl
+    h = h + "Accept: application/json" + nl
+    h = h + "User-Agent: " + an_user_agent() + nl
+    return h
+
+def an_client_new(api_key: string) -> AnClient:
+    return AnClient(api_key=api_key, auth_token="", base_url="https://api.anthropic.com", betas="",
+        connect_ms=NET_DEFAULT_CONNECT_MS(), timeout_ms=NET_DEFAULT_TIMEOUT_MS(), max_retries=NET_DEFAULT_RETRIES())
+
+# an explicit base URL (a gateway, a proxy, a mock on loopback)
+def an_client_at(api_key: string, base_url: string) -> AnClient:
+    c = an_client_new(api_key)
+    c.base_url = base_url
+    return c
+
+# credentials from the environment — the reference SDK's variable names
+def an_client_env() -> AnClient:
+    c = an_client_new(an_env("ANTHROPIC_API_KEY"))
+    tok = an_env("ANTHROPIC_AUTH_TOKEN")
+    if len(tok) > 0:
+        c.auth_token = tok
+    b = an_env("ANTHROPIC_BASE_URL")
+    if len(b) > 0:
+        c.base_url = b
+    return c
+
+# opt into beta features: an_beta(c, "computer-use-2025-11-24")
+def an_beta(c: AnClient, flag: string) -> AnClient:
+    if len(c.betas) == 0:
+        c.betas = flag
+    else:
+        if not an_betas_has(c.betas, flag):
+            c.betas = c.betas + "," + flag
+    return c
+
+# comma-separated membership test (the reference joins betas with "," too)
+def an_betas_has(list: string, flag: string) -> bool:
+    n = len(list)
+    start = 0
+    while start <= n:
+        i = start
+        while i < n and load_u8(list, i) != 44:
+            i = i + 1
+        if i > start and str_sub(list, start, i) == flag:
+            return True
+        if i >= n:
+            break
+        start = i + 1
+    return False
+
+def an_client_ok(c: AnClient) -> bool:
+    return len(c.api_key) > 0 or len(c.auth_token) > 0
+
+# ---- optional parameters ----
+
+# Everything `messages.create` accepts beyond the required model / messages /
+# max_tokens. An empty string, an empty Vec or a zero means "do not send
+# this member" — the API distinguishes "absent" from "present and empty",
+# and so does this.
+struct AnOpts:
+    system: string           # plain-text system prompt
+    system_blocks: Vec       # text blocks for the array form of `system`
+    stop_sequences: Vec
+    tools: Vec               # tool JSON texts (see tools.ax)
+    tool_choice: string      # "" = omit, else a tool_choice object as JSON text
+    thinking: string         # "" = omit, else a thinking config as JSON text
+    metadata_user_id: string
+    service_tier: string     # "auto" | "standard_only"
+    inference_geo: string
+
+def an_opts_new() -> AnOpts:
+    return AnOpts(system="", system_blocks=vec_new(), stop_sequences=vec_new(), tools=vec_new(),
+        tool_choice="", thinking="", metadata_user_id="", service_tier="", inference_geo="")
+
+# ---- the response ----
+
+struct AnResp:
+    status: int       # HTTP status (0 = transport failure)
+    dom: JDom         # parsed body; root node = dom.last
+    pok: int          # 1 = body parsed as JSON
+    pmsg: string      # JSON parse error message
+    raw: string       # raw body text
+    request_id: string   # the server's request-id ("" when absent)
+    terr: int         # 1 = transport-level failure
+    tmsg: string      # transport error message
+    retries: int      # retry attempts consumed
+
+def an_resp_ok(r: AnResp) -> bool:
+    return r.terr == 0 and r.pok == 1 and r.status >= 200 and r.status < 300
+
+# The reference maps each status onto a typed exception; with no exceptions
+# the name becomes a string callers can switch on.
+def an_status_class(status: int) -> string:
+    if status == 400:
+        return "bad_request_error"
+    if status == 401:
+        return "authentication_error"
+    if status == 403:
+        return "permission_error"
+    if status == 404:
+        return "not_found_error"
+    if status == 409:
+        return "conflict_error"
+    if status == 413:
+        return "request_too_large"
+    if status == 422:
+        return "unprocessable_entity_error"
+    if status == 429:
+        return "rate_limit_error"
+    if status == 529:
+        return "overloaded_error"
+    if status >= 500:
+        return "internal_server_error"
+    if status == 0:
+        return "connection_error"
+    return "api_error"
+
+# The API's error envelope is {"type":"error","error":{"type","message"}}.
+def an_err_type(r: AnResp) -> string:
+    e = j_obj_get(r.dom, r.dom.last, "error")
+    if e < 0:
+        return ""
+    return j_get_str(r.dom, e, "type", "")
+
+# one human-readable message for whichever layer failed first
+def an_err_msg(r: AnResp) -> string:
+    if r.terr == 1:
+        return r.tmsg
+    e = j_obj_get(r.dom, r.dom.last, "error")
+    if e >= 0:
+        msg = j_get_str(r.dom, e, "message", "")
+        if len(msg) > 0:
+            return "anthropic " + str(r.status) + " " + an_status_class(r.status) + ": " + msg
+    if r.pok == 0:
+        return "bad json in response: " + r.pmsg
+    if r.status >= 400:
+        return "http " + str(r.status)
+    return ""
+
+# ---- the request core (retry loop; Sleep between attempts) ----
+
+def an_request(c: AnClient, method: string, path: string, body: string) -> AnResp:
+    return an_request_url(c, method, c.base_url + path, body, "application/json")
+
+# the same against an ABSOLUTE url. The batch-results endpoint hands back a
+# full URL to fetch (results_url) rather than a path to build, so there is
+# no `c.base_url + path` to do for it.
+def an_request_url(c: AnClient, method: string, url: string, body: string, accept: string) -> AnResp:
+    headers = an_headers_build(c, body, accept)
+    attempt = 0
+    while attempt <= c.max_retries:
+        r0 = net_http_request(method, url, headers, body, an_user_agent(), c.connect_ms, c.timeout_ms)
+        if r0.err == 1:
+            delay = net_retry_delay(attempt, c.max_retries, 0, 0)
+            if delay >= 0:
+                Sleep(delay)
+                attempt = attempt + 1
+                continue
+            return AnResp(status=0, dom=jdom_new(), pok=0, pmsg="", raw="", request_id="", terr=1, tmsg=r0.errmsg, retries=attempt)
+        p = j_parse(r0.body)
+        pok = 1
+        if p.err == 1:
+            pok = 0
+        resp = AnResp(status=r0.status, dom=p.dom, pok=pok, pmsg=p.errmsg, raw=r0.body, request_id=r0.request_id, terr=0, tmsg="", retries=attempt)
+        # Retry-After wins over our own backoff when the server sent one
+        delay = net_retry_delay(attempt, c.max_retries, r0.status, r0.retry_after)
+        if delay >= 0:
+            Sleep(delay)
+            attempt = attempt + 1
+            continue
+        return resp
+    return AnResp(status=0, dom=jdom_new(), pok=0, pmsg="", raw="", request_id="", terr=1, tmsg="gave up after retries", retries=c.max_retries)
+
+# ---- request bodies ----
+
+# attach the members AnOpts carries, skipping the ones left unset
+def an_opts_apply(dom: JDom, o: int, opts: AnOpts) -> JDom:
+    if len(opts.system) > 0:
+        dom = jb_set_raw(dom, o, "system", j_quote(opts.system))
+    if opts.system_blocks.len > 0:
+        dom = jb_set_raw(dom, o, "system", an_blocks_json(opts.system_blocks))
+    if opts.stop_sequences.len > 0:
+        dom = jb_arr(dom)
+        a = dom.last
+        i = 0
+        while i < opts.stop_sequences.len:
+            dom = jb_str(dom, vec_get_str(opts.stop_sequences, i))
+            dom = jb_push(dom, a, dom.last)
+            i = i + 1
+        dom = jb_set(dom, o, "stop_sequences", a)
+    if opts.tools.len > 0:
+        dom = jb_arr(dom)
+        a = dom.last
+        i = 0
+        while i < opts.tools.len:
+            dom = jb_push_raw(dom, a, vec_get_str(opts.tools, i))
+            i = i + 1
+        dom = jb_set(dom, o, "tools", a)
+    if len(opts.tool_choice) > 0:
+        dom = jb_set_raw(dom, o, "tool_choice", opts.tool_choice)
+    if len(opts.thinking) > 0:
+        dom = jb_set_raw(dom, o, "thinking", opts.thinking)
+    if len(opts.metadata_user_id) > 0:
+        dom = jb_obj(dom)
+        md = dom.last
+        dom = jb_set_str(dom, md, "user_id", opts.metadata_user_id)
+        dom = jb_set(dom, o, "metadata", md)
+    if len(opts.service_tier) > 0:
+        dom = jb_set_str(dom, o, "service_tier", opts.service_tier)
+    if len(opts.inference_geo) > 0:
+        dom = jb_set_str(dom, o, "inference_geo", opts.inference_geo)
+    return dom
+
+def an_body_messages(model: string, msgs: AnMsgs, max_tokens: int, opts: AnOpts, stream: bool) -> string:
+    d = jdom_new()
+    d = jb_obj(d)
+    o = d.last
+    d = jb_set_str(d, o, "model", model)
+    d = jb_set_raw(d, o, "messages", an_msgs_json(msgs))
+    # max_tokens is REQUIRED by this API — there is no server default and
+    # no "unbounded"; an omitted one is a 400
+    d = jb_set_int(d, o, "max_tokens", max_tokens)
+    d = an_opts_apply(d, o, opts)
+    if stream:
+        d = jb_set_bool(d, o, "stream", True)
+    return j_dumps(d, o)
+
+# count_tokens takes the same conversation but neither max_tokens nor stream
+def an_body_count_tokens(model: string, msgs: AnMsgs, opts: AnOpts) -> string:
+    d = jdom_new()
+    d = jb_obj(d)
+    o = d.last
+    d = jb_set_str(d, o, "model", model)
+    d = jb_set_raw(d, o, "messages", an_msgs_json(msgs))
+    d = an_opts_apply(d, o, opts)
+    return j_dumps(d, o)
+
+# ---- resources: messages ----
+
+def an_messages_create(c: AnClient, model: string, msgs: AnMsgs, max_tokens: int, opts: AnOpts) -> AnResp:
+    return an_request(c, "POST", "/v1/messages", an_body_messages(model, msgs, max_tokens, opts, False))
+
+# POST /v1/messages/count_tokens -> {"input_tokens": N}
+def an_messages_count_tokens(c: AnClient, model: string, msgs: AnMsgs, opts: AnOpts) -> AnResp:
+    return an_request(c, "POST", "/v1/messages/count_tokens", an_body_count_tokens(model, msgs, opts))
+
+# the token count as an int; -1 when the call failed
+def an_count_tokens_value(r: AnResp) -> int:
+    if not an_resp_ok(r):
+        return -1
+    return j_get_int(r.dom, r.dom.last, "input_tokens", -1)
+
+# ---- resources: models ----
+
+def an_models_list(c: AnClient) -> AnResp:
+    return an_request(c, "GET", "/v1/models", "")
+
+def an_models_retrieve(c: AnClient, model: string) -> AnResp:
+    return an_request(c, "GET", "/v1/models/" + net_url_encode(model), "")
+
+# ---- resources: message batches ----
+
+def an_batches_list(c: AnClient, limit: int, after_id: string) -> AnResp:
+    return an_request(c, "GET", an_page_path("/v1/messages/batches", limit, after_id, ""), "")
+
+def an_batches_retrieve(c: AnClient, batch_id: string) -> AnResp:
+    return an_request(c, "GET", "/v1/messages/batches/" + net_url_encode(batch_id), "")
+
+def an_batches_delete(c: AnClient, batch_id: string) -> AnResp:
+    return an_request(c, "DELETE", "/v1/messages/batches/" + net_url_encode(batch_id), "")
+
+def an_batches_cancel(c: AnClient, batch_id: string) -> AnResp:
+    return an_request(c, "POST", "/v1/messages/batches/" + net_url_encode(batch_id) + "/cancel", "{}")
+
+# the batch's `results_url` field is an ABSOLUTE url — fetch it as given
+def an_batches_results(c: AnClient, results_url: string) -> AnResp:
+    return an_request_url(c, "GET", results_url, "", "application/json")
+
+# build a batch: `requests` is a Vec of request objects as JSON text, each
+# {"custom_id":"...","params":{...the messages.create body minus model...}}
+def an_body_batch(requests: Vec) -> string:
+    d = jdom_new()
+    d = jb_obj(d)
+    o = d.last
+    d = jb_arr(d)
+    a = d.last
+    i = 0
+    while i < requests.len:
+        d = jb_push_raw(d, a, vec_get_str(requests, i))
+        i = i + 1
+    d = jb_set(d, o, "requests", a)
+    return j_dumps(d, o)
+
+# one entry of a batch: the messages.create body, minus the model (it is a
+# batch-level field), under `params`, tagged with your own id
+def an_batch_request(custom_id: string, msgs: AnMsgs, max_tokens: int, opts: AnOpts) -> string:
+    d = jdom_new()
+    d = jb_obj(d)
+    o = d.last
+    d = jb_set_str(d, o, "custom_id", custom_id)
+    d = jb_obj(d)
+    pp = d.last
+    d = jb_set_raw(d, pp, "messages", an_msgs_json(msgs))
+    d = jb_set_int(d, pp, "max_tokens", max_tokens)
+    d = an_opts_apply(d, pp, opts)
+    d = jb_set(d, o, "params", pp)
+    return j_dumps(d, o)
+
+def an_batches_create(c: AnClient, requests: Vec) -> AnResp:
+    return an_request(c, "POST", "/v1/messages/batches", an_body_batch(requests))
+
+# a batch's processing_status: "in_progress" | "canceling" | "ended"
+def an_batch_status(r: AnResp) -> string:
+    return j_get_str(r.dom, r.dom.last, "processing_status", "")
+
+# the per-request outcomes: results_url is the absolute url to fetch
+def an_batch_results_url(r: AnResp) -> string:
+    return j_get_str(r.dom, r.dom.last, "results_url", "")
+
+# ---- resources: files ----
+
+def an_files_list(c: AnClient, limit: int, after_id: string) -> AnResp:
+    return an_request(c, "GET", an_page_path("/v1/files", limit, after_id, ""), "")
+
+def an_files_retrieve(c: AnClient, file_id: string) -> AnResp:
+    return an_request(c, "GET", "/v1/files/" + net_url_encode(file_id), "")
+
+def an_files_delete(c: AnClient, file_id: string) -> AnResp:
+    return an_request(c, "DELETE", "/v1/files/" + net_url_encode(file_id), "")
+
+# The upload is multipart/form-data over RAW BYTES. Aoxn's `len` on a
+# string is strlen, so a binary payload cannot ride inside one — the body
+# is assembled in a byte buffer and handed to the transport by pointer
+# (net_http_request_bytes). `content` is the file's bytes.
+def an_files_upload(c: AnClient, filename: string, content_type: string, content: int, content_len: int) -> AnResp:
+    boundary = "aoxn-anthropic-boundary-2f8c1a4d"
+    pre = an_multipart_prelude(boundary, filename, content_type)
+    tail = net_crlf() + "--" + boundary + "--" + net_crlf()
+    total = len(pre) + content_len + len(tail)
+    buf = malloc(total + 1)
+    memcpy(buf, as_ptr(pre), len(pre))
+    if content_len > 0:
+        memcpy(buf + len(pre), content, content_len)
+    memcpy(buf + len(pre) + content_len, as_ptr(tail), len(tail))
+    store_u8(buf, total, 0)
+    headers = an_headers_multipart(c, "multipart/form-data; boundary=" + boundary)
+    r0 = net_http_request_bytes("POST", c.base_url + "/v1/files", headers, buf, total, an_user_agent(), c.connect_ms, c.timeout_ms)
+    free(buf)
+    if r0.err == 1:
+        return AnResp(status=0, dom=jdom_new(), pok=0, pmsg="", raw="", request_id="", terr=1, tmsg=r0.errmsg, retries=0)
+    p = j_parse(r0.body)
+    pok = 1
+    if p.err == 1:
+        pok = 0
+    return AnResp(status=r0.status, dom=p.dom, pok=pok, pmsg=p.errmsg, raw=r0.body, request_id=r0.request_id, terr=0, tmsg="", retries=0)
+
+# the part headers + the blank line that ends them, as one string
+def an_multipart_prelude(boundary: string, filename: string, content_type: string) -> string:
+    nl = net_crlf()
+    return "--" + boundary + nl + "Content-Disposition: form-data; name=\"file\"; filename=\"" + filename + "\"" + nl + "Content-Type: " + content_type + nl + nl
+
+# ---- pagination (pure; the reference's limit / after_id / before_id) ----
+
+# `limit` <= 0 omits it. before_id wins when set (the reference pages
+# backwards when the caller supplied one).
+def an_page_path(base: string, limit: int, after_id: string, before_id: string) -> string:
+    q = ""
+    if limit > 0:
+        q = "limit=" + str(limit)
+    if len(before_id) > 0:
+        if len(q) > 0:
+            q = q + "&"
+        q = q + "before_id=" + net_url_encode(before_id)
+    elif len(after_id) > 0:
+        if len(q) > 0:
+            q = q + "&"
+        q = q + "after_id=" + net_url_encode(after_id)
+    if len(q) == 0:
+        return base
+    return base + "?" + q
+
+# list endpoints: data[] plus the cursor fields
+def an_data_len(r: AnResp) -> int:
+    return j_len(r.dom, j_obj_get(r.dom, r.dom.last, "data"))
+
+def an_data_id(r: AnResp, i: int) -> string:
+    return j_get_str(r.dom, j_arr_get(r.dom, j_obj_get(r.dom, r.dom.last, "data"), i), "id", "")
+
+def an_has_more(r: AnResp) -> bool:
+    return j_get_bool(r.dom, r.dom.last, "has_more", False)
+
+def an_first_id(r: AnResp) -> string:
+    return j_get_str(r.dom, r.dom.last, "first_id", "")
+
+def an_last_id(r: AnResp) -> string:
+    return j_get_str(r.dom, r.dom.last, "last_id", "")
+
+# ---- message accessors ----
+#
+# These read any AnResp whose body is a Message — a non-streaming response,
+# or a streamed one reassembled by an_acc_resp. Default-safe on anything.
+
+def an_msg_id(r: AnResp) -> string:
+    return j_get_str(r.dom, r.dom.last, "id", "")
+
+def an_msg_type(r: AnResp) -> string:
+    return j_get_str(r.dom, r.dom.last, "type", "")
+
+def an_msg_role(r: AnResp) -> string:
+    return j_get_str(r.dom, r.dom.last, "role", "")
+
+def an_msg_model(r: AnResp) -> string:
+    return j_get_str(r.dom, r.dom.last, "model", "")
+
+# end_turn | max_tokens | stop_sequence | tool_use | pause_turn | refusal
+# | model_context_window_exceeded | ""
+def an_msg_stop_reason(r: AnResp) -> string:
+    return j_get_str(r.dom, r.dom.last, "stop_reason", "")
+
+def an_msg_stop_sequence(r: AnResp) -> string:
+    return j_get_str(r.dom, r.dom.last, "stop_sequence", "")
+
+def an_block_count(r: AnResp) -> int:
+    return j_len(r.dom, j_obj_get(r.dom, r.dom.last, "content"))
+
+def an_block_type(r: AnResp, i: int) -> string:
+    return j_get_str(r.dom, an_block_at(r, i), "type", "")
+
+def an_block_at(r: AnResp, i: int) -> int:
+    return j_arr_get(r.dom, j_obj_get(r.dom, r.dom.last, "content"), i)
+
+def an_block_text_at(r: AnResp, i: int) -> string:
+    return j_get_str(r.dom, an_block_at(r, i), "text", "")
+
+def an_block_thinking_at(r: AnResp, i: int) -> string:
+    return j_get_str(r.dom, an_block_at(r, i), "thinking", "")
+
+def an_block_signature_at(r: AnResp, i: int) -> string:
+    return j_get_str(r.dom, an_block_at(r, i), "signature", "")
+
+def an_block_tool_id(r: AnResp, i: int) -> string:
+    return j_get_str(r.dom, an_block_at(r, i), "id", "")
+
+def an_block_tool_name(r: AnResp, i: int) -> string:
+    return j_get_str(r.dom, an_block_at(r, i), "name", "")
+
+# a tool_use block's `input` re-serialized, so callers can j_parse it or
+# hand it straight back to an_block_tool_use
+def an_block_tool_input(r: AnResp, i: int) -> string:
+    return j_dumps(r.dom, j_obj_get(r.dom, an_block_at(r, i), "input"))
+
+# one field of a tool_use input, by name — the 90% case is a string
+# argument, and this spares the caller a parse
+def an_block_tool_input_str(r: AnResp, i: int, key: string) -> string:
+    return j_get_str(r.dom, j_obj_get(r.dom, an_block_at(r, i), "input"), key, "")
+
+def an_block_tool_input_int(r: AnResp, i: int, key: string) -> int:
+    return j_get_int(r.dom, j_obj_get(r.dom, an_block_at(r, i), "input"), key, 0)
+
+# a tool_result block's text
+def an_block_result_text(r: AnResp, i: int) -> string:
+    return j_get_str(r.dom, an_block_at(r, i), "content", "")
+
+def an_block_result_is_error(r: AnResp, i: int) -> bool:
+    return j_get_bool(r.dom, an_block_at(r, i), "is_error", False)
+
+# the first content block of type `kind`, or -1
+def an_find_block(r: AnResp, kind: string) -> int:
+    n = an_block_count(r)
+    i = 0
+    while i < n:
+        if an_block_type(r, i) == kind:
+            return i
+        i = i + 1
+    return -1
+
+# the first tool_use block's index, or -1 — the check that drives a tool
+# loop, since stop_reason == "tool_use" says the model wants a tool
+def an_find_tool_use(r: AnResp) -> int:
+    return an_find_block(r, "tool_use")
+
+# every text block joined with "\n". Empty when the model answered with
+# only a tool call, which is normal and not an error.
+def an_msg_text(r: AnResp) -> string:
+    out = ""
+    n = an_block_count(r)
+    i = 0
+    while i < n:
+        if an_block_type(r, i) == "text":
+            if len(out) > 0:
+                out = out + "\n"
+            out = out + an_block_text_at(r, i)
+        i = i + 1
+    return out
+
+# the concatenated thinking blocks ("" when thinking is off)
+def an_msg_thinking(r: AnResp) -> string:
+    out = ""
+    n = an_block_count(r)
+    i = 0
+    while i < n:
+        if an_block_type(r, i) == "thinking":
+            if len(out) > 0:
+                out = out + "\n"
+            out = out + an_block_thinking_at(r, i)
+        i = i + 1
+    return out
+
+# ---- usage ----
+
+def an_usage_in(r: AnResp) -> int:
+    return j_get_int(r.dom, j_obj_get(r.dom, r.dom.last, "usage"), "input_tokens", 0)
+
+def an_usage_out(r: AnResp) -> int:
+    return j_get_int(r.dom, j_obj_get(r.dom, r.dom.last, "usage"), "output_tokens", 0)
+
+def an_usage_cache_read(r: AnResp) -> int:
+    return j_get_int(r.dom, j_obj_get(r.dom, r.dom.last, "usage"), "cache_read_input_tokens", 0)
+
+def an_usage_cache_create(r: AnResp) -> int:
+    return j_get_int(r.dom, j_obj_get(r.dom, r.dom.last, "usage"), "cache_creation_input_tokens", 0)
+
+# thinking tokens, from usage.output_tokens_details.thinking_tokens
+def an_usage_thinking(r: AnResp) -> int:
+    u = j_obj_get(r.dom, r.dom.last, "usage")
+    det = j_obj_get(r.dom, u, "output_tokens_details")
+    if det < 0:
+        return 0
+    return j_get_int(r.dom, det, "thinking_tokens", 0)
+
+# a rendered usage line for demos and logs
+def an_usage_line(r: AnResp) -> string:
+    return "tokens " + str(an_usage_in(r)) + " in / " + str(an_usage_out(r)) + " out"
+
+# ---- file accessors ----
+
+def an_file_id(r: AnResp) -> string:
+    return j_get_str(r.dom, r.dom.last, "id", "")
+
+def an_file_name(r: AnResp) -> string:
+    return j_get_str(r.dom, r.dom.last, "filename", "")
+
+def an_file_media_type(r: AnResp) -> string:
+    return j_get_str(r.dom, r.dom.last, "mime_type", "")
+
+def an_file_size(r: AnResp) -> int:
+    return j_get_int(r.dom, r.dom.last, "size_bytes", 0)
+
+# ============================================================
+# streaming
+# ============================================================
+#
+# The event sequence for one streamed message:
+#
+#   message_start        the Message skeleton (id, model, role, input usage)
+#   content_block_start  index 0, {"type":"text","text":""}
+#   content_block_delta  index 0, {"type":"text_delta","text":"Hi"}
+#   content_block_stop   index 0
+#   content_block_start  index 1, {"type":"tool_use","id":"toolu_..","name":".."}
+#   content_block_delta  index 1, {"type":"input_json_delta","partial_json":"{\"ci"}
+#   ... more partial_json, arriving as JSON TEXT FRAGMENTS ...
+#   content_block_stop   index 1
+#   message_delta        {"delta":{"stop_reason":"tool_use"},"usage":{...}}
+#   message_stop
+#
+# with `ping` frames interleaved at any point and an `error` frame possible
+# at any point. Note that a tool call's arguments arrive as JSON fragments,
+# not as a value: they are only valid JSON once the block stops.
+
+struct AnStream:
+    hs: NetHttpStream
+    sse: NetSse
+    rbuf: int        # network read scratch
+    done: bool
+    res: string      # the latest event's JSON payload ("" between events)
+    ev: string       # its SSE event name ("" when the server sent none)
+    status: int
+    err: int         # 1 = failed (transport, HTTP status, or an error event)
+    errmsg: string
+    acc: AnAcc       # running reassembly of the message
+
+# open a streaming message. A non-2xx response is drained here and reported
+# through err/errmsg — a stream either starts clean or fails clean, so the
+# caller's loop never has to distinguish "failed" from "no events yet".
+def an_messages_stream(c: AnClient, model: string, msgs: AnMsgs, max_tokens: int, opts: AnOpts) -> AnStream:
+    body = an_body_messages(model, msgs, max_tokens, opts, True)
+    headers = an_headers_build(c, body, "text/event-stream")
+    hs = net_http_stream_open("POST", c.base_url + "/v1/messages", headers, body, an_user_agent(), c.connect_ms, c.timeout_ms)
+    s = AnStream(hs=hs, sse=net_sse_new(), rbuf=malloc(16384), done=False, res="", ev="", status=hs.status, err=0, errmsg="", acc=an_acc_new())
+    if hs.err == 1:
+        s.err = 1
+        s.errmsg = hs.errmsg
+        s.done = True
+        return s
+    if hs.status < 200 or hs.status > 299:
+        total = 0
+        ebuf = malloc(16384)
+        while total < 16383:
+            hs = net_http_stream_read(hs, ebuf + total, 16383 - total)
+            if hs.err == 1 or hs.got == 0:
+                break
+            total = total + hs.got
+        store_u8(ebuf, total, 0)
+        p = j_parse(as_string(ebuf))
+        free(ebuf)
+        s.err = 1
+        s.errmsg = "anthropic " + str(hs.status) + " " + an_status_class(hs.status) + ": " + j_get_str(p.dom, j_obj_get(p.dom, p.dom.last, "error"), "message", "request failed")
+        s.done = True
+        net_http_stream_close(hs)
+        s.hs = NetHttpStream(session=0, conn=0, req=0, status=0, got=0, request_id="", err=0, errmsg="")
+        return s
+    return s
+
+# pull the next event: fills s.res / s.ev, and feeds the accumulator so the
+# caller can watch the message assemble. Example loop:
+#
+#   st = an_messages_stream(c, model, m, 1024, opts)
+#   while not st.done and st.err == 0:
+#       st = an_stream_next(st)
+#       if st.res != "":
+#           print(an_stream_text(st.res))       # text_delta only
+#   oa_stream_close(st) -> an_stream_close(st)
+#   print(an_msg_text(an_acc_resp(st.acc)))     # the finished message
+def an_stream_next(s: AnStream) -> AnStream:
+    if s.err == 1 or s.done:
+        return s
+    while True:
+        s.sse = net_sse_next(s.sse)
+        if s.sse.done:
+            s.done = True
+            s.res = ""
+            return s
+        if s.sse.res != "":
+            s.res = s.sse.res
+            s.ev = s.sse.event
+            s.acc = an_acc_feed(s.acc, s.res)
+            if an_stream_is_error(s.res):
+                s.err = 1
+                s.errmsg = an_stream_error_msg(s.res)
+                s.done = True
+            if an_stream_is_stop(s.res):
+                s.done = True
+            return s
+        s.hs = net_http_stream_read(s.hs, s.rbuf, 16384)
+        if s.hs.err == 1:
+            s.err = 1
+            s.errmsg = s.hs.errmsg
+            return s
+        if s.hs.got == 0:
+            # the connection closed: flush whatever block was still open so
+            # the caller still gets a well-formed message
+            s.acc = an_acc_flush(s.acc)
+            s.done = True
+            s.res = ""
+            return s
+        s.sse = net_sse_feed(s.sse, s.rbuf, s.hs.got)
+    return s
+
+def an_stream_close(s: AnStream):
+    net_http_stream_close(s.hs)
+    free(s.rbuf)
+
+# ---- pure helpers over one event payload (offline-testable) ----
+
+# the frame's type. The SSE `event:` name is preferred when the server sent
+# one; the payload's own "type" is the fallback, and they always agree when
+# both are present.
+def an_event_type(payload: string, ev_name: string) -> string:
+    if len(ev_name) > 0:
+        return ev_name
+    p = j_parse(payload)
+    if p.err == 1:
+        return ""
+    return j_get_str(p.dom, p.dom.last, "type", "")
+
+def an_stream_type(payload: string) -> string:
+    p = j_parse(payload)
+    if p.err == 1:
+        return ""
+    return j_get_str(p.dom, p.dom.last, "type", "")
+
+def an_stream_index(payload: string) -> int:
+    p = j_parse(payload)
+    if p.err == 1:
+        return -1
+    return j_get_int(p.dom, p.dom.last, "index", -1)
+
+def an_stream_is_stop(payload: string) -> bool:
+    return an_stream_type(payload) == "message_stop"
+
+def an_stream_is_ping(payload: string) -> bool:
+    return an_stream_type(payload) == "ping"
+
+def an_stream_is_error(payload: string) -> bool:
+    return an_stream_type(payload) == "error"
+
+def an_stream_error_msg(payload: string) -> string:
+    p = j_parse(payload)
+    if p.err == 1:
+        return "stream error"
+    e = j_obj_get(p.dom, p.dom.last, "error")
+    if e < 0:
+        return "stream error"
+    return j_get_str(p.dom, e, "type", "error") + ": " + j_get_str(p.dom, e, "message", "")
+
+# the text of a content_block_delta carrying a text_delta ("" otherwise)
+def an_stream_text(payload: string) -> string:
+    p = j_parse(payload)
+    if p.err == 1:
+        return ""
+    d = j_obj_get(p.dom, p.dom.last, "delta")
+    if j_get_str(p.dom, d, "type", "") != "text_delta":
+        return ""
+    return j_get_str(p.dom, d, "text", "")
+
+# the thinking text of a thinking_delta ("" otherwise)
+def an_stream_thinking(payload: string) -> string:
+    p = j_parse(payload)
+    if p.err == 1:
+        return ""
+    d = j_obj_get(p.dom, p.dom.last, "delta")
+    if j_get_str(p.dom, d, "type", "") != "thinking_delta":
+        return ""
+    return j_get_str(p.dom, d, "thinking", "")
+
+# one FRAGMENT of a tool call's JSON arguments ("" when this is not an
+# input_json_delta). Concatenate until the block stops; only then is the
+# result parseable JSON.
+def an_stream_partial_json(payload: string) -> string:
+    p = j_parse(payload)
+    if p.err == 1:
+        return ""
+    d = j_obj_get(p.dom, p.dom.last, "delta")
+    if j_get_str(p.dom, d, "type", "") != "input_json_delta":
+        return ""
+    return j_get_str(p.dom, d, "partial_json", "")
+
+# the stop_reason carried by message_delta ("" until it arrives)
+def an_stream_stop_reason(payload: string) -> string:
+    p = j_parse(payload)
+    if p.err == 1:
+        return ""
+    if j_get_str(p.dom, p.dom.last, "type", "") != "message_delta":
+        return ""
+    return j_get_str(p.dom, j_obj_get(p.dom, p.dom.last, "delta"), "stop_reason", "")
+
+# the output_tokens carried by message_delta (0 until it arrives)
+def an_stream_output_tokens(payload: string) -> int:
+    p = j_parse(payload)
+    if p.err == 1:
+        return 0
+    if j_get_str(p.dom, p.dom.last, "type", "") != "message_delta":
+        return 0
+    return j_get_int(p.dom, j_obj_get(p.dom, p.dom.last, "usage"), "output_tokens", 0)
+
+# ---- the accumulator ----
+#
+# It turns the event sequence back into a Message. Feeding it the canned
+# frames of a real stream and reading `an_acc_message` is what makes the
+# reassembly testable without a network — and it is the only way to get a
+# tool call's arguments, which exist nowhere but in the delta fragments.
+
+struct AnAcc:
+    id: string
+    model: string
+    role: string
+    stop_reason: string
+    stop_sequence: string
+    usage_in: int
+    usage_out: int
+    usage_cache_read: int
+    usage_cache_create: int
+    text: string          # every text delta, in order, joined
+    blocks: Vec           # finished content blocks as JSON text
+    raw: string           # the last block we could not classify, kept verbatim
+    open_kind: string
+    open_id: string
+    open_name: string
+    open_text: string
+    open_thinking: string
+    open_signature: string
+    open_data: string
+    open_json: string      # the `input` as it stood at content_block_start
+    open_acc: string       # the input_json_delta fragments so far
+    open_raw: string
+    events: int
+    errors: int
+    done: bool
+
+def an_acc_new() -> AnAcc:
+    return AnAcc(id="", model="", role="assistant", stop_reason="", stop_sequence="",
+        usage_in=0, usage_out=0, usage_cache_read=0, usage_cache_create=0, text="", blocks=vec_new(), raw="",
+        open_kind="", open_id="", open_name="", open_text="", open_thinking="", open_signature="",
+        open_data="", open_json="", open_acc="", open_raw="", events=0, errors=0, done=False)
+
+# fold one event payload in
+def an_acc_feed(a: AnAcc, payload: string) -> AnAcc:
+    p = j_parse(payload)
+    if p.err == 1:
+        return a
+    root = p.dom.last
+    ty = j_get_str(p.dom, root, "type", "")
+    a.events = a.events + 1
+    if ty == "message_start":
+        m = j_obj_get(p.dom, root, "message")
+        a.id = j_get_str(p.dom, m, "id", a.id)
+        a.model = j_get_str(p.dom, m, "model", a.model)
+        a.role = j_get_str(p.dom, m, "role", a.role)
+        u = j_obj_get(p.dom, m, "usage")
+        a.usage_in = j_get_int(p.dom, u, "input_tokens", a.usage_in)
+        a.usage_out = j_get_int(p.dom, u, "output_tokens", a.usage_out)
+        a.usage_cache_read = j_get_int(p.dom, u, "cache_read_input_tokens", a.usage_cache_read)
+        a.usage_cache_create = j_get_int(p.dom, u, "cache_creation_input_tokens", a.usage_cache_create)
+    elif ty == "content_block_start":
+        a = an_acc_flush(a)
+        cb = j_obj_get(p.dom, root, "content_block")
+        a.open_kind = j_get_str(p.dom, cb, "type", "")
+        a.open_id = j_get_str(p.dom, cb, "id", "")
+        a.open_name = j_get_str(p.dom, cb, "name", "")
+        a.open_text = j_get_str(p.dom, cb, "text", "")
+        a.open_thinking = j_get_str(p.dom, cb, "thinking", "")
+        a.open_signature = j_get_str(p.dom, cb, "signature", "")
+        a.open_data = j_get_str(p.dom, cb, "data", "")
+        a.open_raw = j_dumps(p.dom, cb)
+        inp = j_obj_get(p.dom, cb, "input")
+        if inp < 0:
+            a.open_json = "{}"
+        else:
+            a.open_json = j_dumps(p.dom, inp)
+        # The fragments ARE the whole input, not an addition to whatever
+        # content_block_start carried: the API opens a tool call with
+        # "input":{} and then streams the arguments as text. So they land in
+        # their own accumulator and REPLACE the opening value at flush time;
+        # concatenating onto "{}" would make "{}{"city":"Paris"}".
+        a.open_acc = ""
+        if a.open_kind == "text" and len(a.open_text) > 0:
+            a.text = a.text + a.open_text
+    elif ty == "content_block_delta":
+        d = j_obj_get(p.dom, root, "delta")
+        dt = j_get_str(p.dom, d, "type", "")
+        if dt == "text_delta":
+            t = j_get_str(p.dom, d, "text", "")
+            a.open_text = a.open_text + t
+            if a.open_kind == "text":
+                a.text = a.text + t
+        elif dt == "input_json_delta":
+            a.open_acc = a.open_acc + j_get_str(p.dom, d, "partial_json", "")
+        elif dt == "thinking_delta":
+            a.open_thinking = a.open_thinking + j_get_str(p.dom, d, "thinking", "")
+        elif dt == "signature_delta":
+            a.open_signature = a.open_signature + j_get_str(p.dom, d, "signature", "")
+    elif ty == "content_block_stop":
+        a = an_acc_flush(a)
+    elif ty == "message_delta":
+        d = j_obj_get(p.dom, root, "delta")
+        sr = j_get_str(p.dom, d, "stop_reason", "")
+        if len(sr) > 0:
+            a.stop_reason = sr
+        ss = j_get_str(p.dom, d, "stop_sequence", "")
+        if len(ss) > 0:
+            a.stop_sequence = ss
+        u = j_obj_get(p.dom, root, "usage")
+        a.usage_out = j_get_int(p.dom, u, "output_tokens", a.usage_out)
+        a.usage_cache_read = j_get_int(p.dom, u, "cache_read_input_tokens", a.usage_cache_read)
+        a.usage_cache_create = j_get_int(p.dom, u, "cache_creation_input_tokens", a.usage_cache_create)
+    elif ty == "message_stop":
+        a = an_acc_flush(a)
+        a.done = True
+    elif ty == "error":
+        a.errors = a.errors + 1
+    return a
+
+# close the block currently being assembled, appending it to `blocks`.
+# Calling it with no open block is a no-op, so the caller never has to ask
+# whether one is open.
+def an_acc_flush(a: AnAcc) -> AnAcc:
+    k = a.open_kind
+    if len(k) == 0:
+        return a
+    if k == "text":
+        a.blocks = vec_push_str(a.blocks, an_block_text(a.open_text))
+    elif k == "thinking":
+        a.blocks = vec_push_str(a.blocks, an_block_thinking(a.open_thinking, a.open_signature))
+    elif k == "redacted_thinking":
+        a.blocks = vec_push_str(a.blocks, an_block_redacted_thinking(a.open_data))
+    elif k == "tool_use":
+        a.blocks = vec_push_str(a.blocks, an_block_tool_use(a.open_id, a.open_name, an_open_input(a)))
+    elif k == "server_tool_use":
+        a.blocks = vec_push_str(a.blocks, an_block_server_tool_use(a.open_id, a.open_name, an_open_input(a)))
+    else:
+        # a block kind this SDK does not know (a beta feature, say). Keep it
+        # verbatim rather than dropping it: the caller can still read it
+        # back out of an_acc_message.
+        a.blocks = vec_push_str(a.blocks, a.open_raw)
+        a.raw = a.open_raw
+    a.open_kind = ""
+    a.open_id = ""
+    a.open_name = ""
+    a.open_text = ""
+    a.open_thinking = ""
+    a.open_signature = ""
+    a.open_data = ""
+    a.open_json = ""
+    a.open_acc = ""
+    a.open_raw = ""
+    return a
+
+# the assembled `input`: the streamed fragments when there were any, and the
+# value content_block_start carried when there were none (a tool that takes
+# no arguments answers with "{}" and sends no fragments at all).
+def an_open_input(a: AnAcc) -> string:
+    if len(a.open_acc) > 0:
+        return a.open_acc
+    return a.open_json
+
+# the reassembled Message as JSON text — the same shape a non-streaming
+# response has, so j_parse it and use the accessors above
+def an_acc_message(a: AnAcc) -> string:
+    a = an_acc_flush(a)
+    d = jdom_new()
+    d = jb_obj(d)
+    o = d.last
+    d = jb_set_str(d, o, "id", a.id)
+    d = jb_set_str(d, o, "type", "message")
+    d = jb_set_str(d, o, "role", a.role)
+    d = jb_set_str(d, o, "model", a.model)
+    d = jb_arr(d)
+    c = d.last
+    i = 0
+    while i < a.blocks.len:
+        d = jb_push_raw(d, c, vec_get_str(a.blocks, i))
+        i = i + 1
+    d = jb_set(d, o, "content", c)
+    if len(a.stop_reason) > 0:
+        d = jb_set_str(d, o, "stop_reason", a.stop_reason)
+    if len(a.stop_sequence) > 0:
+        d = jb_set_str(d, o, "stop_sequence", a.stop_sequence)
+    d = jb_obj(d)
+    u = d.last
+    d = jb_set_int(d, u, "input_tokens", a.usage_in)
+    d = jb_set_int(d, u, "output_tokens", a.usage_out)
+    if a.usage_cache_read > 0:
+        d = jb_set_int(d, u, "cache_read_input_tokens", a.usage_cache_read)
+    if a.usage_cache_create > 0:
+        d = jb_set_int(d, u, "cache_creation_input_tokens", a.usage_cache_create)
+    d = jb_set(d, o, "usage", u)
+    return j_dumps(d, o)
+
+# the reassembled message as an AnResp, ready for an_msg_text and friends
+def an_acc_resp(a: AnAcc) -> AnResp:
+    body = an_acc_message(a)
+    p = j_parse(body)
+    pok = 1
+    if p.err == 1:
+        pok = 0
+    return AnResp(status=200, dom=p.dom, pok=pok, pmsg=p.errmsg, raw=body, request_id=a.id, terr=0, tmsg="", retries=0)
+
+def an_acc_block_count(a: AnAcc) -> int:
+    a = an_acc_flush(a)
+    return a.blocks.len

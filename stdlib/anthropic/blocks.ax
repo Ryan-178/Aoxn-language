@@ -1,0 +1,331 @@
+# Aoxn Anthropic SDK — content blocks and the message list (v0.41.0).
+#
+# The Anthropic Messages API is not "an array of strings": a message's
+# `content` is either one string or an ORDERED ARRAY of typed blocks — text,
+# image, document, thinking, tool_use, tool_result — and the type is a field
+# inside each block. Everything the SDK sends in `messages` is built here.
+#
+# A block is represented as a JSON TEXT string, not a struct. That is the
+# one representation that survives the whole round trip:
+#
+#   - blocks compose into an array with an_blocks_json and go straight into
+#     the request body;
+#   - the streaming accumulator (client.ax) assembles a Message out of
+#     deltas as text too, so `an_msg_text` and friends read a streamed
+#     message and a non-streamed one through the SAME accessors — parse
+#     either with j_parse and use one API;
+#   - the language has no sum types, so a struct per block kind would mean
+#     a struct per kind at every call site. Text keeps that flat.
+#
+# Nothing here talks to the network, so all of it is offline-testable, and
+# every string that reaches the wire goes through `j_quote` (net/json.ax) —
+# a quote or a newline in a prompt is a normal Tuesday, not an escaping bug.
+#
+# Feature budget: plain Aoxn only (no dict/None/fn-ptr/raise), like the rest
+# of the stdlib SDKs, so the self-hosted compiler can compile this file too.
+
+import * from "../stdlib.ax"
+import * from "../net/codec.ax"
+import * from "../net/json.ax"
+
+# ---- prompt caching ----
+
+# CacheControlEphemeralParam. `ttl` is "" (omit the member), "5m" or "1h" —
+# the reference's default is 5m when the object is present without a ttl.
+# Returns "" when ttl is "", so a caller can concatenate unconditionally.
+def an_cache_control(ttl: string) -> string:
+    if len(ttl) == 0:
+        return ""
+    d = jdom_new()
+    d = jb_obj(d)
+    o = d.last
+    d = jb_set_str(d, o, "type", "ephemeral")
+    if ttl != "5m":
+        d = jb_set_str(d, o, "ttl", ttl)
+    return j_dumps(d, o)
+
+# ---- text ----
+
+# TextBlockParam — {type, text}
+def an_block_text(text: string) -> string:
+    d = jdom_new()
+    d = jb_obj(d)
+    o = d.last
+    d = jb_set_str(d, o, "type", "text")
+    d = jb_set_str(d, o, "text", text)
+    return j_dumps(d, o)
+
+# the same with a cache_control breakpoint ("" ttl = no cache_control)
+def an_block_text_cached(text: string, ttl: string) -> string:
+    cc = an_cache_control(ttl)
+    d = jdom_new()
+    d = jb_obj(d)
+    o = d.last
+    d = jb_set_str(d, o, "type", "text")
+    d = jb_set_str(d, o, "text", text)
+    if len(cc) > 0:
+        d = jb_set_raw(d, o, "cache_control", cc)
+    return j_dumps(d, o)
+
+# ---- thinking (extended thinking; pass the block back verbatim) ----
+
+# ThinkingBlockParam — {type, thinking, signature}. `signature` is opaque:
+# the API hands it to you and requires it echoed unchanged on the next turn.
+def an_block_thinking(thinking: string, signature: string) -> string:
+    d = jdom_new()
+    d = jb_obj(d)
+    o = d.last
+    d = jb_set_str(d, o, "type", "thinking")
+    d = jb_set_str(d, o, "thinking", thinking)
+    d = jb_set_str(d, o, "signature", signature)
+    return j_dumps(d, o)
+
+# RedactedThinkingBlockParam — {type, data}
+def an_block_redacted_thinking(data: string) -> string:
+    d = jdom_new()
+    d = jb_obj(d)
+    o = d.last
+    d = jb_set_str(d, o, "type", "redacted_thinking")
+    d = jb_set_str(d, o, "data", data)
+    return j_dumps(d, o)
+
+# ---- images ----
+
+# ImageBlockParam wraps a `source` object; there are three of them.
+
+# {type:"base64", data, media_type} — `data` is the ALREADY base64-encoded
+# bytes; use net_b64_encode_str on a file's contents to get it.
+def an_block_image_b64(media_type: string, data_b64: string) -> string:
+    src = jdom_new()
+    src = jb_obj(src)
+    s = src.last
+    src = jb_set_str(src, s, "type", "base64")
+    src = jb_set_str(src, s, "media_type", media_type)
+    src = jb_set_str(src, s, "data", data_b64)
+    d = jdom_new()
+    d = jb_obj(d)
+    o = d.last
+    d = jb_set_str(d, o, "type", "image")
+    d = jb_set_raw(d, o, "source", j_dumps(src, s))
+    return j_dumps(d, o)
+
+# {type:"url", url}
+def an_block_image_url(url: string) -> string:
+    src = jdom_new()
+    src = jb_obj(src)
+    s = src.last
+    src = jb_set_str(src, s, "type", "url")
+    src = jb_set_str(src, s, "url", url)
+    d = jdom_new()
+    d = jb_obj(d)
+    o = d.last
+    d = jb_set_str(d, o, "type", "image")
+    d = jb_set_raw(d, o, "source", j_dumps(src, s))
+    return j_dumps(d, o)
+
+# {type:"file", file_id} — an uploaded file (an_files_*)
+def an_block_image_file(file_id: string) -> string:
+    src = jdom_new()
+    src = jb_obj(src)
+    s = src.last
+    src = jb_set_str(src, s, "type", "file")
+    src = jb_set_str(src, s, "file_id", file_id)
+    d = jdom_new()
+    d = jb_obj(d)
+    o = d.last
+    d = jb_set_str(d, o, "type", "image")
+    d = jb_set_raw(d, o, "source", j_dumps(src, s))
+    return j_dumps(d, o)
+
+# ---- documents ----
+
+# the `source` object a DocumentBlockParam carries. media_type picks the
+# flavour: "text/plain" is sent inline as {type:"text"}, anything else
+# (the reference's only other value is "application/pdf") is assumed to be
+# base64 already, as {type:"base64"}.
+def an_document_source(media_type: string, data: string) -> string:
+    src = jdom_new()
+    src = jb_obj(src)
+    s = src.last
+    if media_type == "text/plain":
+        src = jb_set_str(src, s, "type", "text")
+    else:
+        src = jb_set_str(src, s, "type", "base64")
+    src = jb_set_str(src, s, "media_type", media_type)
+    src = jb_set_str(src, s, "data", data)
+    return j_dumps(src, s)
+
+# DocumentBlockParam
+def an_block_document(media_type: string, data: string) -> string:
+    d = jdom_new()
+    d = jb_obj(d)
+    o = d.last
+    d = jb_set_str(d, o, "type", "document")
+    d = jb_set_raw(d, o, "source", an_document_source(media_type, data))
+    return j_dumps(d, o)
+
+# a document with a title and surrounding context, both of which the model
+# sees. Empty title/context are omitted rather than sent as "".
+def an_block_document_titled(media_type: string, data: string, title: string, context: string) -> string:
+    d = jdom_new()
+    d = jb_obj(d)
+    o = d.last
+    d = jb_set_str(d, o, "type", "document")
+    d = jb_set_raw(d, o, "source", an_document_source(media_type, data))
+    if len(title) > 0:
+        d = jb_set_str(d, o, "title", title)
+    if len(context) > 0:
+        d = jb_set_str(d, o, "context", context)
+    return j_dumps(d, o)
+
+# ---- tool use / tool result ----
+
+# ToolUseBlockParam — what the model sends to ask for your tool.
+# `input_json` is RAW JSON TEXT (the API validated `input` object); build it
+# with the net/json builder or j_dumps, and "{}" when there are no arguments.
+def an_block_tool_use(id: string, name: string, input_json: string) -> string:
+    d = jdom_new()
+    d = jb_obj(d)
+    o = d.last
+    d = jb_set_str(d, o, "type", "tool_use")
+    d = jb_set_str(d, o, "id", id)
+    d = jb_set_str(d, o, "name", name)
+    d = jb_set_raw(d, o, "input", input_json)
+    return j_dumps(d, o)
+
+def an_block_tool_use_cached(id: string, name: string, input_json: string, ttl: string) -> string:
+    cc = an_cache_control(ttl)
+    d = jdom_new()
+    d = jb_obj(d)
+    o = d.last
+    d = jb_set_str(d, o, "type", "tool_use")
+    d = jb_set_str(d, o, "id", id)
+    d = jb_set_str(d, o, "name", name)
+    d = jb_set_raw(d, o, "input", input_json)
+    if len(cc) > 0:
+        d = jb_set_raw(d, o, "cache_control", cc)
+    return j_dumps(d, o)
+
+# ToolResultBlockParam — your tool's answer, in a user-role message.
+# `content` here is plain text; use an_block_tool_result_blocks for a
+# multi-part result (text and images together).
+def an_block_tool_result(tool_use_id: string, content: string) -> string:
+    d = jdom_new()
+    d = jb_obj(d)
+    o = d.last
+    d = jb_set_str(d, o, "type", "tool_result")
+    d = jb_set_str(d, o, "tool_use_id", tool_use_id)
+    d = jb_set_str(d, o, "content", content)
+    return j_dumps(d, o)
+
+# the same, flagged as a failure. The API distinguishes "your tool broke"
+# from "the tool ran fine and this is the answer", and the model behaves
+# differently for each — an error result is data to react to, not a 500.
+def an_block_tool_result_error(tool_use_id: string, content: string) -> string:
+    d = jdom_new()
+    d = jb_obj(d)
+    o = d.last
+    d = jb_set_str(d, o, "type", "tool_result")
+    d = jb_set_str(d, o, "tool_use_id", tool_use_id)
+    d = jb_set_str(d, o, "content", content)
+    d = jb_set_bool(d, o, "is_error", True)
+    return j_dumps(d, o)
+
+# a result whose content is an ARRAY of blocks (text plus an image, say)
+def an_block_tool_result_blocks(tool_use_id: string, blocks: Vec) -> string:
+    d = jdom_new()
+    d = jb_obj(d)
+    o = d.last
+    d = jb_set_str(d, o, "type", "tool_result")
+    d = jb_set_str(d, o, "tool_use_id", tool_use_id)
+    d = jb_set_raw(d, o, "content", an_blocks_json(blocks))
+    return j_dumps(d, o)
+
+# ---- server-side tools (echoed back to continue a server-tool turn) ----
+
+# ServerToolUseBlockParam — the API's own tool call, returned to you inside
+# the assistant message and required verbatim on the next turn.
+def an_block_server_tool_use(id: string, name: string, input_json: string) -> string:
+    d = jdom_new()
+    d = jb_obj(d)
+    o = d.last
+    d = jb_set_str(d, o, "type", "server_tool_use")
+    d = jb_set_str(d, o, "id", id)
+    d = jb_set_str(d, o, "name", name)
+    d = jb_set_raw(d, o, "input", input_json)
+    return j_dumps(d, o)
+
+# WebSearchToolResultBlockParam — `results` are
+# {type:"web_search_result", encrypted_content, title, url, page_age} objects.
+def an_block_web_search_result(tool_use_id: string, results: Vec) -> string:
+    d = jdom_new()
+    d = jb_obj(d)
+    o = d.last
+    d = jb_set_str(d, o, "type", "web_search_tool_result")
+    d = jb_set_str(d, o, "tool_use_id", tool_use_id)
+    d = jb_arr(d)
+    a = d.last
+    i = 0
+    while i < results.len:
+        d = jb_push_raw(d, a, vec_get_str(results, i))
+        i = i + 1
+    d = jb_set(d, o, "content", a)
+    return j_dumps(d, o)
+
+# ---- block lists ----
+
+# join block JSON texts into a JSON array. An empty Vec renders as [], which
+# is a legal (if useless) content array — the caller asked for it.
+def an_blocks_json(blocks: Vec) -> string:
+    out = "["
+    i = 0
+    while i < blocks.len:
+        if i > 0:
+            out = out + ","
+        out = out + vec_get_str(blocks, i)
+        i = i + 1
+    return out + "]"
+
+# ============================================================
+# the message list
+# ============================================================
+#
+# `messages` is a list of {role, content} where content is a string OR an
+# array of blocks. Two parallel `Vec`s carry the roles and the already-
+# rendered content values, because Aoxn's `Vec` moves 8-byte slots and a
+# struct element would be copied by value on every push — the aliasing trap
+# the UI toolkit's models avoid by being pointer-backed. `Vec` fields must
+# be written back (`m = an_msgs_push_text(m, ...)`) exactly like any other.
+
+struct AnMsgs:
+    roles: Vec
+    contents: Vec
+
+def an_msgs_new() -> AnMsgs:
+    return AnMsgs(roles=vec_new(), contents=vec_new())
+
+# a plain-text message: content is the string itself, not a one-element array
+def an_msgs_push_text(m: AnMsgs, role: string, text: string) -> AnMsgs:
+    m.roles = vec_push_str(m.roles, role)
+    m.contents = vec_push_str(m.contents, j_quote(text))
+    return m
+
+# a message whose content is an array of blocks (see the constructors above)
+def an_msgs_push_blocks(m: AnMsgs, role: string, blocks: Vec) -> AnMsgs:
+    m.roles = vec_push_str(m.roles, role)
+    m.contents = vec_push_str(m.contents, an_blocks_json(blocks))
+    return m
+
+# the message list as a JSON array
+def an_msgs_json(m: AnMsgs) -> string:
+    out = "["
+    i = 0
+    while i < m.roles.len:
+        if i > 0:
+            out = out + ","
+        out = out + "{\"role\":" + j_quote(vec_get_str(m.roles, i)) + ",\"content\":" + vec_get_str(m.contents, i) + "}"
+        i = i + 1
+    return out + "]"
+
+def an_msgs_len(m: AnMsgs) -> int:
+    return m.roles.len

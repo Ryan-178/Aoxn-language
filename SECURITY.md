@@ -199,16 +199,32 @@ the information needed to protect users even if the reporter disagrees.
   from a production root must never be pruned, and a package named in both
   `dependencies` and `devDependencies` counts as production. A build that
   loses a dependency it declared is a denial of service on that project.
-- **stdlib runtime parsers over hostile input** (since v0.40.1:
-  `stdlib/openai/json.ax`, `sse.ax`, `http.ax`) — the OpenAI SDK's JSON DOM,
-  SSE framer and URL/header splitting parse bytes a remote server controls,
-  inside the user's process. They are hand-written index arithmetic over
-  malloc'd buffers, so a malformed response that overruns a buffer, walks off
-  the DOM slab, or loops without advancing is a stdlib defect (same standing
-  as the UI backend's message parsing below), not merely "the program's bug".
-  The SDK test suite feeds hostile fixtures offline precisely so these paths
-  stay provable; the SDK never runs inside the compiler process and adds no
-  compiler-side surface.
+- **stdlib runtime parsers over hostile input** (since v0.40.1, and two
+  consumers wide since v0.41.0: `stdlib/net/json.ax`, `sse.ax`, `http.ax`,
+  used by both `stdlib/openai/` and `stdlib/anthropic/`) — the JSON DOM and
+  its builder, the SSE framer, the URL/header splitting and the raw
+  response-header scan parse bytes a remote server controls, inside the
+  user's process. They are hand-written index arithmetic over malloc'd
+  buffers, so a malformed response that overruns a buffer, walks off the
+  DOM slab, or loops without advancing is a stdlib defect (same standing
+  as the UI backend's message parsing below), not merely "the program's
+  bug". Three specifics worth naming because each was found the hard way:
+  the DOM accessors answer `-1` for an absent key and callers pipe that
+  straight into another accessor (unguarded, it read before the slab);
+  `jb_set_raw` / `jb_push_raw` splice a parsed fragment into an existing
+  slab, so the stale pre-`realloc` pointer must never be used again; and
+  the response-header lookup scans a block whose length comes from the
+  server. The SDK test suites feed hostile fixtures offline precisely so
+  these paths stay provable; the SDKs never run inside the compiler
+  process and add no compiler-side surface.
+- **Credential handling in the SDK clients** (v0.41.0) — `AnClient` /
+  `OaClient` hold the API key as an ordinary Aoxn string, so it lives in
+  the heap for the process's lifetime and is passed by pointer. Nothing
+  scrubs it, and a core dump or a crash report will contain it. The
+  reference Python SDK has the same property. Prefer the environment
+  (`an_client_env()` / `oa_client_env()`) over a literal in source, and do
+  not print an `AnClient` / `OaClient` struct: `print` on a struct renders
+  its fields, key included.
 
 ## Out of scope (documented behavior)
 
@@ -450,13 +466,22 @@ tag，请在报告里说明，我们再商量。
    决定什么会落进 `aox_modules/`。从生产根可达的包绝不能被裁掉；同时出现在
    `dependencies` 与 `devDependencies` 的包按生产算。让某个项目丢掉它自己声明
    的依赖，即是对该项目的拒绝服务。
-- **标准库中解析敌意输入的运行时解析器**（v0.40.1 起：`stdlib/openai/json.ax`、
-   `sse.ax`、`http.ax`）—— OpenAI SDK 的 JSON DOM、SSE 分帧与 URL/请求头拆分
-   解析的是远端服务器可控的字节，运行在用户进程内。它们是对 malloc 缓冲的手写
-   索引运算：一个畸形响应若造成缓冲越界、走出 DOM slab、或不前进的死循环，
+- **标准库中解析敌意输入的运行时解析器**（v0.40.1 起，v0.41.0 起有两个使用方：
+   `stdlib/net/json.ax`、`sse.ax`、`http.ax`，由 `stdlib/openai/` 与
+   `stdlib/anthropic/` 共用）—— JSON DOM 及其构建器、SSE 分帧、URL/请求头拆分与
+   原始响应头扫描解析的是远端服务器可控的字节，运行在用户进程内。它们是对 malloc
+   缓冲的手写索引运算：一个畸形响应若造成缓冲越界、走出 DOM slab、或不前进的死循环，
    属于标准库缺陷（与下文 UI 后端的消息解析同一待遇），而不只是"程序的 bug"。
-   SDK 测试套件离线投喂敌意 fixture，正是为了让这些路径保持可证明；SDK 从不在
-   编译器进程内运行，也不新增编译器侧攻击面。
+   有三处值得点名，因为每一处都是踩出来的：DOM 访问器对缺失的键返回 `-1`，而调用方
+   会把它直接喂给另一个访问器（无保护时它会读到 slab 之前）；`jb_set_raw` /
+   `jb_push_raw` 把解析出的片段拼进已有的 slab，因此 realloc 之前的旧指针绝不可再用；
+   响应头查找扫描的块，其长度来自服务器。SDK 测试套件离线投喂敌意 fixture，正是为了
+   让这些路径保持可证明；SDK 从不在编译器进程内运行，也不新增编译器侧攻击面。
+- **SDK 客户端中的凭据处理**（v0.41.0）—— `AnClient` / `OaClient` 把 API key 当作
+   普通 Aoxn 字符串持有，因此它在堆里存活整个进程生命周期，并以指针传递。没有任何机制
+   会擦除它，core dump 或崩溃报告里就会有它。参考 Python SDK 同样如此。请优先用环境变量
+   （`an_client_env()` / `oa_client_env()`）而不是源码里的字面量，并且不要 `print` 一个
+   `AnClient` / `OaClient` 结构体：`print` 会把字段逐个渲染出来，key 就在其中。
 
 ## 范围外（文档化行为）
 

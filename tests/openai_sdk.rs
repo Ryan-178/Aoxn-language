@@ -58,18 +58,18 @@ fn build(src: &str, name: &str, libs: &[&str]) -> PathBuf {
 const PURE_SRC: &str = r#"
 def main() -> int:
     # ---- base64: RFC 4648 vectors ----
-    print("PASS b64-empty " + oa_b64_encode_str(""))
-    print("PASS b64-f " + oa_b64_encode_str("f"))
-    print("PASS b64-fo " + oa_b64_encode_str("fo"))
-    print("PASS b64-foo " + oa_b64_encode_str("foo"))
-    print("PASS b64-foob " + oa_b64_encode_str("foob"))
-    print("PASS b64-fooba " + oa_b64_encode_str("fooba"))
-    print("PASS b64-foobar " + oa_b64_encode_str("foobar"))
+    print("PASS b64-empty " + net_b64_encode_str(""))
+    print("PASS b64-f " + net_b64_encode_str("f"))
+    print("PASS b64-fo " + net_b64_encode_str("fo"))
+    print("PASS b64-foo " + net_b64_encode_str("foo"))
+    print("PASS b64-foob " + net_b64_encode_str("foob"))
+    print("PASS b64-fooba " + net_b64_encode_str("fooba"))
+    print("PASS b64-foobar " + net_b64_encode_str("foobar"))
     # ---- percent-encoding ----
-    print("PASS urlenc " + oa_url_encode("a b/c~d"))
+    print("PASS urlenc " + net_url_encode("a b/c~d"))
     # ---- UTF-16 round trip ----
-    w = oa_to_wide("héllo 😀")
-    print("PASS utf16rt " + oa_from_wide(w))
+    w = net_to_wide("héllo 😀")
+    print("PASS utf16rt " + net_from_wide(w))
     # ---- JSON: parse / dumps / round trip ----
     p = j_parse("{\"model\":\"gpt-4o\",\"n\":42,\"f\":0.5,\"ok\":true,\"arr\":[1,2,3],\"nested\":{\"a\":\"b\"}}")
     print("PASS json-err " + str(p.err))
@@ -91,13 +91,13 @@ def main() -> int:
     print("PASS json-trail " + str(trail.err))
     print("PASS json-fmt " + j_fmt_f(0.7) + " " + j_fmt_f(-0.5) + " " + j_fmt_f(0.0) + " " + j_fmt_f(150000000000000000000.0))
     # ---- URL splitting ----
-    u1 = oa_url_split("https://api.openai.com/v1/chat/completions")
+    u1 = net_url_split("https://api.openai.com/v1/chat/completions")
     print("PASS url1 " + str(u1.secure) + " " + u1.host + " " + str(u1.port) + " " + u1.path)
-    u2 = oa_url_split("http://localhost:8080/v1/models")
+    u2 = net_url_split("http://localhost:8080/v1/models")
     print("PASS url2 " + str(u2.secure) + " " + u2.host + " " + str(u2.port) + " " + u2.path)
-    u3 = oa_url_split("https://host:8443/a/b?q=1")
+    u3 = net_url_split("https://host:8443/a/b?q=1")
     print("PASS url3 " + u3.host + " " + str(u3.port) + " " + u3.path)
-    u4 = oa_url_split("notaurl")
+    u4 = net_url_split("notaurl")
     print("PASS url4 " + str(len(u4.host) == 0))
     # ---- headers ----
     h = oa_headers_build("sk-test", "", "", "{}")
@@ -106,7 +106,7 @@ def main() -> int:
     h2 = oa_headers_build("sk", "o", "p", "")
     print("PASS hdr-org " + str(find_str(h2, "OpenAI-Organization: o") >= 0) + str(find_str(h2, "OpenAI-Project: p") >= 0))
     # ---- retry policy ----
-    print("PASS retry " + str(oa_retry_delay(0, 2, 429, 0)) + "," + str(oa_retry_delay(1, 2, 500, 0)) + "," + str(oa_retry_delay(2, 2, 500, 0)) + "," + str(oa_retry_delay(0, 2, 404, 0)) + "," + str(oa_retry_delay(0, 2, 429, 30)) + "," + str(oa_retry_delay(0, 2, 0, 0)))
+    print("PASS retry " + str(net_retry_delay(0, 2, 429, 0)) + "," + str(net_retry_delay(1, 2, 500, 0)) + "," + str(net_retry_delay(2, 2, 500, 0)) + "," + str(net_retry_delay(0, 2, 404, 0)) + "," + str(net_retry_delay(0, 2, 429, 30)) + "," + str(net_retry_delay(0, 2, 0, 0)))
     # ---- request bodies ----
     roles = vec_new()
     contents = vec_new()
@@ -124,39 +124,51 @@ def main() -> int:
     print("PASS body-emb-many " + oa_body_embeddings("e3-small", "", True, ins))
     print("PASS body-mod " + oa_body_moderations("", "x"))
     # ---- SSE ----
-    s = oa_sse_new()
+    s = net_sse_new()
     f1 = "data: {\"a\":1}\n\ndata: {\"b\":2}\n\ndata: [DONE]\n\n"
-    s = oa_sse_feed(s, as_ptr(f1), len(f1))
-    s = oa_sse_next(s)
+    s = net_sse_feed(s, as_ptr(f1), len(f1))
+    s = net_sse_next(s)
     e1 = s.res
-    s = oa_sse_next(s)
+    s = net_sse_next(s)
     e2 = s.res
-    s = oa_sse_next(s)
+    s = net_sse_next(s)
     print("PASS sse " + e1 + "|" + e2 + "|" + str(s.done))
     # split feed: one event arriving across three chunks
-    s2 = oa_sse_new()
+    s2 = net_sse_new()
     part1 = "data: {\"c\":"
     part2 = "42}\n"
     part3 = "\n"
-    s2 = oa_sse_feed(s2, as_ptr(part1), len(part1))
-    s2 = oa_sse_next(s2)
+    s2 = net_sse_feed(s2, as_ptr(part1), len(part1))
+    s2 = net_sse_next(s2)
     mid = s2.res
-    s2 = oa_sse_feed(s2, as_ptr(part2), len(part2))
-    s2 = oa_sse_next(s2)
+    s2 = net_sse_feed(s2, as_ptr(part2), len(part2))
+    s2 = net_sse_next(s2)
     mid2 = s2.res
-    s2 = oa_sse_feed(s2, as_ptr(part3), len(part3))
-    s2 = oa_sse_next(s2)
+    s2 = net_sse_feed(s2, as_ptr(part3), len(part3))
+    s2 = net_sse_next(s2)
     print("PASS sse-split " + str(len(mid) == 0) + str(len(mid2) == 0) + s2.res)
     # CRLF endings and a comment line (CRLF spelled as raw bytes: the
     # language has no \r escape)
-    s3 = oa_sse_new()
+    s3 = net_sse_new()
     nl = crlf()
     l1 = ": keep-alive"
     l2 = "data: {\"d\":9}"
     f3 = l1 + nl + nl + l2 + nl + nl
-    s3 = oa_sse_feed(s3, as_ptr(f3), len(f3))
-    s3 = oa_sse_next(s3)
+    s3 = net_sse_feed(s3, as_ptr(f3), len(f3))
+    s3 = net_sse_next(s3)
     print("PASS sse-crlf " + s3.res)
+    # the named-event form (Anthropic's shape): `event:` names the frame and
+    # must NOT leak into the next frame. A frame with an event name but no
+    # data line carries nothing, so it is dropped rather than dispatched.
+    # OpenAI never sends either, so this pins the shared filter itself.
+    s4 = net_sse_new()
+    f4 = "event: message_start" + nl + nl + "event: content_block_delta" + nl + "data: {\"e\":1}" + nl + nl + "data: {\"f\":2}" + nl + nl
+    s4 = net_sse_feed(s4, as_ptr(f4), len(f4))
+    s4 = net_sse_next(s4)
+    ev1 = s4.event
+    pay1 = s4.res
+    s4 = net_sse_next(s4)
+    print("PASS sse-event [" + ev1 + "][" + pay1 + "] [" + s4.event + "][" + s4.res + "]")
     # ---- stream chunk helpers ----
     chunk = "{\"id\":\"x\",\"choices\":[{\"delta\":{\"content\":\"Hel\"},\"finish_reason\":null}]}"
     print("PASS chunk " + oa_stream_text(chunk) + "|" + oa_stream_finish(chunk))
@@ -165,27 +177,27 @@ def main() -> int:
     # ---- response accessors on canned bodies ----
     body = "{\"id\":\"cmpl-1\",\"model\":\"gpt-4o\",\"choices\":[{\"index\":0,\"message\":{\"role\":\"assistant\",\"content\":\"Hello!\"},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":2,\"total_tokens\":12}}"
     p2 = j_parse(body)
-    r = OaResp(status=200, dom=p2.dom, pok=1, pmsg="", raw=body, terr=0, tmsg="", retries=0)
+    r = OaResp(status=200, dom=p2.dom, pok=1, pmsg="", raw=body, request_id="", terr=0, tmsg="", retries=0)
     print("PASS resp-text " + oa_chat_text(r) + " " + oa_chat_finish(r) + " " + oa_chat_model(r))
     print("PASS resp-usage " + str(oa_usage_in(r)) + "/" + str(oa_usage_out(r)) + "/" + str(oa_usage_total(r)))
     print("PASS resp-ok " + str(oa_resp_ok(r)) + "|" + oa_err_msg(r))
     eb = "{\"error\":{\"message\":\"Incorrect API key\",\"type\":\"invalid_request_error\",\"code\":\"invalid_api_key\"}}"
     q = j_parse(eb)
-    r2 = OaResp(status=401, dom=q.dom, pok=1, pmsg="", raw=eb, terr=0, tmsg="", retries=0)
+    r2 = OaResp(status=401, dom=q.dom, pok=1, pmsg="", raw=eb, request_id="", terr=0, tmsg="", retries=0)
     print("PASS resp-401 " + str(oa_resp_ok(r2)) + "|" + oa_err_msg(r2))
-    r3 = OaResp(status=0, dom=jdom_new(), pok=0, pmsg="x", raw="", terr=1, tmsg="timeout", retries=2)
+    r3 = OaResp(status=0, dom=jdom_new(), pok=0, pmsg="x", raw="", request_id="", terr=1, tmsg="timeout", retries=2)
     print("PASS resp-terr " + str(oa_resp_ok(r3)) + "|" + oa_err_msg(r3))
     rb = "{\"id\":\"resp_1\",\"output\":[{\"type\":\"message\",\"content\":[{\"type\":\"output_text\",\"text\":\"Hi there\"}]}]}"
     wp = j_parse(rb)
-    r4 = OaResp(status=200, dom=wp.dom, pok=1, pmsg="", raw=rb, terr=0, tmsg="", retries=0)
+    r4 = OaResp(status=200, dom=wp.dom, pok=1, pmsg="", raw=rb, request_id="", terr=0, tmsg="", retries=0)
     print("PASS resp-outputtext " + oa_responses_text(r4))
     lb = "{\"object\":\"list\",\"data\":[{\"id\":\"m1\",\"object\":\"model\"},{\"id\":\"m2\",\"object\":\"model\"}]}"
     v = j_parse(lb)
-    r5 = OaResp(status=200, dom=v.dom, pok=1, pmsg="", raw=lb, terr=0, tmsg="", retries=0)
+    r5 = OaResp(status=200, dom=v.dom, pok=1, pmsg="", raw=lb, request_id="", terr=0, tmsg="", retries=0)
     print("PASS resp-list " + str(oa_data_len(r5)) + " " + oa_data_id(r5, 0) + " " + oa_data_id(r5, 1))
     emb = "{\"data\":[{\"embedding\":[0.25,-0.5,2.0]}]}"
     z = j_parse(emb)
-    r6 = OaResp(status=200, dom=z.dom, pok=1, pmsg="", raw=emb, terr=0, tmsg="", retries=0)
+    r6 = OaResp(status=200, dom=z.dom, pok=1, pmsg="", raw=emb, request_id="", terr=0, tmsg="", retries=0)
     print("PASS resp-emb " + str(oa_embedding_len(r6, 0)) + " " + j_fmt_f(oa_embedding_at(r6, 0, 0)) + " " + j_fmt_f(oa_embedding_at(r6, 0, 1)) + " " + j_fmt_f(oa_embedding_at(r6, 0, 2)))
     return 0
 
@@ -239,6 +251,7 @@ fn openai_sdk_pure_layers() {
         "body-emb-many {\"model\":\"e3-small\",\"input\":[\"a\",\"b\"]}",
         "body-mod {\"input\":\"x\"}",
         "sse {\"a\":1}|{\"b\":2}|true", "sse-split truetrue{\"c\":42}", "sse-crlf {\"d\":9}",
+        "sse-event [content_block_delta][{\"e\":1}] [][{\"f\":2}]",
         "chunk Hel|", "chunk2 |stop",
         "resp-text Hello! stop gpt-4o", "resp-usage 10/2/12", "resp-ok true|",
         "resp-401 false|openai 401: Incorrect API key", "resp-terr false|timeout",

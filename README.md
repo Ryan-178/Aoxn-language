@@ -254,12 +254,16 @@ cargo run -- run examples\ui_demo.ax -l user32 -l gdi32      # getting started
 Details: [`docs/ui.md`](docs/ui.md) · gallery: `examples/ui_gallery.ax` ·
 tests: `tests/ui.rs`.
 
-### The OpenAI SDK (v0.40.1)
+### The API SDKs (v0.41.0)
 
-`stdlib/openai/` gives the language a real API client in five plain-Aoxn
-modules: JSON with a proper DOM, HTTPS over WinHTTP, SSE streaming, and the
-core OpenAI resources — with the reference Python SDK's defaults (the same
-base URL, env variable names, timeouts and retry budget):
+Two provider SDKs ship in the stdlib over **one shared transport**.
+`stdlib/net/` is provider-neutral — base64/percent/UTF-16 codecs, a JSON
+DOM with a builder, HTTPS over WinHTTP, SSE — and each SDK adds its own
+files on top. Both take their defaults, env variable names and retry policy
+from the reference Python clients.
+
+`stdlib/openai/` (v0.40.1) covers chat completions, responses, embeddings,
+models and moderations, blocking or streamed:
 
 ```Aoxn
 import * from "stdlib/openai/client"
@@ -278,24 +282,54 @@ def main() -> int:
     return 0
 ```
 
-Streaming is the same shape with a pull loop: `oa_chat_stream` opens the
-request, `oa_stream_next` yields one SSE `data:` payload at a time (the
-`[DONE]` sentinel and connection close both end it), `oa_stream_text`
-extracts `choices[0].delta.content`, `oa_stream_close` releases the
-handles. Resources: `chat.completions`, `responses`, `embeddings`,
-`models`, `moderations` — blocking and streaming; `oa_request` +
-the JSON DOM cover anything the typed helpers do not. Errors never raise:
-`oa_resp_ok` gates, `oa_err_msg` renders whichever layer failed first.
-Link with `-l winhttp` (the one transport that brings TLS without a TLS
-stack).
+`stdlib/anthropic/` (v0.41.0) covers the Messages API — where the payload
+is an array of typed content blocks, not a list of strings — plus token
+counting, models, files and message batches, with **tool use** end to end:
+
+```Aoxn
+import * from "stdlib/anthropic/client"
+
+def main() -> int:
+    c = an_client_env()                 # ANTHROPIC_API_KEY / ANTHROPIC_BASE_URL
+    m = an_msgs_new()
+    m = an_msgs_push_text(m, "user", "Say hello in one word")
+    r = an_messages_create(c, "claude-sonnet-4-5", m, 256, an_opts_new())
+    if not an_resp_ok(r):
+        print(an_err_msg(r))
+        return 1
+    print(an_msg_text(r))               # -> Hello!
+    print(an_usage_line(r))             # -> tokens 12 in / 25 out
+    return 0
+```
+
+Three things carry across both SDKs. **Streaming** is a pull loop
+(`*_stream` / `*_stream_next` / `*_stream_close`) over the SSE filter;
+Anthropic's frames are *named*, and a tool call's arguments arrive only as
+JSON text fragments — so `AnAcc` reassembles the stream into a finished
+Message that the same accessors read (`an_acc_resp(st.acc)`). **Tools** get
+a schema builder rather than hand-escaped JSON, and a full loop: advertise,
+receive the `tool_use` block, send the assistant turn back verbatim, put
+the `tool_result` in a user-role message, ask again. **Nothing raises**:
+`an_resp_ok` / `oa_resp_ok` gate, `an_err_msg` / `oa_err_msg` render
+whichever layer failed first into one string, and
+`an_status_class(status)` turns the reference's exception taxonomy into
+data a caller can switch on.
+
+Link with `-l winhttp` (the one Windows transport that brings TLS without a
+TLS stack); `an_client_at` / `oa_client_at` point either SDK at a gateway,
+a proxy or a loopback mock.
 
 ```powershell
-cargo run -- run examples\openai_chat.ax -l winhttp   # live demo (needs a key)
-cargo test --test openai_sdk                          # offline: pure layers + a mock OpenAI server written in Aoxn
+cargo run -- run examples\openai_chat.ax -l winhttp      # live demo (needs a key)
+cargo run -- run examples\anthropic_chat.ax -l winhttp   # message, stream, tool loop, token count
+cargo test --test openai_sdk                             # offline: pure layers + a mock server written in Aoxn
+cargo test --test anthropic_sdk
 ```
 
 Reference: [`docs/openai-sdk.md`](docs/openai-sdk.md) ·
-example: `examples/openai_chat.ax` · tests: `tests/openai_sdk.rs`.
+[`docs/anthropic-sdk.md`](docs/anthropic-sdk.md) · examples:
+`examples/openai_chat.ax`, `examples/anthropic_chat.ax` · tests:
+`tests/openai_sdk.rs`, `tests/anthropic_sdk.rs`.
 
 ## The IDE
 
@@ -405,7 +439,10 @@ program. It also compiles the real stdlib and the full `examples/` suite. See
 | `src/ts/` | the TypeScript front end (TS-M1 W1 complete: S2b type layer + S3 modules) |
 | `stdlib/stdlib.ax` | the standard library, written in Aoxn itself |
 | `stdlib/ui.ax`, `stdlib/ui_draw.ax`, `stdlib/ui_win.ax` | the UI toolkit v3: portable core + platform-neutral widget layer (20+ widgets) + the Win32/GDI backend |
-| `stdlib/openai/` | the OpenAI SDK (v0.40.1): JSON DOM, WinHTTP transport, SSE, client — `docs/openai-sdk.md` |
+| `stdlib/net/` | the shared API-client layer (v0.41.0, moved out of `stdlib/openai/`): codecs, JSON DOM + builder, WinHTTP transport, SSE — used by both SDKs |
+| `stdlib/openai/` | the OpenAI SDK (v0.40.1): headers, client, resources, accessors, `OaStream` — `docs/openai-sdk.md` |
+| `stdlib/anthropic/` | the Anthropic SDK (v0.41.0): content blocks, tools/schemas, client, `AnStream` + `AnAcc` — `docs/anthropic-sdk.md` |
+| `docs/openai-sdk.md`, `docs/anthropic-sdk.md` | the two SDK references |
 | `examples/*.ax` | demo programs (hello, fib, primes, stdlib_demo, ui_demo, ui_gallery, …) |
 | `dist/package.ps1`, `src/setup/` | the single-file installer: the packager and the installer stub it fills |
 | `selfhost/` | the compiler rewritten in Aoxn (fixed point reached) |
@@ -421,12 +458,12 @@ program. It also compiles the real stdlib and the full `examples/` suite. See
 
 ## Testing & CI
 
-`cargo test` runs the end-to-end suite — 244 tests in the compiler workspace
+`cargo test` runs the end-to-end suite — 246 tests in the compiler workspace
 (pipeline 126, compiler unit tests 17, TypeScript front end 34, UI 9, install
 layout 6, CSS assets 21, CSS assets v0.36 18, symbol export 8, OpenAI SDK 2,
-installer 3)
+Anthropic SDK 2, installer 3)
 plus the `aoxn-pkg`
-crate's 94 via `bash run_pkg_tests.sh`, 338 in
+crate's 94 via `bash run_pkg_tests.sh`, 340 in
 
 total — where every
 pipeline test compiles
@@ -434,6 +471,10 @@ pipeline test compiles
 self-hosting fixed point: the stage-1 and stage-2 compilers must emit
 byte-identical C and object files for the same program (the object comparison
 masks the COFF TimeDateStamp that clang stamps into every Windows object).
+The two SDK suites run the REAL WinHTTP path against a mock API server
+written in Aoxn on a loopback port, so message creation, SSE streaming,
+tool-call reassembly, pagination, `Retry-After` and the error bodies are all
+covered with no network and no credentials.
 The IDE carries its own suites next to these: 36 Rust tests for the command
 layer (`pnpm test:rust` in `ide/`) and 62 node:test cases for the frontend
 (`pnpm test`), which do not run in a plain `cargo test` because
@@ -559,13 +600,30 @@ Full reference, including limits: [`docs/css-assets.md`](docs/css-assets.md).
 
 ## Status
 
-**v0.40.1** · **Windows only** · 338 tests green
+**v0.41.0** · **Windows only** · 340 tests green
 (pipeline 126 + lib 17 + assets 21 + assets_v36 18 + symbols 8 + TS 34 + UI 9 +
-OpenAI SDK 2 + install 6 + setup 3 + aoxn-pkg 94; the IDE adds 36 Rust + 62
-frontend tests of its own) ·
-**the OpenAI SDK lands in the stdlib** (v0.40.1) — `stdlib/openai/` in five
-plain-Aoxn modules (codec / JSON DOM / WinHTTP transport / SSE / client)
-gives the language a real API client: chat completions, responses,
+OpenAI SDK 2 + Anthropic SDK 2 + install 6 + setup 3 + aoxn-pkg 94; the IDE
+adds 36 Rust + 62 frontend tests of its own) ·
+**the Anthropic SDK lands in the stdlib, and the transport becomes shared**
+(v0.41.0) — `stdlib/anthropic/` (blocks / tools / client, ~1.7k lines of
+plain Aoxn) covers the Messages API including **tool use** end to end:
+content blocks (text, image, document, thinking, tool_use, tool_result, the
+server-tool pair), a JSON-Schema builder instead of hand-escaped schemas,
+token counting, models, files (with a multipart upload), message batches and
+the named SSE stream — whose `AnAcc` reassembles a message, including a tool
+call whose arguments arrive only as JSON text fragments. The four modules
+that shipped inside `stdlib/openai/` moved to `stdlib/net/` (prefix `oa_` →
+`net_`) so both SDKs ride ONE transport; the OpenAI SDK's public surface is
+unchanged and its suite still passes. The JSON DOM gained a builder
+(`jb_*` + `j_parse_into`) so nested request bodies are assembled, not
+hand-escaped. Four latent bugs fell out along the way: `Retry-After` was
+parsed and then ignored by the OpenAI SDK, `net_url_split` silently
+discarded query strings (so pagination could not work), the JSON accessors
+read 40 bytes before the slab when handed `-1`, and a fragment spliced into
+a built DOM kept using the pre-`realloc` slab pointer (heap corruption). No
+language change was needed for any of it ·
+**the OpenAI SDK lands in the stdlib** (v0.40.1) — `stdlib/openai/` in plain
+Aoxn gives the language a real API client: chat completions, responses,
 embeddings, models and moderations, blocking or streamed token-by-token,
 with the reference Python SDK's defaults and env variable names; tested
 offline end-to-end against a mock OpenAI server written in Aoxn itself ·
@@ -806,11 +864,15 @@ cargo run -- run examples\ui_demo.ax -l user32 -l gdi32      # 入门示例
 细节见 [`docs/ui.md`](docs/ui.md)；画廊 `examples/ui_gallery.ax`；测试
 `tests/ui.rs`。
 
-### OpenAI SDK（v0.40.1）
+### API SDK（v0.41.0）
 
-`stdlib/openai/` 用五个纯 Aoxn 模块给语言带来了真正的 API 客户端：带 DOM 的
-JSON、WinHTTP 上的 HTTPS、SSE 流式，以及 OpenAI 核心资源——默认值与参考
-Python SDK 一致（base URL、环境变量名、超时、重试预算都相同）：
+标准库里有两套厂商 SDK，共用**同一层传输**。`stdlib/net/` 与厂商无关——
+base64/百分号编码/UTF-16 编解码、带构建器的 JSON DOM、WinHTTP 上的 HTTPS、
+SSE——各 SDK 在其上追加自己的文件。两者的默认值、环境变量名与重试策略都取自
+参考 Python 客户端。
+
+`stdlib/openai/`（v0.40.1）覆盖 chat completions、responses、embeddings、
+models 与 moderations，阻塞与流式皆可：
 
 ```Aoxn
 import * from "stdlib/openai/client"
@@ -829,21 +891,51 @@ def main() -> int:
     return 0
 ```
 
-流式是同一形态的拉取循环：`oa_chat_stream` 打开请求，`oa_stream_next` 每次
-吐出一个 SSE `data` 载荷（`[DONE]` 哨兵与连接关闭都会结束它），
-`oa_stream_text` 抽取 `choices[0].delta.content`，`oa_stream_close` 释放
-句柄。资源：`chat.completions`、`responses`、`embeddings`、`models`、
-`moderations`——阻塞与流式；类型化辅助没覆盖到的用 `oa_request` + JSON DOM
-兜底。错误永不 raise：`oa_resp_ok` 把关，`oa_err_msg` 把最先失败的那一层
-渲染成一个字符串。链接时加 `-l winhttp`（唯一自带 TLS 的传输）。
+`stdlib/anthropic/`（v0.41.0）覆盖 Messages API——那里的载荷是**带类型的内容块
+数组**，不是字符串列表——外加 token 计数、models、files 与消息批处理，并且
+**工具调用**是完整闭环的：
+
+```Aoxn
+import * from "stdlib/anthropic/client"
+
+def main() -> int:
+    c = an_client_env()                 # ANTHROPIC_API_KEY / ANTHROPIC_BASE_URL
+    m = an_msgs_new()
+    m = an_msgs_push_text(m, "user", "Say hello in one word")
+    r = an_messages_create(c, "claude-sonnet-4-5", m, 256, an_opts_new())
+    if not an_resp_ok(r):
+        print(an_err_msg(r))
+        return 1
+    print(an_msg_text(r))               # -> Hello!
+    print(an_usage_line(r))             # -> tokens 12 in / 25 out
+    return 0
+```
+
+三件事是两套 SDK 共有的。**流式**都是拉取循环（`*_stream` /
+`*_stream_next` / `*_stream_close`）跑在 SSE 过滤器上；Anthropic 的帧是
+**带名字**的，而工具调用的参数只以 JSON 文本片段的形式抵达——于是 `AnAcc`
+把整条流重新组装成一条完整的 Message，同一组访问器照样读它
+（`an_acc_resp(st.acc)`）。**工具**用 schema 构建器而不是手写转义 JSON，
+并且是完整闭环：声明工具、收到 `tool_use` 块、把 assistant 轮次原样回传、
+把 `tool_result` 放进 user 角色的消息、再问一次。**永不 raise**：
+`an_resp_ok` / `oa_resp_ok` 把关，`an_err_msg` / `oa_err_msg` 把最先失败的
+那一层渲染成一个字符串，`an_status_class(status)` 则把参考实现的异常体系
+变成调用者可 switch 的数据。
+
+链接时加 `-l winhttp`（唯一自带 TLS 的传输）；`an_client_at` /
+`oa_client_at` 可把任一 SDK 指向网关、代理或环回 mock。
 
 ```powershell
-cargo run -- run examples\openai_chat.ax -l winhttp   # 在线示例（需 key）
-cargo test --test openai_sdk                          # 离线：纯层 + 用 Aoxn 写的 mock OpenAI 服务器
+cargo run -- run examples\openai_chat.ax -l winhttp      # 在线示例（需 key）
+cargo run -- run examples\anthropic_chat.ax -l winhttp   # 消息、流式、工具闭环、token 计数
+cargo test --test openai_sdk                             # 离线：纯层 + 用 Aoxn 写的 mock 服务器
+cargo test --test anthropic_sdk
 ```
 
 参考：[`docs/openai-sdk.md`](docs/openai-sdk.md) ·
-示例 `examples/openai_chat.ax` · 测试 `tests/openai_sdk.rs`。
+[`docs/anthropic-sdk.md`](docs/anthropic-sdk.md) · 示例
+`examples/openai_chat.ax`、`examples/anthropic_chat.ax` · 测试
+`tests/openai_sdk.rs`、`tests/anthropic_sdk.rs`。
 
 ## Aoxn IDE
 
@@ -921,20 +1013,24 @@ Web 服务同样能打：[`web/`](web/README.md) 套件用 Aoxn 写了 HTTP/1.1 
 （`ide/src-tauri` 是独立 Cargo 工作区）、`dist/` 打包
 脚本、`selfhost/` 自举、`web/` Web 基准、`tests/` 端到端测试（含 C 文本
 固定点与安装布局）、`docs/ide.md` IDE 参考、`docs/spec.md` 语言规范、
-`docs/openai-sdk.md` SDK 参考、
+`docs/openai-sdk.md`、`docs/anthropic-sdk.md` SDK 参考、
 `wiki/` 双语 wiki——**已冻结**。`docs/` 才是活文档。）
 
 ## 测试与 CI
 
-`cargo test` 跑端到端测试套件——编译器工作区 244 个（pipeline 126、编译器单元
+`cargo test` 跑端到端测试套件——编译器工作区 246 个（pipeline 126、编译器单元
 测试 17、TypeScript 前端 34、UI 9、安装布局 6、CSS 资产 21、CSS 资产 v0.36 18、
-符号导出 8、OpenAI SDK 2、安装器 3），另有 `aoxn-pkg` crate 的 94 个经
-`bash run_pkg_tests.sh` 运行，合计 338 个——每个 pipeline 测试都是 .ax → 可执行
+符号导出 8、OpenAI SDK 2、Anthropic SDK 2、安装器 3），另有 `aoxn-pkg` crate 的
+94 个经
+`bash run_pkg_tests.sh` 运行，合计 340 个——每个 pipeline 测试都是 .ax → 可执行
 
 文件 → 运行 → 断言 stdout 与退出码。
 其中含自举固定点：stage-1 与 stage-2 编译器对同一程序必须产出逐字节一致的
 C 文本与目标文件（目标文件比较会屏蔽 clang 写入每个 Windows 目标文件的
-COFF 时间戳）。IDE 自带两套独立测试：命令层的 36 个 Rust 测试（`ide/` 下
+COFF 时间戳）。两套 SDK 测试都会把**真实的 WinHTTP 路径**打到一台用 Aoxn 写成、
+跑在环回端口上的 mock API 服务器上，因此消息创建、SSE 流式、工具调用重组、
+分页、`Retry-After` 与各类错误响应都无需联网、无需凭据即被覆盖。IDE 自带两套
+独立测试：命令层的 36 个 Rust 测试（`ide/` 下
 `pnpm test:rust`）与前端的 62 个 node:test 用例（`pnpm test`）；由于
 `ide/src-tauri` 有意排除在根工作区之外，它们不会在 `cargo test` 里运行。
 Aoxn 只支持 Windows（v0.30.0），每次 push 在 windows-latest
@@ -1046,12 +1142,26 @@ print(asset_path(styles_fingerprint()))   # …\assets\82b4fb25….css
 
 ## 现状
 
-**v0.40.1** · **只支持 Windows** · 338 测试全绿
+**v0.41.0** · **只支持 Windows** · 340 测试全绿
 （pipeline 126 + lib 17 + assets 21 + assets_v36 18 + symbols 8 + TS 34 + UI 9 +
-OpenAI SDK 2 + 安装布局 6 + setup 3 + aoxn-pkg 94；IDE 另有 36 个 Rust + 62 个
-前端测试）·
-**OpenAI SDK 进驻标准库**（v0.40.1）——`stdlib/openai/` 五个纯 Aoxn 模块
-（codec / JSON DOM / WinHTTP 传输 / SSE / client）给语言带来真正的 API 客户端：
+OpenAI SDK 2 + Anthropic SDK 2 + 安装布局 6 + setup 3 + aoxn-pkg 94；IDE 另有
+36 个 Rust + 62 个前端测试）·
+**Anthropic SDK 进驻标准库，传输层同时被共享**（v0.41.0）——
+`stdlib/anthropic/`（blocks / tools / client，约 1.7k 行纯 Aoxn）覆盖 Messages
+API 且**工具调用**完整闭环：内容块（text、image、document、thinking、
+tool_use、tool_result 以及服务端工具那一对）、用 JSON Schema 构建器代替手写
+转义 schema、token 计数、models、files（含 multipart 上传）、消息批处理，以及
+带名字的 SSE 流——其中的 `AnAcc` 能把整条流重组回一条 message，包括参数只以
+JSON 文本片段抵达的工具调用。原本寄居在 `stdlib/openai/` 下的四个模块被移到
+`stdlib/net/`（前缀 `oa_` → `net_`），两套 SDK 共用同一层传输；OpenAI SDK 的
+对外接口一字未改，其测试仍然全绿。JSON DOM 新增构建器（`jb_*` +
+`j_parse_into`），嵌套请求体改为组装而非手写转义。过程中还掉出四个潜伏缺陷：
+OpenAI SDK 解析了 `Retry-After` 却从不使用；`net_url_split` 会悄悄丢掉查询串
+（分页因此根本无法工作）；JSON 访问器拿到 `-1` 时会读到 slab 之前 40 字节；
+拼进已构建 DOM 的片段仍沿用 realloc 之前的 slab 指针（堆破坏）。这一切都不需要
+动语言本身 ·
+**OpenAI SDK 进驻标准库**（v0.40.1）——`stdlib/openai/` 的纯 Aoxn 模块
+给语言带来真正的 API 客户端：
 chat completions、responses、embeddings、models、moderations，阻塞或逐 token
 流式，默认值与环境变量名与参考 Python SDK 一致；离线端到端测试由一个用 Aoxn
 写成的 mock OpenAI 服务器完成 ·

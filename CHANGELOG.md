@@ -5,6 +5,107 @@ minor bumps while pre-1.0: each minor version is a language milestone.
 
 ## [Unreleased]
 
+## [0.41.0] - 2026-10-05
+
+Theme: **the Anthropic SDK lands in the stdlib, and the transport becomes
+shared.** `stdlib/anthropic/` — three modules, ~1.7k lines of plain Aoxn —
+covers the Messages API including **tool use** end to end and its
+name-and-payload SSE stream. The four provider-neutral modules that shipped
+inside `stdlib/openai/` in v0.40.1 moved up to `stdlib/net/` so both SDKs
+ride one transport instead of two.
+
+No language change was needed: everything below is stdlib work.
+
+### Added
+
+- **`stdlib/anthropic/blocks.ax`** — content-block constructors for the
+  whole request-side union (text, image base64/url/file, document,
+  thinking, redacted_thinking, tool_use, tool_result, server_tool_use,
+  web_search_tool_result) plus `AnMsgs`, the message list. A block is a
+  **JSON text string**, not a struct: that is what lets the streaming
+  accumulator rebuild a Message and have the ordinary accessors read it.
+- **`stdlib/anthropic/tools.ax`** — tool definitions, a JSON-Schema builder
+  (`an_schema_str/int/num/bool/arr/prop/raw` + `an_schema_required`), the
+  four `tool_choice` forms, and the thinking configs.
+- **`stdlib/anthropic/client.ax`** — `AnClient` (key / auth token / base
+  URL / betas / timeouts / retries, the reference's defaults and env
+  variable names), `AnOpts` as the stand-in for fifteen keyword arguments,
+  the request/retry core, resources (messages, count_tokens, models, files
+  incl. a multipart upload, message batches incl. the absolute
+  `results_url`), default-safe response accessors, `an_status_class` /
+  `an_err_type` as the reference's exception taxonomy turned into data,
+  `AnStream`, and `AnAcc` — the accumulator that reassembles a streamed
+  message, **including a tool call whose arguments arrive only as JSON text
+  fragments**.
+- **`tests/anthropic_sdk.rs`** — a pure driver (headers, blocks, message
+  list, schema builder, every body, pagination, multipart, raw-header
+  parsing, the JSON builder, the status table, accessors, the named-event
+  SSE filter, the accumulator over a canned transcript) and an END-TO-END
+  driver against a mock Anthropic server written in Aoxn: message creation,
+  a full SSE stream reassembled into a message with a tool call, token
+  counting, a model list with a query string, a 429 honored through
+  `Retry-After`, and 401/404 bodies.
+- **`examples/anthropic_chat.ax`** — a message, a stream, a tool loop, a
+  token count and a model list; without a key it prints what is missing and
+  exits 0.
+- **`docs/anthropic-sdk.md`** — the SDK reference.
+- **A JSON builder in `stdlib/net/json.ax`** (`jb_obj`, `jb_arr`, `jb_set`,
+  `jb_push`, the typed `jb_set_*` leaves, `jb_set_raw` / `jb_push_raw`).
+  Tool schemas and tool inputs are nested structures, and hand-escaping
+  them into string literals is how a missing backslash becomes a 400.
+  `j_parse_into(dom, src)` parses a fragment into an existing slab, so a
+  pasted schema nests with correct child indices and no remapping.
+
+### Changed
+
+- **`stdlib/openai/{codec,json,http,sse}.ax` → `stdlib/net/`**, prefix
+  `oa_` → `net_`, types `Oa*` → `Net*`. They were provider-neutral from the
+  start; v0.40.1 kept them in the OpenAI directory only because there was
+  one SDK. The OpenAI SDK's **public surface is unchanged** — only its
+  internal names moved — and `tests/openai_sdk.rs` passes without edits
+  beyond the renames.
+- **`net_http_request` / `net_http_stream_open` gained a User-Agent
+  parameter** so each SDK identifies itself (`aoxn-openai/…`,
+  `aoxn-anthropic/…`), the way the Python clients do.
+- **SSE frames now carry their `event:` name** (`NetSse.event`). OpenAI
+  sends data-only frames and is unaffected; Anthropic names every frame.
+  A frame with a name but no data line is dropped rather than dispatched.
+- **`net_url_split` no longer discards the query string.** The object name
+  `WinHttpOpenRequest` takes includes it, which is the normal WinHTTP
+  spelling. Harmless while the only caller was the OpenAI SDK (none of its
+  paths carry one); silently wrong the moment a paginated endpoint needed
+  it — `an_batches_list(c, 20, "")` would have fetched the whole list.
+- **Response headers are read with `WINHTTP_QUERY_RAW_HEADERS` (22), not
+  `WINHTTP_QUERY_CUSTOM` (81).** The by-name query returns
+  `ERROR_INVALID_PARAMETER` (87) on this platform for every name tried, so
+  the transport takes the whole header block once and `net_header_value` /
+  `net_header_int` scan it — which also makes the parsing pure and
+  offline-testable. `request-id` and `Retry-After` now actually arrive.
+- **JSON DOM accessors tolerate a negative index.** `-1` is the module's
+  "absent" answer everywhere, and `j_dumps(dom, j_obj_get(dom, i, "input"))`
+  is the SDK idiom — unguarded, that read 40 bytes *before* the slab.
+- `net_retry_delay` also retries **409**, which the Anthropic client does.
+- `net_http_request_bytes` / `net_http_stream_open_bytes` send a body by
+  pointer and length. `len()` on an Aoxn string is `strlen`, so a body with
+  a NUL byte — every multipart upload of a binary file — cannot travel as
+  a string.
+
+### Fixed
+
+- **`Retry-After` is honored by the OpenAI SDK.** v0.40.1 read the header
+  into the response record and then always passed 0 to the retry policy.
+- A JSON fragment spliced with `jb_set_raw` / `jb_push_raw` used a **stale
+  slab pointer**: parsing reallocs, and the old `dom.slab` was then used
+  for the next write (heap corruption). Both now continue from `p.dom`.
+
+### Deliberate limits (v0.41.0)
+
+- `temperature` / `top_p` / `top_k` are not sent — the vendored reference is
+  a fork whose `messages.create` body does not contain them.
+- The `client.beta.*` and organization-admin surfaces are not ported
+  (dozens of endpoints each); `an_beta()` sends the header and
+  `an_request` reaches the endpoints.
+
 ## [0.40.1] - 2026-10-05
 
 Theme: **the OpenAI SDK lands in the stdlib.** `stdlib/openai/` — five
