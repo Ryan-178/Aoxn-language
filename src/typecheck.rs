@@ -219,7 +219,7 @@ impl<'a> Tc<'a> {
         // so a map preserves the old reversed-linear-scan semantics
         let mut scopes: Scopes =
             f.params.iter().map(|p| (p.name.clone(), p.ty.clone())).collect();
-        let returns_all = self.check_block(&f.body, f, &mut scopes, 0)?;
+        let returns_all = self.check_block(&f.body, f, &mut scopes, 0, 0)?;
         // strict rule: non-void functions must return a value on every path
         if f.ret != Type::Void && !returns_all {
             return Err(Diag::at("type", f.pos.file, f.pos.line, f.pos.col, format!(
@@ -236,6 +236,7 @@ impl<'a> Tc<'a> {
         f: &FnDecl,
         scopes: &mut Scopes,
         loop_depth: usize,
+        try_depth: usize,
     ) -> Result<bool, Diag> {
         let mut guarantees_return = false;
         for stmt in &block.stmts {
@@ -243,8 +244,8 @@ impl<'a> Tc<'a> {
                 let pos = stmt_pos(stmt);
                 return Err(self.err(pos.line, pos.col, "unreachable statement after 'return'"));
             }
-            self.check_stmt(stmt, f, scopes, loop_depth)?;
-            guarantees_return = stmt_guarantees_return(stmt);
+            self.check_stmt(stmt, f, scopes, loop_depth, try_depth)?;
+            guarantees_return = stmt_guarantees_return(stmt, try_depth);
         }
         Ok(guarantees_return)
     }
@@ -255,6 +256,7 @@ impl<'a> Tc<'a> {
         f: &FnDecl,
         scopes: &mut Scopes,
         loop_depth: usize,
+        try_depth: usize,
     ) -> Result<(), Diag> {
         match stmt {
             Stmt::Let { name, ty, expr, pos } => {
@@ -347,7 +349,7 @@ impl<'a> Tc<'a> {
                         self.narrowed.entry(var.clone()).or_insert_with(|| scopes.get(&var).cloned().unwrap_or(Type::Void));
                         let saved = scopes.get(&var).cloned();
                         self.narrow_scope(scopes, &var, &then_ty);
-                        let r = self.check_block(then_block, f, scopes, loop_depth);
+                        let r = self.check_block(then_block, f, scopes, loop_depth, try_depth);
                         self.restore_scope(scopes, &var, saved.clone());
                         r?;
                         // a then-branch that always exits (return/raise) makes
@@ -356,7 +358,7 @@ impl<'a> Tc<'a> {
                         match else_block {
                             Some(eb) => {
                                 self.narrow_scope(scopes, &var, &else_ty);
-                                let r = self.check_block(eb, f, scopes, loop_depth);
+                                let r = self.check_block(eb, f, scopes, loop_depth, try_depth);
                                 self.restore_scope(scopes, &var, saved);
                                 r?;
                                 if then_exits && !block_returns_all(eb) {
@@ -373,9 +375,9 @@ impl<'a> Tc<'a> {
                         }
                     }
                     None => {
-                        self.check_block(then_block, f, scopes, loop_depth)?;
+                        self.check_block(then_block, f, scopes, loop_depth, try_depth)?;
                         if let Some(eb) = else_block {
-                            self.check_block(eb, f, scopes, loop_depth)?;
+                            self.check_block(eb, f, scopes, loop_depth, try_depth)?;
                         }
                     }
                 }
@@ -386,7 +388,7 @@ impl<'a> Tc<'a> {
                 if t != Type::Bool {
                     return Err(self.err(pos.line, pos.col, format!("'while' condition must be bool, found {t}")));
                 }
-                self.check_block(body, f, scopes, loop_depth + 1)?;
+                self.check_block(body, f, scopes, loop_depth + 1, try_depth)?;
                 Ok(())
             }
             Stmt::For { var, iter, body, pos } => {
@@ -423,7 +425,7 @@ impl<'a> Tc<'a> {
                         scopes.insert(var.clone(), var_ty);
                     }
                 }
-                self.check_block(body, f, scopes, loop_depth + 1)?;
+                self.check_block(body, f, scopes, loop_depth + 1, try_depth)?;
                 Ok(())
             }
             Stmt::Break { pos } => {
@@ -451,6 +453,22 @@ impl<'a> Tc<'a> {
                         Ok(())
                     }
                 }
+            }
+            Stmt::Raise { expr, pos } => {
+                let t = self.check_expr(expr, scopes)?;
+                if t != Type::Str {
+                    return Err(self.err(pos.line, pos.col, format!("raise requires a string message, found {t}")));
+                }
+                Ok(())
+            }
+            Stmt::Try { body, err_name, handler, pos: _ } => {
+                self.check_block(body, f, scopes, loop_depth, try_depth + 1)?;
+                // the handler's binding (when spelled) is the raised message
+                if let Some(name) = err_name {
+                    scopes.insert(name.clone(), Type::Str);
+                }
+                self.check_block(handler, f, scopes, loop_depth, try_depth)?;
+                Ok(())
             }
             Stmt::Pass => Ok(()),
             Stmt::ExprStmt { expr } => {
@@ -1430,19 +1448,24 @@ fn resolve_ty(ty: &Type, structs: &StructTable) -> Result<(), String> {
 }
 
 /// True if control flow cannot continue past this statement.
-fn stmt_guarantees_return(stmt: &Stmt) -> bool {
+fn stmt_guarantees_return(stmt: &Stmt, try_depth: usize) -> bool {
     match stmt {
         Stmt::Return { .. } => true,
+        // a raise leaves the block, but inside a `try` BODY it lands in that
+        // try's own handler, so control continues (v0.40.0)
+        Stmt::Raise { .. } => try_depth == 0,
         Stmt::If { then_block, else_block, .. } => {
             block_returns_all(then_block)
                 && else_block.as_ref().map(|e| block_returns_all(e)).unwrap_or(false)
         }
+        // the try body may raise into the handler, so the HANDLER decides
+        Stmt::Try { handler, .. } => block_returns_all(handler),
         _ => false,
     }
 }
 
 fn block_returns_all(block: &Block) -> bool {
-    block.stmts.iter().any(stmt_guarantees_return)
+    block.stmts.iter().any(|s| stmt_guarantees_return(s, 0))
 }
 
 fn stmt_pos(s: &Stmt) -> Pos {
@@ -1454,6 +1477,8 @@ fn stmt_pos(s: &Stmt) -> Pos {
         | Stmt::For { pos, .. }
         | Stmt::Break { pos }
         | Stmt::Continue { pos }
+        | Stmt::Raise { pos, .. }
+        | Stmt::Try { pos, .. }
         | Stmt::Return { pos, .. } => *pos,
         Stmt::Pass => Pos { line: 0, col: 0, file: u32::MAX },
         Stmt::ExprStmt { expr } => expr.pos(),

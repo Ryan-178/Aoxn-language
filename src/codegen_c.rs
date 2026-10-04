@@ -63,6 +63,120 @@ struct FnSig {
     params: Vec<Type>,
 }
 
+/// which functions can raise, directly or through a callee (v0.40.0)? The
+/// payload is a string, so the runtime slot is two statics and the unwind is
+/// a `goto` — but every frame between the raise and the handler must check
+/// the slot, which needs this set. Keyed by the SOURCE name, so generic
+/// instances (whose calls spell the generic's name) resolve naturally.
+fn compute_fn_raises(program: &Program) -> HashSet<String> {
+    let mut direct: HashSet<String> = HashSet::new();
+    let mut calls: HashMap<String, Vec<String>> = HashMap::new();
+    for f in &program.funcs {
+        let (raises, cs) = scan_fn_body(f);
+        if raises {
+            direct.insert(f.name.clone());
+        }
+        calls.insert(f.name.clone(), cs);
+    }
+    // fixpoint: a function raises if it raises directly or calls a raiser
+    let mut raises = direct;
+    loop {
+        let mut grew = false;
+        for (name, cs) in &calls {
+            if raises.contains(name) {
+                continue;
+            }
+            if cs.iter().any(|c| raises.contains(c)) {
+                raises.insert(name.clone());
+                grew = true;
+            }
+        }
+        if !grew {
+            break;
+        }
+    }
+    raises
+}
+
+/// one function body: does it raise (outside a caught `try`), and which
+/// names does it call? A raise inside a try body is caught by that try's
+/// handler, so it does not make the function a raiser — the handler's own
+/// raises do (its body is walked normally).
+fn scan_fn_body(f: &FnDecl) -> (bool, Vec<String>) {
+    fn walk_block(b: &Block, raised: &mut bool, calls: &mut Vec<String>) {
+        for s in &b.stmts {
+            walk_stmt(s, raised, calls);
+        }
+    }
+    fn walk_stmt(s: &Stmt, raised: &mut bool, calls: &mut Vec<String>) {
+        match s {
+            Stmt::Let { expr, .. } | Stmt::Assign { expr, .. } => walk_expr(expr, raised, calls),
+            Stmt::ExprStmt { expr } => walk_expr(expr, raised, calls),
+            Stmt::Return { expr: Some(e), .. } => walk_expr(e, raised, calls),
+            Stmt::Raise { .. } => *raised = true,
+            Stmt::If { cond, then_block, else_block, .. } => {
+                walk_expr(cond, raised, calls);
+                walk_block(then_block, raised, calls);
+                if let Some(eb) = else_block {
+                    walk_block(eb, raised, calls);
+                }
+            }
+            Stmt::While { cond, body, .. } => {
+                walk_expr(cond, raised, calls);
+                walk_block(body, raised, calls);
+            }
+            Stmt::For { iter, body, .. } => {
+                match iter {
+                    ForIter::Range(args) => {
+                        for a in args {
+                            walk_expr(a, raised, calls);
+                        }
+                    }
+                    ForIter::Array(e) => walk_expr(e, raised, calls),
+                }
+                walk_block(body, raised, calls);
+            }
+            Stmt::Try { body, handler, .. } => {
+                // the body's raises land in the handler; only the handler's
+                // own raises escape this function
+                walk_block(handler, raised, calls);
+            }
+            _ => {}
+        }
+    }
+    fn walk_expr(e: &Expr, raised: &mut bool, calls: &mut Vec<String>) {
+        match e {
+            Expr::Call { name, args, .. } => {
+                calls.push(name.clone());
+                for a in args {
+                    walk_expr(&a.value, raised, calls);
+                }
+            }
+            Expr::Binary { lhs, rhs, .. } => {
+                walk_expr(lhs, raised, calls);
+                walk_expr(rhs, raised, calls);
+            }
+            Expr::Unary { expr, .. } => walk_expr(expr, raised, calls),
+            Expr::Cast { expr, .. } => walk_expr(expr, raised, calls),
+            Expr::Index { arr, idx, .. } => {
+                walk_expr(arr, raised, calls);
+                walk_expr(idx, raised, calls);
+            }
+            Expr::Field { obj, .. } => walk_expr(obj, raised, calls),
+            Expr::ArrayLit { elems, .. } => {
+                for e in elems {
+                    walk_expr(e, raised, calls);
+                }
+            }
+            _ => {}
+        }
+    }
+    let mut raised = false;
+    let mut calls = Vec::new();
+    walk_block(&f.body, &mut raised, &mut calls);
+    (raised, calls)
+}
+
 /// Compile the typechecked program to a native object file through C text +
 /// `clang -c`. The generated C text is written next to the object (kept for
 /// debugging when the compile fails) and removed on success.
@@ -149,6 +263,16 @@ struct GenC<'a> {
     /// variables narrowed by `is None` (v0.40.0): name -> the type the CURRENT
     /// branch sees. Latched while a branch is emitted, popped after it.
     narrowed: HashMap<String, Type>,
+    /// functions that can raise, directly or through a callee (v0.40.0).
+    /// Drives the exit label, the propagation checks after call-bearing
+    /// statements, and the uncaught-error report in `main`
+    fn_raises: HashSet<String>,
+    /// labels of the enclosing `try` handlers, innermost last
+    catch_labels: Vec<String>,
+    /// unwind exit of the function being emitted (`raise` outside any try)
+    exit_label: Option<String>,
+    /// whether any raise/try exists (emits the error-slot statics + main check)
+    used_err: bool,
     /// return type of the function being emitted (for nullable coercion)
     cur_ret: Type,
     // per-function emission state
@@ -175,6 +299,10 @@ impl<'a> GenC<'a> {
             extern_decls: BTreeMap::new(),
             rep_helpers: BTreeMap::new(),
             narrowed: HashMap::default(),
+            fn_raises: compute_fn_raises(program),
+            catch_labels: Vec::new(),
+            exit_label: None,
+            used_err: false,
             cur_ret: Type::Void,
             reserved: HashSet::new(),
             out: String::new(),
@@ -423,6 +551,12 @@ impl<'a> GenC<'a> {
         s.push_str(&self.type_defs_text()?);
         s.push('\n');
 
+        // the exception slot (v0.40.0) must exist before every function body
+        // that reads or writes it: two statics, no headers, no unwinder
+        if self.used_err {
+            s.push_str("static long long ax_err_pending = 0;\nstatic char* ax_err_msg = 0;\n\n");
+        }
+
         if self.used_concat {
             s.push_str(
                 "static char* ax_concat(const char* a, const char* b) {\n    \
@@ -479,7 +613,14 @@ impl<'a> GenC<'a> {
             s.push('\n');
         }
 
-        let main_call = if main_ret == Type::Int {
+        let main_call = if self.used_err {
+            // uncaught exceptions surface here: one report, exit 1 (v0.40.0)
+            if main_ret == Type::Int {
+                "    long long r = aoxn_main();\n    if (ax_err_pending) {\n        __builtin_printf(\"Uncaught exception: %s\\n\", ax_err_msg);\n        return 1;\n    }\n    return (int)r;\n".to_string()
+            } else {
+                "    aoxn_main();\n    if (ax_err_pending) {\n        __builtin_printf(\"Uncaught exception: %s\\n\", ax_err_msg);\n        return 1;\n    }\n    return 0;\n".to_string()
+            }
+        } else if main_ret == Type::Int {
             "    return (int)aoxn_main();\n".to_string()
         } else {
             "    aoxn_main();\n    return 0;\n".to_string()
@@ -614,7 +755,22 @@ impl<'a> GenC<'a> {
             self.locals.insert(p.name.clone(), p.ty.clone());
         }
         self.cur_ret = f.ret.clone();
+        self.exit_label = None;
+        if self.fn_raises.contains(&f.name) {
+            // unwind exit: `raise` outside any try lands here and returns a
+            // zero value, which the caller never reads (its check jumps first)
+            let n = self.tmpn;
+            self.tmpn += 1;
+            self.exit_label = Some(format!("ax_exit_{n}"));
+        }
         self.emit_block(&f.body, 1)?;
+        let mut unwind = String::new();
+        if let Some(label) = self.exit_label.clone() {
+            let zero = self.zero_value(&sig.1);
+            let ret_text = if sig.1 == Type::Void { "return;".to_string() } else { format!("return {zero};") };
+            unwind = format!("    {label}:;\n    {ret_text}\n");
+        }
+        self.exit_label = None;
         let decls = std::mem::take(&mut self.decls);
         let body = std::mem::take(&mut self.out);
 
@@ -629,6 +785,7 @@ impl<'a> GenC<'a> {
             text.push_str(&format!("    {d}\n"));
         }
         text.push_str(&body);
+        text.push_str(&unwind);
         text.push_str("}\n");
         Ok((proto, text))
     }
@@ -761,6 +918,53 @@ fn block_returns_all(block: &Block) -> bool {
     }
 
     fn emit_stmt(&mut self, stmt: &Stmt, indent: usize) -> Result<(), String> {
+        self.emit_stmt_inner(stmt, indent)?;
+        // propagation check (v0.40.0): a statement that called a raiser
+        // leaves the slot set; every frame hops to its nearest handler or
+        // its unwind exit. Raise/Try manage their own control flow and a
+        // Return hands the flag to the caller's check.
+        let skip = matches!(stmt, Stmt::Try { .. } | Stmt::Raise { .. } | Stmt::Return { .. });
+        if !skip && self.stmt_may_raise(stmt) {
+            if let Some(target) = self.catch_labels.last().cloned().or_else(|| self.exit_label.clone()) {
+                self.line(indent, &format!("if (ax_err_pending) {{ goto {target}; }}"));
+            }
+        }
+        Ok(())
+    }
+
+    /// does this statement (or any expression in it) reach a call that may
+    /// raise? Direct calls consult `fn_raises`; a call through a function
+    /// pointer may target anything, so it always counts.
+    fn stmt_may_raise(&self, s: &Stmt) -> bool {
+        match s {
+            Stmt::Let { expr, .. } | Stmt::Assign { expr, .. } | Stmt::ExprStmt { expr } => self.expr_may_raise(expr),
+            Stmt::If { cond, .. } | Stmt::While { cond, .. } => self.expr_may_raise(cond),
+            Stmt::For { iter, .. } => match iter {
+                ForIter::Range(args) => args.iter().any(|a| self.expr_may_raise(a)),
+                ForIter::Array(e) => self.expr_may_raise(e),
+            },
+            _ => false,
+        }
+    }
+
+    fn expr_may_raise(&self, e: &Expr) -> bool {
+        match e {
+            Expr::Call { name, args, .. } => {
+                if self.fn_raises.contains(name) || matches!(self.locals.get(name), Some(Type::FnPtr { .. })) {
+                    return true;
+                }
+                args.iter().any(|a| self.expr_may_raise(&a.value))
+            }
+            Expr::Binary { lhs, rhs, .. } => self.expr_may_raise(lhs) || self.expr_may_raise(rhs),
+            Expr::Unary { expr, .. } | Expr::Cast { expr, .. } => self.expr_may_raise(expr),
+            Expr::Index { arr, idx, .. } => self.expr_may_raise(arr) || self.expr_may_raise(idx),
+            Expr::Field { obj, .. } => self.expr_may_raise(obj),
+            Expr::ArrayLit { elems, .. } => elems.iter().any(|e| self.expr_may_raise(e)),
+            _ => false,
+        }
+    }
+
+    fn emit_stmt_inner(&mut self, stmt: &Stmt, indent: usize) -> Result<(), String> {
         match stmt {
             Stmt::Let { name, ty, expr, .. } => {
                 let hint = self.hint(expr)?;
@@ -880,6 +1084,48 @@ fn block_returns_all(block: &Block) -> bool {
                     self.line(indent, &format!("return {r};"));
                 }
             },
+            Stmt::Raise { expr, .. } => {
+                self.used_err = true;
+                // land in the nearest handler, else unwind out of the fn
+                let target = self
+                    .catch_labels
+                    .last()
+                    .cloned()
+                    .or_else(|| self.exit_label.clone())
+                    .ok_or_else(|| "internal error: raise without an unwind target".to_string())?;
+                let (msg, t) = self.emit_expr(expr)?;
+                debug_assert_eq!(t, Type::Str, "raise payload type drift");
+                self.line(indent, &format!("ax_err_msg = {msg};"));
+                self.line(indent, "ax_err_pending = 1;");
+                self.line(indent, &format!("goto {target};"));
+            }
+            Stmt::Try { body, err_name, handler, .. } => {
+                self.used_err = true;
+                let n = self.tmpn;
+                self.tmpn += 1;
+                let catch = format!("ax_catch_{n}");
+                let end = format!("ax_end_{n}");
+                self.line(indent, "ax_err_pending = 0;");
+                self.catch_labels.push(catch.clone());
+                self.emit_block(body, indent)?;
+                self.catch_labels.pop();
+                // belt and braces: every raising statement inside already
+                // jumped; this catches anything the analysis under-counted
+                self.line(indent, &format!("if (ax_err_pending) {{ goto {catch}; }}"));
+                self.line(indent, &format!("goto {end};"));
+                self.line(indent, &format!("{catch}:;"));
+                match err_name {
+                    Some(name) => {
+                        self.declare(name, &Type::Str);
+                        self.line(indent, &format!("{} = ax_err_msg; ax_err_pending = 0;", self.c_ident(name)));
+                    }
+                    None => {
+                        self.line(indent, "ax_err_msg = 0; ax_err_pending = 0;");
+                    }
+                }
+                self.emit_block(handler, indent)?;
+                self.line(indent, &format!("{end}:;"));
+            }
             Stmt::Pass => {}
             Stmt::ExprStmt { expr } => {
                 let (e, _) = self.emit_expr(expr)?;

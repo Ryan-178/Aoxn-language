@@ -239,6 +239,8 @@ fn stmt_end(s: &crate::ast::Stmt) -> usize {
         | Stmt::For { pos, .. }
         | Stmt::Break { pos }
         | Stmt::Continue { pos }
+        | Stmt::Raise { pos, .. }
+        | Stmt::Try { pos, .. }
         | Stmt::Return { pos, .. } => pos.line,
         // These carry no position of their own; they have no line to report
         // and the caller falls back to the previous statement's.

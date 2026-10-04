@@ -1,0 +1,43 @@
+# raise / try / except (v0.40.0). The payload is a string; a raise unwinds
+# to the nearest enclosing try handler, or out of the function — every frame
+# in between checks the error slot after a call that may raise.
+
+def risky(n: int) -> int:
+    if n < 0:
+        raise "negative input: " + str(n)
+    return n * 2
+
+def wrapper(n: int) -> int:
+    # no try here: the raise propagates through this frame to the caller
+    return risky(n)
+
+def main() -> int:
+    # caught locally
+    try:
+        print(risky(5))
+        raise "boom"
+        print("unreachable")
+    except as e:
+        print("caught: " + e)
+    # caught across two frames
+    try:
+        print(wrapper(-3))
+    except as e:
+        print("crossed frames: " + e)
+    # no raise: the handler never runs
+    try:
+        print(wrapper(4))
+    except:
+        print("never printed")
+    # re-raise from a handler, caught outside
+    try:
+        try:
+            raise "inner"
+        except as e:
+            print("inner saw: " + e)
+            raise "outer: " + e
+    except as e2:
+        print("outer saw: " + e2)
+    # normal path still works afterwards
+    print(risky(21))
+    return 0

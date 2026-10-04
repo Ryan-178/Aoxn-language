@@ -33,6 +33,10 @@ pub enum Tok {
     /// nothing in the tree spells an identifier this way, and leaving it as a
     /// context-sensitive `Ident` would make `x is none` ambiguous.
     None,
+    /// exceptions (v0.40.0)
+    Raise,
+    Try,
+    Except,
     TyInt,
     TyFloat,
     TyBool,
@@ -375,6 +379,11 @@ impl<'c> Lexer<'c> {
             "continue" => Tok::Continue,
             "return" => Tok::Return,
             "pass" => Tok::Pass,
+            // exceptions (v0.40.0): nothing in the tree spells these as
+            // identifiers, so they are real keywords
+            "raise" => Tok::Raise,
+            "try" => Tok::Try,
+            "except" => Tok::Except,
             "and" => Tok::AndAnd,
             "or" => Tok::OrOr,
             "not" => Tok::Bang,

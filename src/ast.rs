@@ -178,6 +178,20 @@ pub enum Stmt {
         expr: Option<Expr>,
         pos: Pos,
     },
+    /// `raise <string>` (v0.40.0): store the message in the error slot and
+    /// unwind to the nearest enclosing `try` handler, or out of the function
+    Raise {
+        expr: Expr,
+        pos: Pos,
+    },
+    /// `try: ... except as e: ...` (v0.40.0). One catch-all handler; the
+    /// binding (when spelled) is a `string` holding the raised message.
+    Try {
+        body: Block,
+        err_name: Option<String>,
+        handler: Block,
+        pos: Pos,
+    },
     Pass,
     ExprStmt {
         expr: Expr,

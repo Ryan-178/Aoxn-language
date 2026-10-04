@@ -1705,7 +1705,7 @@ fn fill_stmt(st: &mut Stmt, opts: &HashMap<String, Vec<(usize, Expr)>>, totals: 
         Stmt::Let { expr, .. } | Stmt::Assign { expr, .. } | Stmt::Return { expr: Some(expr), .. } => {
             fill_expr(expr, opts, totals)
         }
-        Stmt::Return { expr: None, .. } | Stmt::Break { .. } | Stmt::Continue { .. } => {}
+        Stmt::Return { expr: None, .. } | Stmt::Break { .. } | Stmt::Continue { .. } | Stmt::Raise { .. } | Stmt::Try { .. } => {}
         Stmt::ExprStmt { expr } => fill_expr(expr, opts, totals),
         Stmt::Pass => {}
         Stmt::If { cond, then_block, else_block, .. } => {

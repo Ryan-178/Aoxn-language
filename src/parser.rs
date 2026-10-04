@@ -441,6 +441,37 @@ impl Parser {
                 self.bump();
                 Ok(Stmt::Pass)
             }
+            Tok::Raise => {
+                self.bump();
+                let expr = self.expr()?;
+                Ok(Stmt::Raise { expr, pos })
+            }
+            Tok::Try => {
+                self.bump();
+                let body = self.block()?;
+                self.eat(&Tok::Except)?;
+                // `except:` (no binding) or `except as e:` — `as` stays
+                // identifier-led, matching the cast syntax
+                let err_name = if *self.peek() == Tok::Colon {
+                    None
+                } else {
+                    match self.bump() {
+                        Tok::Ident(n) if n == "as" => match self.bump() {
+                            Tok::Ident(e) => Some(e),
+                            _ => return Err(self.unexpected(&Tok::Ident("name".into()))),
+                        },
+                        _ => {
+                            return Err(self.perr(
+                                self.pos().line,
+                                self.pos().col,
+                                "expected ':' or 'as <name>' after 'except'",
+                            ))
+                        }
+                    }
+                };
+                let handler = self.block()?;
+                Ok(Stmt::Try { body, err_name, handler, pos })
+            }
             Tok::Ident(_) if *self.peek2() == Tok::Colon => {
                 // annotated binding: x: t = e
                 let name = match self.bump() {
