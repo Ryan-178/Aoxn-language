@@ -372,10 +372,40 @@ crates/aoxn-pkg       package manager crate (its own dependency set; see above)
   `Vec`, pushes onto it, and recurses **cannot return `int`** — it has no
   way to hand the handle back. `load_file` gets this right (`ls =
   load_file(ls, …)`); the old cycle detector had no such door.
-- **There are no exceptions, and that is deliberate.** Runtime error
-  propagation is a tagged struct returned by value, not a `raise` (see
-  `GuardrailVerdict{decision, info}` in the agents library). `Diag` stays a
-  *compile-time* channel. Do not add `try`/`except` to smooth over a port.
+- **`raise` / `try` / `except` exist (v0.40.0) — the v0.39.0 "no exceptions"
+  decision was reversed by user instruction (2026-10-04).** `raise <string>`
+  unwinds to the nearest `try` handler (or out of the function; uncaught =
+  one report, exit 1). The runtime is two statics (pending flag + message), a
+  `goto`, and a slot check after every statement that called a raiser — the
+  may-raise set is a fixpoint over call names, and calls through a function
+  pointer always count. A raise inside a try BODY is caught by that try; in
+  a handler it propagates. `raise` counts as an exit for all-paths-return
+  (except in a try body). The v0.39.0 `Err`-value channel STAYS for
+  inspected failures; `Diag` stays compile-time. **Known wart, pinned by
+  test**: a statement's check runs after the statement, so
+  `print(f(x))` with a raising `f` prints the zero return value before the
+  hop — fixing it means hoisting raising args out of the call, in
+  `codegen_c.rs` AND the selfhost mirror.
+- **`dict[V]` is a HEAP HANDLE (v0.40.0), not a value** — `struct
+  ax_dict_V*` over parallel key/value arrays, like the UI's `TableModel` and
+  the web `FileTable`. The first spelling passed the 4-word struct by value
+  and was unsound twice over (`len`/`cap` lived in the copy, so a callee's
+  growth/del was invisible; the stale `len` then walked off a reallocated
+  buffer — correct at -O0, segfault at -O1+, reproduced with clang on the
+  bare C). Copying the handle SHARES the dict; set/del through any copy is
+  visible to all. A missing key RAISES `dict key not found` (the reason any
+  program with a dict pulls in the error slot); `dict_has` guards reads.
+  `{}` needs an annotation (`d: dict[int] = {}`) — and that annotation path
+  is special-cased in the Let arms of BOTH the checker and codegen, because
+  `check_expr`/`hint` have no expected type to give an empty literal.
+- **v0.40.0 also added function pointers and `T | None`**: a bare function
+  name in value position is its address (`fn(A,...) -> R` annotations, `as`
+  casts between `int` and fn-ptr, `to_int(f)`); `None` + `T | None` is the
+  only union form, `is None` / `is not None` narrow per branch (checker AND
+  codegen keep the narrowed view), and print/operators reject a nullable
+  until narrowed. **The selfhost mirror has NONE of v0.40.0 yet** —
+  `selfhost/codegen.ax` emits no dict/None/fn-ptr/raise text, so the fixed
+  point only covers programs without them. Porting is future work.
 - Arrays `[T; N]` and structs are first-class value types (copy on
   assignment/param/return). Indexing is unchecked (C-style); struct fields by
   name; construction requires every field by name (`Point(x=1, y=2)`).

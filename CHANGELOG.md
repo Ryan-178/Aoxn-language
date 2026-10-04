@@ -5,6 +5,90 @@ minor bumps while pre-1.0: each minor version is a language milestone.
 
 ## [Unreleased]
 
+## [0.40.0] - 2026-10-04
+
+Theme: **the language grows its fourth data axis.** Function pointers,
+nullability, exceptions, and a dictionary — the four things the web platform
+work kept reaching for and not finding. Shipped in three phases on one date;
+this entry covers all of them.
+
+### Added
+
+- **Function pointers.** A bare function name in value position *is* its
+  address (`cb = handler`), `fn(int, string) -> int` annotates the type, and
+  `cb(21)` calls through it. `as` re-interprets an `int` address as a callable
+  pointer and back — the escape hatch a FFI binding needs (a COM vtable slot,
+  a Win32 callback). `to_int(f)` is the raw address; extern defs reject
+  fn-pointer parameters. Pointers are ordinary values: they copy, and they
+  live in arrays and struct fields (signature-distinct).
+- **`None` and `T | None`.** `None` is a keyword and `T | None` is the only
+  union form. Widening `T -> T | None` (and `None -> T | None`) is implicit;
+  nothing else is. A nullable carries a presence tag; `is None` /
+  `is not None` narrow a bare variable per branch, an always-returning branch
+  keeps the narrowing, and an assignment inside the branch re-narrows the
+  view — in the checker and the code generator alike. Array literals infer
+  through it (`[1, None, 3]` is `[int | None; 3]`); `print` and operators
+  reject a nullable until it is narrowed.
+- **`raise` / `try` / `except`.** The error channel becomes an exception one,
+  overriding the v0.39.0 "no exceptions on purpose" decision (user
+  instruction, 2026-10-04). `raise <string>` stores the message and unwinds
+  to the nearest enclosing handler, or out of the function (`except as e:`
+  binds it as a `string`); a raise inside a try **body** is caught by that
+  try; an uncaught exception prints one report and exits 1; `raise` counts as
+  an exit for the all-paths-return rule. The runtime is two statics (a
+  pending flag + the message), a `goto` to the handler label or the frame's
+  unwind label, and a slot check after every statement that called a raiser —
+  a may-raise fixpoint over call names drives the checks, and indirect calls
+  through a function pointer always count. The v0.39.0 `Err`-value channel
+  stays: it is how a *library* reports failure to a caller that inspects it;
+  `raise` is how a *program* aborts a flow it cannot continue.
+- **`dict[V]` — string-keyed maps.** `{"k": v, ...}` literals, `d["k"]` reads
+  and writes, `len(d)`, `dict_has(d, k)`, `dict_del(d, k)`, and
+  `for k in d` walking keys in insertion order. A missing key **raises**
+  through the new error slot, so `dict_has` guards speculative reads and
+  try/except catches the rest. Growth is doubling over parallel arrays
+  (keys are `char*`), which keeps inserts amortized O(1) while the linear
+  scan keeps lookup honest for the config/settings shape a dict is for.
+
+### Fixed
+
+- **`d: dict[int] = {}` — the form the error message recommended did not
+  work.** `check_expr` has no expected type to hand an empty dict literal, so
+  it errored before the Let's annotation was ever consulted. The one case
+  that needs the expected type is resolved in the Let arm; codegen followed
+  the same path twice over and gets the binding type instead of inferring
+  from a first entry that does not exist.
+- **Braces join lines** (v0.40.0): `{"k": v}` spans lines like any other
+  bracket, which also gives the TS front end's object literals the standard
+  rule.
+
+### The dict is a handle, and why
+
+The first spelling passed the 4-word struct (`keys`, `vals`, `len`, `cap`) **by
+value**, and it is unsound twice over: `len`/`cap` live in the copy, so a
+callee's growth or deletion was invisible to the caller — and the caller's
+stale `len` then walks off the end of a buffer the callee reallocated. It
+read fine at `-O0` and faulted at `-O1` and above (verified directly with
+clang on the same generated C: correct at `-O0`, a segfault at `-O1`/`-O2`,
+a hang at `-O3` — UB in the generated C, not a compiler bug).
+
+v0.40.0 emits the dict as a **heap handle** (`struct ax_dict_T*`), the shape
+the UI toolkit's `TableModel` and the web server's `FileTable` already use:
+copying the handle shares the dict, mutation through any copy is visible to
+all of them, and `set`/`get`/`del` are plain calls with no write-back. The
+self-hosted mirror does not emit dicts yet (`selfhost/codegen.ax` has no
+`dict`), so the fixed point is unaffected — porting it is future work, along
+with the other v0.40.0 features.
+
+### Known wart (pinned, deliberately unfixed this release)
+
+A raise takes effect at the next propagation check, and a statement's check
+runs **after** the statement — so `print(f(x))` where `f` raises prints the
+unwound frame's zero return value before hopping to the handler. Fixing it
+means hoisting raising arguments out of the side-effecting call, in
+`codegen_c.rs` and its selfhost mirror; `tests/pipeline.rs` pins the current
+behavior with a comment so the change is deliberate when it comes.
+
 ## [0.39.2] - 2026-10-03
 
 Theme: **the self-hosting heap corruption is root-caused.** v0.39.0 recorded

@@ -1,4 +1,4 @@
-# Aoxn Language Specification (v0.39.0)
+# Aoxn Language Specification (v0.40.0)
 
 Aoxn is an AI-native, statically typed, ahead-of-time compiled language with a
 Python-style syntax. Design goals: minimal syntax, explicit semantics, native
@@ -17,7 +17,8 @@ the deviation is called out explicitly below.
 - Statements end at a line break; no semicolons. `;` is a syntax error.
 - `#` starts a comment (to end of line). Blank and comment-only lines are ignored.
 - Inside `(...)` a line break is ignored (implicit line joining) 鈥?call
-  arguments may span lines, trailing commas allowed.
+  arguments may span lines, trailing commas allowed. Since v0.40.0 the same
+  holds inside `{...}` (a dict literal may span lines).
 - A single simple statement may follow `:` on the same line
   (`if n < 2: return n`). Compound statements (if/while/def) cannot.
 
@@ -31,6 +32,9 @@ the deviation is called out explicitly below.
 | `string` | immutable byte string    | ptr to NUL-terminated bytes (heap when built, static when literal) |
 | `void`   | absence of a value       | (function return only) |
 | `[T; N]` | fixed-size array, N > 0  | [N x T]       |
+| `dict[V]`| string-keyed map of V (v0.40.0) | heap handle (`struct ax_dict_V*`) |
+| `T \| None` | nullable T; the only union form (v0.40.0) | carrier struct (value + tag) |
+| `fn(A, ...) -> R` | function pointer (v0.40.0) | raw address |
 | `Name`   | struct (see below)       | named %struct |
 
 No implicit conversions. `int` and `float` never mix silently; `%` is
@@ -382,7 +386,8 @@ postfix := primary ("(" args ")" | "[" expr "]" | "." IDENT)*
 
 - Every `if` / `while` condition must be `bool`.
 - A non-void function must return a value on **all** paths (`if/elif/else`
-  where every branch returns satisfies this).
+  where every branch returns satisfies this). A `raise` counts as an exit —
+  except inside a try body, where the handler decides.
 - No unreachable statements (rejected at compile time).
 - A name may be declared only once; annotations on re-assignment must match.
 
@@ -390,12 +395,19 @@ postfix := primary ("(" args ")" | "[" expr "]" | "." IDENT)*
 
 - `print(expr)` 鈥?one `int`, `float`, `bool`, or `string` (no arrays/structs);
   prints a trailing newline. Floats print with `%f` (6 decimals).
-- `len(x)` 鈥?array: static length; string: byte length. Returns `int`.
+- `len(x)` 鈥?array: static length; string: byte length; `dict[V]` (v0.40.0):
+  entry count. Returns `int`.
 - `str(x)` 鈥?convert `int`/`float`/`bool`/`string` to `string`.
 - `to_int(x)` / `to_float(x)` 鈥?explicit scalar conversions (truncating
   toward zero / widening; `bool` converts through 0/1). These are the only
   int/float mixing the language allows, and what the TS front end's
   numeric tower lowers through.
+- `dict_has(d: dict[V], k: string) -> bool` /
+  `dict_del(d: dict[V], k: string) -> bool` (v0.40.0) 鈥?membership and
+  removal; `dict_del` is `False` when the key was absent. Both mutate
+  through the dict's handle.
+- `to_int(f)` on a function value (v0.40.0) is its raw address; `f = addr as
+  fn(...) -> ...` converts back. The FFI escape hatch.
 
 ## Raw memory (unsafe, for the standard library and systems code)
 
@@ -417,8 +429,11 @@ in wholesale, and nothing can be passed "by reference" implicitly.
 
 ## Error channel (v0.39.0)
 
-Aoxn has **no exceptions**, and this is the replacement: a failure is a
-value. Nothing unwinds and nothing is caught.
+v0.39.0 said "Aoxn has **no exceptions**" and shipped this channel as the
+replacement. v0.40.0 added real `raise` / `try` / `except` (see
+[Exceptions](#exceptions-v0400)) — this one stays, for the failures a caller
+is expected to *inspect* rather than unwind past. Nothing here changed; only
+its monopoly on error handling did.
 
 A function that can fail returns an `Err`:
 
@@ -525,6 +540,113 @@ return a bare `int` for exactly this reason. This is the same aliasing
 discipline the rest of the raw-memory section already imposes, and it is the
 price of not having references.
 
+## Exceptions (v0.40.0)
+
+v0.39.0 said "no exceptions, on purpose" and shipped the `Err`-value channel
+below. v0.40.0 reverses that decision (user instruction, 2026-10-04): a
+program can now **raise** and **catch**, and the `Err` channel stays as the
+way a *library* reports a failure its caller is expected to inspect. The
+division of labor: `raise` is control flow for a flow the program cannot
+continue; `Err` is a value for a failure the caller decides about.
+
+```
+def risky(n: int) -> int:
+    if n < 0:
+        raise "negative input: " + str(n)
+    return n * 2
+
+try:
+    print(risky(-3))
+except as e:
+    print("caught: " + e)     # e is a string
+```
+
+- The payload is a `string`. `raise` stores it and unwinds to the **nearest
+  enclosing handler**; with none, the function unwinds to its caller, which
+  repeats the check; an exception that leaves `main` prints one report and
+  exits with status 1.
+- A `raise` inside a try **body** is caught by that try (so `try: ... raise
+  "x" ... except:` continues at the handler). A raise inside a **handler**
+  propagates outward — re-raise is how a handler adds context.
+- `except:` without `as` discards the message.
+- `raise` counts as an exit for the all-paths-return rule — except in a try
+  body, where the handler decides.
+- The runtime is two statics (a pending flag + the message), a `goto` to the
+  handler label or the frame's unwind label, and a slot check after every
+  statement that called a raiser. Which calls may raise is a fixpoint over
+  function names; an indirect call through a function pointer always counts.
+- **Known wart**: the check runs after the statement, so
+  `print(f(x))` with a raising `f` prints the unwound frame's zero return
+  value before the hop. Hoisting raising arguments out of the side-effecting
+  call is future work (it must be mirrored in the self-hosted emitter too).
+
+## Nullability: `None` and `T | None` (v0.40.0)
+
+`None` is a keyword and `T | None` is the **only** union form. It is spelled
+like a type union but it is a carrier: a value of `T` plus a presence tag,
+copied by value like any struct.
+
+- Widening `T -> T | None` (and `None -> T | None`) is implicit; no other
+  union, and no implicit narrowing. `print` and every operator reject a
+  nullable until it is narrowed — there is no truthiness and no `??`.
+- `x is None` / `x is not None` test and **narrow** a bare variable: inside
+  the `is not None` branch the checker and the code generator both see `x`
+  as plain `T`. A branch that always returns keeps the narrowing, and an
+  assignment inside the branch re-narrows the view (`x = None` narrows to
+  None, `x = x + 1` re-tags the slot).
+- Array literals infer through it: `[1, None, 3]` is `[int | None; 3]`.
+- `x == None` is rejected — comparison operators want non-nullables; the
+  test is `is`.
+
+## Function pointers (v0.40.0)
+
+A function with no parentheses in value position **is** its address.
+
+```
+def twice(x: int) -> int:
+    return x * 2
+
+cb = twice          # cb: fn(int) -> int
+print(cb(21))       # indirect call
+p = to_int(cb)      # raw address — the FFI escape hatch
+f = p as fn(int) -> int   # and back (a COM vtable slot, a Win32 callback)
+```
+
+- The annotation is `fn(A, ...) -> R`. Signatures are part of the type: two
+  pointers of different signatures are different types.
+- Pointers are ordinary values — they copy, and they live in arrays and
+  struct fields.
+- `extern def` declarations reject fn-pointer parameters (the ABI has no
+  closure representation to pass through).
+
+## Dictionaries (v0.40.0)
+
+`dict[V]` is a string-keyed map with values of one type V.
+
+```
+d: dict[int] = {"a": 1, "b": 2}
+d["a"] = 10                 # insert / overwrite
+print(d["a"])               # read — a missing key RAISES
+print(len(d))               # entry count
+print(dict_has(d, "a"))     # membership, the guard for speculative reads
+print(dict_del(d, "a"))     # remove; False when the key was absent
+for k in d:                 # walks KEYS, in insertion order
+    print(k)
+```
+
+- Keys are `string` only; all values share one type; `{}` cannot infer its
+  value type and needs the annotation (`d: dict[int] = {}`).
+- A missing key **raises** `dict key not found` — that is what the exception
+  channel is for. Guard a speculative read with `dict_has`, or wrap it in
+  `try`.
+- The dict is a **heap handle** (`struct ax_dict_V*`), the same shape as the
+  UI toolkit's `TableModel` and the web server's `FileTable`: copying the
+  handle shares the dict, so a mutation made through a callee's copy is
+  visible to the caller — including growth and `dict_del`. Lookup is a
+  linear scan over insertion order; growth doubles, so inserts amortize to
+  O(1) while the honest shape of the type stays "a settings map, not a
+  database".
+
 ## Platform query
 
 - `target_os() -> string` 鈥?compile-time platform query, folded to a
@@ -623,8 +745,8 @@ the program: math (`abs/min/max/clamp/pow_i/gcd/lcm/isqrt/is_prime/hypot`
 Ordered by how much they cost the language's Python parity.
 
 1. Remaining Python operators and forms: `**` (right-associative power),
-   `in` / `not in` as operators (array membership, string substring), and
-   `is` / `is not`.
+   `in` / `not in` as operators (array membership, string substring).
+   (`is` / `is not` shipped in v0.40.0 for the `None` narrowing.)
 2. Conditional expressions (`a if c else b`) and multiple assignment /
    unpacking (`a, b = f()`), which need tuple or multi-target support in the
    AST.
@@ -632,10 +754,13 @@ Ordered by how much they cost the language's Python parity.
 4. Module qualification (`lib.sort(...)`), selective imports, package layout.
 5. String indexing / iteration (needs a `char` type or substring slices);
    f-string format specifiers (`{x:.2f}`) and multi-line f-strings.
-6. Memory: string interning or arena freeing (currently concatenation leaks).
+6. Memory: string interning or arena freeing (currently concatenation leaks);
+   dict values are never freed either (a dict lives as long as the program,
+   like every other heap block in the language).
 7. Standard library expansion: containers, IO, crypto.
 8. Top-level statements as an implicit `main` (module-script mode).
 9. Larger Python features, each of which is a real language design (not just
-   syntax): `None` and optional types, `try`/`except`, `with`, generators and
-   `yield`, closures and decorators, classes, dict/set literals.
+   syntax): `with`, generators and `yield`, closures and decorators, classes,
+   set literals. (v0.40.0 took four off this list: function pointers, `None`
+   optional types, `try`/`except`, and dict literals.)
 
