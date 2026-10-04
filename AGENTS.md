@@ -686,6 +686,17 @@ crates/aoxn-pkg       package manager crate (its own dependency set; see above)
   **The port-poll consumes a mock slot** — the poll `TcpStream::connect`
   lands as a request (400 response), so `MOCK_COUNT` must exceed the
   client's request count by at least one.
+- **The next 30+ stdlib modules are ROADMAPED in `docs/stdlib-todo.md`** (all
+  31 Python stdlib modules, batched P0–P3, feasibility rated per module). Its
+  §0 holds the four HARD constraints that shape every module — read it before
+  writing one. Two of them are load-bearing well beyond that doc:
+  **`stdlib/stdlib.ax` is ON THE SELF-HOST CRITICAL PATH** (`selfhost/codegen.ax`
+  and `selfhost/driver.ax` both `import *` it), so a new module must be its
+  OWN file under `stdlib/` — or it must stay inside the syntax subset stage-2
+  can emit (no dict/None/fn-ptr/raise); and **`Vec` is int-only**
+  (`vec_push(v: Vec, item: int)`), so `collections`/`itertools` need a generic
+  heap container built first. argv is still absent (`int main(void)` in
+  `src/codegen_c.rs:653`), which is what blocks `sys`/`argparse`.
 - Client defaults mirror openai-python: base URL `https://api.openai.com/v1`
   (env `OPENAI_BASE_URL`), key from `OPENAI_API_KEY`, org `OPENAI_ORG_ID`,
   project `OPENAI_PROJECT_ID`, 600 s receive / 5 s connect timeouts, 2
