@@ -5,77 +5,22 @@ minor bumps while pre-1.0: each minor version is a language milestone.
 
 ## [Unreleased]
 
-## [0.43.0] - 2026-10-05
-
-Theme: **modules stop being a global.** The gap analysis (`docs/language-gaps.md`
-B4) ranked "no namespaces" first for a year: every `import` merged into one
-namespace, a duplicate top-level name was a hard error, and every stdlib module
-hand-prefixed all fifty-odd of its functions because it had no choice. That is
-fixed. A module can be bound as a namespace and reached through it, and a named
-import finally means what it says.
-
-The design constraint that shaped everything else: **the generated C of a
-program that compiled before must not change by one byte.** A name keeps its
-bare spelling unless two or more modules provide it, and such a program never
-compiled before — so `codegen_c.rs` needed no change at all, the self-hosting
-fixed point still holds untouched, and the C-emitting backend keeps being a
-pure function of the source.
-
-### Added
-
-- **Module namespaces**: `import util` binds the module, and `util.f(...)`,
-  `util.Point` (including construction, `util.Point(x=1, y=2)`, and a
-  `util.Point` type annotation) reach across files. Two modules may now both
-  define `f`: `import a` / `import b` / `a.f()` / `b.f()` is legal, and the
-  only programs that cannot be written are ones that used to be hard errors.
-  `import util as u` renames the binding, not its members.
-- **The Python import spellings**: `from util import *`,
-  `from util import a, b`, `from util import a as b`, `import util as u`.
-  A specifier may be written bare and dotted (`stdlib.net.json` is
-  `stdlib/net/json`) or quoted (`"stdlib/net/json"`). An unquoted specifier
-  also probes the importing file's own directory, so `import util` finds the
-  `util.ax` beside it the way Python finds a sibling module; the quoted
-  spelling resolves exactly as it always has, untouched.
-- **`import "path"` is back.** W1-S3 removed it; it is revived as equivalent
-  to `import * from "path"`, which also lets un-migrated sources load.
-- **Dotted paths in more places**: `a.b.c.f()`, `a.b.c()`, and `x: a.b.Type`.
-
-### Changed
-
-- **A named import now really filters.** `from util import a` brings in `a`
-  and nothing else; referring to `b` is `call to undefined function or struct
-  'b'`. Before this the list was parsed and then ignored — the whole module
-  merged either way, as `docs/spec.md` used to say ("M1 merges all names").
-  This is the one place an existing program can stop compiling: one that wrote
-  `import { a } from "m"` and then called something it had not listed. No
-  source in this repository does.
-- **Star-importing the same name from two modules is a named diagnostic**
-  rather than a duplicate-definition error: "name 'f' comes from two modules;
-  import the modules and qualify the use, or rename one side with `as`".
-  A star import still re-exports, so the diamond case (`a` and `b` both
-  star-import `d`) keeps resolving `d`'s names in the program.
+## [0.44.1] - 2026-10-05
 
 ### Fixed
 
-- `Aoxn symbols` (and therefore the IDE outline, Ctrl+click and Ctrl+Shift+O)
-  names a module's declarations the way its SOURCE spells them. Resolution
-  prefixes them when they are contended; an editor must not show the prefix.
-- The build-cache dependency scan understands every import spelling, including
-  a bare one, so editing a module imported as `import util` can no longer
-  serve a stale executable.
+- **`os_getenv` silently returned `""` for any value longer than 2048
+  characters.** The v0.44.0 implementation read the variable into a fixed
+  buffer and treated the Win32 "buffer too small" answer (the return value
+  then carries the required size) as a failure. Real environments hit this
+  immediately — the GitHub Actions Windows runners' `PATH` is longer than
+  2048 characters, so the os+glob driver's `env-path` check failed there
+  while passing on shorter local `PATH`s. The function now follows the
+  two-call Win32 pattern (NULL buffer to learn the required size, then
+  allocate and read), so values of any length round-trip. Pinned by a new
+  `env-long-value` driver check that round-trips a 3000-character value,
+  beside the existing `env-path` canary.
 
-### Internal
-
-- `src/resolve.rs` is the new layer: it builds each module's binding table
-  and rewrites references to the flat name the whole program shares. The
-  loader keeps module identity (canonical path) instead of appending into one
-  list, and `scan_imports` now reports whether a specifier was quoted.
-- `selfhost/parser.ax` mirrors the new grammar. The self-hosted loader still
-  merges modules flat and has no binding layer, so it accepts the forms that
-  MEAN a whole-module merge and **refuses** selective imports rather than
-  silently merging them — the stage-1 compiler filters, so merging here would
-  make stage-2 accept a program stage-1 rejects. Same status as dict / `None`
-  / function pointers / `raise`.
 ## [0.44.0] - 2026-10-05
 
 Theme: **the standard library starts.** The first thirteen modules of the
@@ -170,6 +115,77 @@ batch is the new `docs/stdlib.md`.
   (no address-of-struct); heterogeneous records still go through the
   tagged-slab pattern.
 
+## [0.43.0] - 2026-10-05
+
+Theme: **modules stop being a global.** The gap analysis (`docs/language-gaps.md`
+B4) ranked "no namespaces" first for a year: every `import` merged into one
+namespace, a duplicate top-level name was a hard error, and every stdlib module
+hand-prefixed all fifty-odd of its functions because it had no choice. That is
+fixed. A module can be bound as a namespace and reached through it, and a named
+import finally means what it says.
+
+The design constraint that shaped everything else: **the generated C of a
+program that compiled before must not change by one byte.** A name keeps its
+bare spelling unless two or more modules provide it, and such a program never
+compiled before — so `codegen_c.rs` needed no change at all, the self-hosting
+fixed point still holds untouched, and the C-emitting backend keeps being a
+pure function of the source.
+
+### Added
+
+- **Module namespaces**: `import util` binds the module, and `util.f(...)`,
+  `util.Point` (including construction, `util.Point(x=1, y=2)`, and a
+  `util.Point` type annotation) reach across files. Two modules may now both
+  define `f`: `import a` / `import b` / `a.f()` / `b.f()` is legal, and the
+  only programs that cannot be written are ones that used to be hard errors.
+  `import util as u` renames the binding, not its members.
+- **The Python import spellings**: `from util import *`,
+  `from util import a, b`, `from util import a as b`, `import util as u`.
+  A specifier may be written bare and dotted (`stdlib.net.json` is
+  `stdlib/net/json`) or quoted (`"stdlib/net/json"`). An unquoted specifier
+  also probes the importing file's own directory, so `import util` finds the
+  `util.ax` beside it the way Python finds a sibling module; the quoted
+  spelling resolves exactly as it always has, untouched.
+- **`import "path"` is back.** W1-S3 removed it; it is revived as equivalent
+  to `import * from "path"`, which also lets un-migrated sources load.
+- **Dotted paths in more places**: `a.b.c.f()`, `a.b.c()`, and `x: a.b.Type`.
+
+### Changed
+
+- **A named import now really filters.** `from util import a` brings in `a`
+  and nothing else; referring to `b` is `call to undefined function or struct
+  'b'`. Before this the list was parsed and then ignored — the whole module
+  merged either way, as `docs/spec.md` used to say ("M1 merges all names").
+  This is the one place an existing program can stop compiling: one that wrote
+  `import { a } from "m"` and then called something it had not listed. No
+  source in this repository does.
+- **Star-importing the same name from two modules is a named diagnostic**
+  rather than a duplicate-definition error: "name 'f' comes from two modules;
+  import the modules and qualify the use, or rename one side with `as`".
+  A star import still re-exports, so the diamond case (`a` and `b` both
+  star-import `d`) keeps resolving `d`'s names in the program.
+
+### Fixed
+
+- `Aoxn symbols` (and therefore the IDE outline, Ctrl+click and Ctrl+Shift+O)
+  names a module's declarations the way its SOURCE spells them. Resolution
+  prefixes them when they are contended; an editor must not show the prefix.
+- The build-cache dependency scan understands every import spelling, including
+  a bare one, so editing a module imported as `import util` can no longer
+  serve a stale executable.
+
+### Internal
+
+- `src/resolve.rs` is the new layer: it builds each module's binding table
+  and rewrites references to the flat name the whole program shares. The
+  loader keeps module identity (canonical path) instead of appending into one
+  list, and `scan_imports` now reports whether a specifier was quoted.
+- `selfhost/parser.ax` mirrors the new grammar. The self-hosted loader still
+  merges modules flat and has no binding layer, so it accepts the forms that
+  MEAN a whole-module merge and **refuses** selective imports rather than
+  silently merging them — the stage-1 compiler filters, so merging here would
+  make stage-2 accept a program stage-1 rejects. Same status as dict / `None`
+  / function pointers / `raise`.
 ## [0.42.0] - 2026-10-04
 
 Theme: **the everyday gaps close.** Four batches of small, high-frequency

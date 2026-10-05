@@ -117,6 +117,22 @@ def main() -> int:
     else:
         print("FAIL env-path")
         fails = fails + 1
+    # a value LONGER than the fixed 2048-char buffer getenv used to have must
+    # survive the round trip (the CI runners' PATH does; v0.44.0 truncated it
+    # silently and the env-path check above failed there — v0.44.1's pin)
+    long_val = ""
+    i = 0
+    while i < 3000:
+        long_val = long_val + "x"
+        i = i + 1
+    os_setenv("AOXN_STDLIB_TEST_LONG", long_val)
+    got = os_getenv("AOXN_STDLIB_TEST_LONG")
+    if got == long_val:
+        print("PASS env-long-value")
+    else:
+        print("FAIL env-long-value " + str(len(got)))
+        fails = fails + 1
+    os_unsetenv("AOXN_STDLIB_TEST_LONG")
     # ---- working directory ----
     before = os_cwd()
     if len(before) > 0 and os_chdir("sandbox") and os_cwd() != before and os_isfile("a.txt"):
@@ -289,6 +305,7 @@ stderr:
         "env-set-get",
         "env-unset",
         "env-path",
+        "env-long-value",
         "chdir",
         "match-star-q",
         "match-multi-star",

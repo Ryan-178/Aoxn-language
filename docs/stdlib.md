@@ -163,7 +163,10 @@ network layer; keep the copies in sync):
   `os_attributes` returns the raw DWORD or `OS_ATTR_INVALID()` =
   **4294967295** (the zero-extension trap: a 32-bit `int` return arrives
   zero-extended, so the sentinel is compared unsigned, not against -1)
-- env: `os_getenv` `os_has_env` (distinguishes empty from unset via
+- env: `os_getenv` (two-call Win32 sizing: NULL buffer for the required
+  size, then allocate and read — a fixed buffer silently truncated longer
+  values, and the CI runners' PATH is longer than 2048 chars, which is how
+  v0.44.1 caught it) `os_has_env` (distinguishes empty from unset via
   `GetLastError == 203`) `os_setenv` `os_unsetenv` (deletes via a NULL
   value — the empty string would create an empty variable)
 - cwd: `os_cwd` `os_chdir`

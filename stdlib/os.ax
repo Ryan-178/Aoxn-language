@@ -220,17 +220,23 @@ def os_islink(path: string) -> bool:
 
 # ---- environment ----
 
+# the two-call Win32 pattern: call with a NULL buffer to learn the required
+# size, then allocate and call again. The fixed 2048-char buffer this used to
+# have silently returned "" for any value longer than that — and the CI
+# runners' PATH is, in fact, longer than that (the v0.44.1 fix).
 def os_getenv(name: string) -> string:
     w = os_to_wide(name)
-    buf = malloc(4096)
-    n = GetEnvironmentVariableW(w, buf, 2048)
+    # with a NULL buffer the return value INCLUDES the terminating NUL
+    n = GetEnvironmentVariableW(w, 0, 0)
     s = ""
-    if n > 0 and n < 2048:
-        store_u8(buf, n * 2, 0)
-        store_u8(buf, n * 2 + 1, 0)
-        s = os_from_wide(buf)
+    if n > 0:
+        buf = malloc(n * 2)
+        m = GetEnvironmentVariableW(w, buf, n)
+        if m > 0 and m < n:
+            # the API wrote m chars + the NUL; os_from_wide reads to the NUL
+            s = os_from_wide(buf)
+        free(buf)
     free(w)
-    free(buf)
     return s
 
 # a variable that exists with an empty value is NOT the same as one that is

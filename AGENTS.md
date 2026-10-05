@@ -911,7 +911,11 @@ crates/aoxn-pkg       package manager crate (its own dependency set; see above)
 - **`os.ax` zero-extension trap**: `GetFileAttributesW` returns a DWORD,
   which arrives zero-extended in i64 — the INVALID sentinel is compared as
   **4294967295**, never -1. `os_unsetenv` deletes via a NULL value (the
-  empty string would create an empty variable). The UTF-16 helpers are
+  empty string would create an empty variable). **`os_getenv` must keep the
+  two-call Win32 sizing pattern** (NULL buffer → required size → allocate →
+  read): a fixed buffer silently returned `""` for values longer than
+  2048 chars, and the CI runners' `PATH` is longer — that is the v0.44.1
+  fix, pinned by the `env-long-value` driver check. The UTF-16 helpers are
   deliberately duplicated from `net/codec.ax` (same precedent codec set
   against ui.ax) — keep the copies in sync.
 - **`glob.ax` keeps Python's dotfile rule** (`*` does not match a leading

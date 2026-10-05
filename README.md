@@ -49,7 +49,7 @@ def main() -> int:
 
 ### Install (one file, Windows)
 
-Download **`Aoxn-0.44.0-Setup.exe`** from the
+Download **`Aoxn-0.44.1-Setup.exe`** from the
 [releases page](https://github.com/AlonechatWorkspace/Aoxn-language/releases)
 and double-click it. That single executable carries the compiler, the
 standard library, the UI toolkit and the examples — nothing else to download,
@@ -704,10 +704,17 @@ Full reference, including limits: [`docs/css-assets.md`](docs/css-assets.md).
 
 ## Status
 
-**v0.44.0** · **Windows only** · 376 tests green
+**v0.44.1** · **Windows only** · 376 tests green
 (pipeline 154 + lib 21 + assets 21 + assets_v36 18 + symbols 8 + TS 34 + UI 9 +
 OpenAI SDK 2 + Anthropic SDK 2 + install 6 + stdlib module drivers 7 +
 aoxn-pkg 94; the IDE adds 36 Rust + 62 frontend tests of its own) ·
+**os_getenv stops truncating long values** (v0.44.1) — the v0.44.0
+implementation read environment variables into a fixed 2048-character buffer
+and treated the Win32 "buffer too small" answer as failure, so any longer
+value came back `""`; the GitHub Actions runners' `PATH` is longer than that,
+which is exactly how the stdlib os+glob test caught it in CI. The two-call
+Win32 pattern (NULL buffer → required size → allocate → read) replaces it,
+pinned by a 3000-character round-trip driver check ·
 **the standard library starts** (v0.44.0) — the first thirteen modules of the
 stdlib roadmap land as independent files imported by name (`math` `time`
 `datetime` `calendar` `pathlib` `base64` `hashlib` `hmac` `os` `glob` `json`
@@ -886,7 +893,7 @@ Apache-2.0 — see [`LICENSE`](LICENSE).
 ### 一个 exe 装全部（Windows）
 
 从 [releases 页面](https://github.com/AlonechatWorkspace/Aoxn-language/releases)
-下载 **`Aoxn-0.44.0-Setup.exe`**，双击即可。**这一个 exe 里就带着编译器、标准库、
+下载 **`Aoxn-0.44.1-Setup.exe`**，双击即可。**这一个 exe 里就带着编译器、标准库、
 UI 工具箱和示例程序**——不用再下载别的，也不用自己解压：
 
 ```console
@@ -1391,10 +1398,15 @@ print(asset_path(styles_fingerprint()))   # …\assets\82b4fb25….css
 
 ## 现状
 
-**v0.44.0** · **只支持 Windows** · 376 测试全绿
+**v0.44.1** · **只支持 Windows** · 376 测试全绿
 （pipeline 154 + lib 21 + assets 21 + assets_v36 18 + symbols 8 + TS 34 + UI 9 +
 OpenAI SDK 2 + Anthropic SDK 2 + 安装布局 6 + 标准库模块驱动 7 + aoxn-pkg 94；
 IDE 另有 36 个 Rust + 62 个前端测试）·
+**os_getenv 不再截断长值**（v0.44.1）——v0.44.0 的实现把环境变量读进固定
+2048 字符的缓冲，把 Win32「缓冲太小」的回答当失败处理，更长的值一律返回
+空串；GitHub Actions 的 `PATH` 正好超过这个长度，标准库 os+glob 测试就是在
+CI 上这么抓到它的。现改为两调用式 Win32 惯例（NULL 缓冲取所需长度 → 分配 →
+再读），并由一个 3000 字符往返的驱动检查钉住 ·
 **标准库开张**（v0.44.0）——stdlib 路线图的前十三个模块以独立文件、按名字导入
 落地（`math` `time` `datetime` `calendar` `pathlib` `base64` `hashlib` `hmac`
 `os` `glob` `json` `bisect` `heapq`；`docs/stdlib.md` 是参考文档），没有一个碰
