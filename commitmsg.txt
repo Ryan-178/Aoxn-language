@@ -1,0 +1,39 @@
+feat(stdlib): the first thirteen modules land — math/time/datetime/calendar/pathlib/base64/hashlib/hmac/os/glob/json/bisect/heapq (v0.44.0)
+
+docs/stdlib-todo.md §6's starting order, executed: every module is its own
+file under stdlib/, imported by name, so stdlib/stdlib.ax (the self-host
+critical path) is untouched and the fixed point holds. Reference for the
+batch: docs/stdlib.md; demos examples/{math,time,pathlib,hashlib,os,json,
+bisect}_demo.ax; driver tests tests/{math,pathlib,datetime,hashlib,osglob,
+containers,json_fileio}.rs.
+
+- math: CRT trig/exp externs + the §0.6 NaN/Inf toolkit (fdiv, NaN/Inf/NInf,
+  is_nan/is_inf/is_fin). Capitalised spellings dodge UCRT link collisions.
+- time: QPC monotonic ns/us (overflow-safe conversion), FILETIME wall clock,
+  Sleep.
+- datetime: Hinnant civil-date math via floor_div (pre-1970 pinned), local/
+  UTC now, weekday, leap/month lengths, hand-parsed strftime subset.
+- calendar: monthrange/weekday/monthcalendar/text month grid.
+- pathlib: pure path string ops, both separators, lexical norm.
+- base64: encode std+url AND the decode direction (B64{p,n}; NUL-safe,
+  invalid = -1; both alphabets accepted, orphan chars rejected).
+- hashlib: SHA-256/SHA-1/MD5, one-shot + incremental, pure Aoxn bitwise;
+  mask-before-left-shift rule; 80-word schedule scratch (SHA-1).
+- hmac: RFC 2104 via fn-ptr over the *_raw one-shots (selfhost 尚不可编译,
+  off the fixed-point path); long-key case pinned.
+- os: Win32 core all-wide (UTF-8<->UTF-16 in-file), attributes with
+  zero-extended INVALID sentinel, env (unset = NULL value), cwd, listdir.
+- glob: backtracking matcher + sorted walk, Python dotfile rule; no **.
+- json: promoted from stdlib/net/json.ax (SDKs follow), + j_read_file/
+  j_write_file (err 2 = I/O vs 1 = parse).
+- bisect/heapq: int Vec core + f64 slot-view variants; Heap{v,res} shape.
+
+Docs: docs/stdlib.md (batch reference); docs/stdlib-todo.md statuses + §0.3/
+§0.6 closures + §6 order ticked; docs/spec.md roadmap item 7; AGENTS.md gains
+the v0.44.0 stdlib section and updated pointers; README/SECURITY rewritten
+bilingual against the tree (282 workspace tests + 94 aoxn-pkg = 376, status
+v0.44.0, new in-scope entry for the stdlib file parsers).
+
+Known traps surfaced and pinned in docs/stdlib.md: UCRT symbol collisions
+rename nan/inf/copysign; GetFileAttributesW returns zero-extended; Vec[T]
+resolves as slot-view discipline (§0.3 updated), not a new container type.

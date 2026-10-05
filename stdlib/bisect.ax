@@ -1,0 +1,114 @@
+# Aoxn standard library — bisect (v0.44.0, docs/stdlib-todo.md #14).
+#
+# Binary search and sorted insertion over a Vec kept in ascending order.
+# int elements use the plain names (bisect_left/...); float elements — held
+# in the same 8-byte slots through store_f64/load_f64 — take the `_f` spell
+# (Aoxn has no overloading). A string slot would compare POINTERS, not
+# bytes, so no string variants ship: encode strings some other way.
+#
+# Search functions return the insertion POSITION (Python semantics):
+# bisect_left puts x before equal elements, bisect_right after. The insort
+# functions insert there and return the NEW Vec handle — vec_reserve may
+# have reallocated the buffer, so `a = insort_left(a, x)` is mandatory (the
+# write-back discipline).
+#
+# Plain Aoxn only (no dict/None/fn-ptr/raise): self-host compilable.
+
+import * from "stdlib.ax"
+
+# ---- int ----
+
+def bisect_left(a: Vec, x: int) -> int:
+    lo = 0
+    hi = a.len
+    while lo < hi:
+        mid = (lo + hi) / 2
+        if vec_get(a, mid) < x:
+            lo = mid + 1
+        else:
+            hi = mid
+    return lo
+
+def bisect_right(a: Vec, x: int) -> int:
+    lo = 0
+    hi = a.len
+    while lo < hi:
+        mid = (lo + hi) / 2
+        if x < vec_get(a, mid):
+            hi = mid
+        else:
+            lo = mid + 1
+    return lo
+
+# insert at pos, shifting the tail right one slot; returns the fresh handle
+def bisect_insert_at(a: Vec, pos: int, x: int) -> Vec:
+    a = vec_reserve(a, a.len + 1)
+    i = a.len
+    while i > pos:
+        vec_set(a, i, vec_get(a, i - 1))
+        i = i - 1
+    vec_set(a, pos, x)
+    a.len = a.len + 1
+    return a
+
+def insort_left(a: Vec, x: int) -> Vec:
+    return bisect_insert_at(a, bisect_left(a, x), x)
+
+def insort_right(a: Vec, x: int) -> Vec:
+    return bisect_insert_at(a, bisect_right(a, x), x)
+
+# the first index holding x, -1 when absent (needs the sorted-ness only
+# for speed — correctness holds either way)
+def bisect_find(a: Vec, x: int) -> int:
+    i = bisect_left(a, x)
+    if i < a.len:
+        if vec_get(a, i) == x:
+            return i
+    return -1
+
+# ---- float (f64 in 8-byte slots via store_f64/load_f64) ----
+
+def bisect_left_f(a: Vec, x: float) -> int:
+    lo = 0
+    hi = a.len
+    while lo < hi:
+        mid = (lo + hi) / 2
+        if load_f64(a.data + mid * 8) < x:
+            lo = mid + 1
+        else:
+            hi = mid
+    return lo
+
+def bisect_right_f(a: Vec, x: float) -> int:
+    lo = 0
+    hi = a.len
+    while lo < hi:
+        mid = (lo + hi) / 2
+        if x < load_f64(a.data + mid * 8):
+            hi = mid
+        else:
+            lo = mid + 1
+    return lo
+
+def bisect_insert_at_f(a: Vec, pos: int, x: float) -> Vec:
+    a = vec_reserve(a, a.len + 1)
+    i = a.len
+    while i > pos:
+        store_f64(a.data + i * 8, load_f64(a.data + (i - 1) * 8))
+        i = i - 1
+    store_f64(a.data + pos * 8, x)
+    a.len = a.len + 1
+    return a
+
+def insort_left_f(a: Vec, x: float) -> Vec:
+    return bisect_insert_at_f(a, bisect_left_f(a, x), x)
+
+def insort_right_f(a: Vec, x: float) -> Vec:
+    return bisect_insert_at_f(a, bisect_right_f(a, x), x)
+
+def bisect_find_f(a: Vec, x: float) -> int:
+    i = bisect_left_f(a, x)
+    if i < a.len:
+        if load_f64(a.data + i * 8) == x:
+            return i
+    return -1

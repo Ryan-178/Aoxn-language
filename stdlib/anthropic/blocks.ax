@@ -18,7 +18,7 @@
 #     a struct per kind at every call site. Text keeps that flat.
 #
 # Nothing here talks to the network, so all of it is offline-testable, and
-# every string that reaches the wire goes through `j_quote` (net/json.ax) —
+# every string that reaches the wire goes through `j_quote` (stdlib/json.ax) —
 # a quote or a newline in a prompt is a normal Tuesday, not an escaping bug.
 #
 # Feature budget: plain Aoxn only (no dict/None/fn-ptr/raise), like the rest
@@ -26,7 +26,7 @@
 
 import * from "../stdlib.ax"
 import * from "../net/codec.ax"
-import * from "../net/json.ax"
+import * from "../json.ax"
 
 # ---- prompt caching ----
 
@@ -182,7 +182,7 @@ def an_block_document_titled(media_type: string, data: string, title: string, co
 
 # ToolUseBlockParam — what the model sends to ask for your tool.
 # `input_json` is RAW JSON TEXT (the API validated `input` object); build it
-# with the net/json builder or j_dumps, and "{}" when there are no arguments.
+# with the json.ax builder or j_dumps, and "{}" when there are no arguments.
 def an_block_tool_use(id: string, name: string, input_json: string) -> string:
     d = jdom_new()
     d = jb_obj(d)

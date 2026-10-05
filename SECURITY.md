@@ -16,8 +16,8 @@ minors do not.
 
 | Version | Supported |
 |---|---|
-| `0.43.x` (current) | ✅ yes |
-| `0.42.x` and earlier | ❌ no — please reproduce on `main` or the latest release |
+| `0.44.x` (current) | ✅ yes |
+| `0.43.x` and earlier | ❌ no — please reproduce on `main` or the latest release |
 | `main` (development) | ✅ yes, fixes land here first |
 
 Fix versions are always noted in [`CHANGELOG.md`](CHANGELOG.md). If you need a
@@ -217,6 +217,21 @@ the information needed to protect users even if the reporter disagrees.
   server. The SDK test suites feed hostile fixtures offline precisely so
   these paths stay provable; the SDKs never run inside the compiler
   process and add no compiler-side surface.
+- **The v0.44.0 stdlib parsers over hostile files and directories**
+  (`stdlib/os.ax`, `stdlib/glob.ax`, `stdlib/base64.ax`, `stdlib/json.ax`
+  file I/O) — the same standing as the SDK parsers, one ring out: they
+  consume bytes the *filesystem and directory entries* control (file
+  contents, names returned by `FindFirstFileW`), still inside the user's
+  process. `os`'s UTF-8 ↔ UTF-16 converters are hand-written index
+  arithmetic over malloc'd buffers; `glob`'s matcher is a backtracking
+  recursion over pattern/name lengths and its walk joins attacker-named
+  directory entries into paths; `b64_decode` sizes its output buffer from
+  the input length and stores at `n`-derived offsets. A malformed filename,
+  a hostile path, or base64 input that overruns a buffer, indexes
+  out of bounds, or loops without advancing is a stdlib defect. (Unchecked
+  index arithmetic on buffers the *program* built itself remains the
+  documented out-of-scope behavior below; the boundary here is data the
+  program did not choose.)
 - **Credential handling in the SDK clients** (v0.41.0) — `AnClient` /
   `OaClient` hold the API key as an ordinary Aoxn string, so it lives in
   the heap for the process's lifetime and is passed by pointer. Nothing
@@ -340,8 +355,8 @@ Aoxn 处于 pre-1.0 阶段：只有最新的版本线接收安全修复，旧的
 
 | 版本 | 支持情况 |
 |---|---|
-| `0.43.x`（当前） | ✅ 支持 |
-| `0.42.x` 及更早 | ❌ 不支持——请在 `main` 或最新发布上复现 |
+| `0.44.x`（当前） | ✅ 支持 |
+| `0.43.x` 及更早 | ❌ 不支持——请在 `main` 或最新发布上复现 |
 | `main`（开发线） | ✅ 支持，修复最先落在这里 |
 
 修复版本永远记在 [`CHANGELOG.md`](CHANGELOG.md)。如需把修复反向移植到旧
@@ -489,6 +504,16 @@ tag，请在报告里说明，我们再商量。
    `jb_push_raw` 把解析出的片段拼进已有的 slab，因此 realloc 之前的旧指针绝不可再用；
    响应头查找扫描的块，其长度来自服务器。SDK 测试套件离线投喂敌意 fixture，正是为了
    让这些路径保持可证明；SDK 从不在编译器进程内运行，也不新增编译器侧攻击面。
+- **v0.44.0 标准库中解析敌意文件与目录的解析器**（`stdlib/os.ax`、
+   `stdlib/glob.ax`、`stdlib/base64.ax`、`stdlib/json.ax` 文件 I/O）—— 与 SDK
+   解析器同一待遇，只是往外挪了一环：它们消费的是**文件系统与目录项**控制的
+   字节（文件内容、`FindFirstFileW` 返回的名字），同样运行在用户进程内。
+   `os` 的 UTF-8 ↔ UTF-16 转换是对 malloc 缓冲的手写索引运算；`glob` 的匹配器
+   是按模式/名字长度回溯的递归，其遍历会把攻击者命名的目录项拼进路径；
+   `b64_decode` 按输入长度给输出缓冲定容、按 `n` 推导写偏移。一个畸形文件名、
+   恶意路径或 base64 输入若造成缓冲越界、下标越界或不前进的死循环，属于
+   标准库缺陷。（程序**自建**缓冲上的不检查索引运算仍属下文成文范围外行为；
+   这里的边界是程序未曾选择的数据。）
 - **SDK 客户端中的凭据处理**（v0.41.0）—— `AnClient` / `OaClient` 把 API key 当作
    普通 Aoxn 字符串持有，因此它在堆里存活整个进程生命周期，并以指针传递。没有任何机制
    会擦除它，core dump 或崩溃报告里就会有它。参考 Python SDK 同样如此。请优先用环境变量

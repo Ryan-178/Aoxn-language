@@ -1,0 +1,278 @@
+# Aoxn standard library — datetime (v0.44.0, docs/stdlib-todo.md #6).
+#
+# Calendar math as pure integer arithmetic plus two Win32 clock externs.
+# The civil-date conversions are Howard Hinnant's algorithms (days_from_civil
+# / civil_from_days): they are valid for every year, negative included, which
+# is why all divisions that see possibly-negative values go through
+# floor_div — C's `/` truncates toward zero and would corrupt pre-1970 and
+# BC dates otherwise.
+#
+# No strftime: `wcsftime` goes through the CRT and depends on the locale
+# (docs/stdlib-todo.md #6) — datetime_format parses the format string itself
+# and supports the numeric subset plus %A/%a/%B/%b/%j/%%.
+#
+# datetime_now() is LOCAL time (GetLocalTime — what a user means by "now");
+# datetime_utcnow() is UTC (FILETIME via stdlib/time.ax). Weekdays follow
+# Python: Monday == 0 .. Sunday == 6.
+#
+# Plain Aoxn only (no dict/None/fn-ptr/raise): self-host compilable.
+
+import * from "./time.ax"
+
+struct DateTime:
+    year: int
+    month: int
+    day: int
+    hour: int
+    minute: int
+    second: int
+
+extern def GetLocalTime(st: int)
+
+# ---- floor division (b > 0): C `/` truncates toward zero ----
+
+def floor_div(a: int, b: int) -> int:
+    r = a % b
+    if r < 0:
+        return a / b - 1
+    return a / b
+
+# ---- civil date <-> day number (Howard Hinnant, public domain) ----
+
+# days since 1970-01-01 for the (possibly negative) proleptic Gregorian date
+def days_from_civil(y: int, m: int, d: int) -> int:
+    if m <= 2:
+        y = y - 1
+    era = floor_div(y, 400)
+    yoe = y - era * 400
+    mp = m - 3
+    if mp < 0:
+        mp = m + 9
+    doy = (153 * mp + 2) / 5 + d - 1
+    doe = yoe * 365 + yoe / 4 - yoe / 100 + doy
+    return era * 146097 + doe - 719468
+
+# the date for a day number; time fields come back zeroed
+def civil_from_days(z: int) -> DateTime:
+    z = z + 719468
+    era = floor_div(z, 146097)
+    doe = z - era * 146097
+    yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365
+    y = yoe + era * 400
+    doy = doe - (365 * yoe + yoe / 4 - yoe / 100)
+    mp = (5 * doy + 2) / 153
+    d = doy - (153 * mp + 2) / 5 + 1
+    m = mp + 3
+    if mp >= 10:
+        m = mp - 9
+    if m <= 2:
+        y = y + 1
+    return DateTime(year=y, month=m, day=d, hour=0, minute=0, second=0)
+
+# ---- calendar queries ----
+
+def datetime_is_leap(y: int) -> bool:
+    return y % 4 == 0 and (y % 100 != 0 or y % 400 == 0)
+
+def datetime_days_in_month(y: int, m: int) -> int:
+    if m == 2:
+        if datetime_is_leap(y):
+            return 29
+        return 28
+    if m == 4 or m == 6 or m == 9 or m == 11:
+        return 30
+    return 31
+
+# 1-based day of the year
+def datetime_yday(dt: DateTime) -> int:
+    return days_from_civil(dt.year, dt.month, dt.day) - days_from_civil(dt.year, 1, 1) + 1
+
+# ---- conversions ----
+
+def datetime_to_unix(dt: DateTime) -> int:
+    days = days_from_civil(dt.year, dt.month, dt.day)
+    return days * 86400 + dt.hour * 3600 + dt.minute * 60 + dt.second
+
+def datetime_from_unix(u: int) -> DateTime:
+    days = floor_div(u, 86400)
+    secs = u - days * 86400
+    dt = civil_from_days(days)
+    dt.hour = secs / 3600
+    dt.minute = secs % 3600 / 60
+    dt.second = secs % 60
+    return dt
+
+# ---- now ----
+
+# one WORD of a SYSTEMTIME block (little-endian u16)
+def st_word(p: int, i: int) -> int:
+    return load_u8(p, i * 2) + load_u8(p, i * 2 + 1) * 256
+
+# local wall-clock time
+def datetime_now() -> DateTime:
+    st = malloc(16)
+    GetLocalTime(st)
+    dt = DateTime(
+        year=st_word(st, 0),
+        month=st_word(st, 1),
+        day=st_word(st, 3),
+        hour=st_word(st, 4),
+        minute=st_word(st, 5),
+        second=st_word(st, 6),
+    )
+    free(st)
+    return dt
+
+# UTC wall-clock time
+def datetime_utcnow() -> DateTime:
+    return datetime_from_unix(time_unix())
+
+# ---- weekday ----
+
+# Monday == 0 .. Sunday == 6 (1970-01-01, day 0, was a Thursday)
+def datetime_weekday(dt: DateTime) -> int:
+    d = days_from_civil(dt.year, dt.month, dt.day) + 3
+    return ((d % 7) + 7) % 7
+
+def datetime_isoweekday(dt: DateTime) -> int:
+    return datetime_weekday(dt) + 1
+
+# ---- names ----
+
+def datetime_weekday_name(w: int) -> string:
+    if w == 0:
+        return "Monday"
+    if w == 1:
+        return "Tuesday"
+    if w == 2:
+        return "Wednesday"
+    if w == 3:
+        return "Thursday"
+    if w == 4:
+        return "Friday"
+    if w == 5:
+        return "Saturday"
+    if w == 6:
+        return "Sunday"
+    return ""
+
+def datetime_weekday_abbr(w: int) -> string:
+    return str_sub(datetime_weekday_name(w), 0, 3)
+
+def datetime_month_name(m: int) -> string:
+    if m == 1:
+        return "January"
+    if m == 2:
+        return "February"
+    if m == 3:
+        return "March"
+    if m == 4:
+        return "April"
+    if m == 5:
+        return "May"
+    if m == 6:
+        return "June"
+    if m == 7:
+        return "July"
+    if m == 8:
+        return "August"
+    if m == 9:
+        return "September"
+    if m == 10:
+        return "October"
+    if m == 11:
+        return "November"
+    if m == 12:
+        return "December"
+    return ""
+
+def datetime_month_abbr(m: int) -> string:
+    return str_sub(datetime_month_name(m), 0, 3)
+
+# ---- formatting ----
+
+# zero-pad to two digits
+def dt_pad2(n: int) -> string:
+    if n < 10:
+        return "0" + str(n)
+    return str(n)
+
+# zero-pad to three digits (day of year)
+def dt_pad3(n: int) -> string:
+    if n < 10:
+        return "00" + str(n)
+    if n < 100:
+        return "0" + str(n)
+    return str(n)
+
+# zero-pad to four digits (years)
+def dt_pad4(n: int) -> string:
+    s = str(n)
+    if n < 10:
+        return "000" + s
+    if n < 100:
+        return "00" + s
+    if n < 1000:
+        return "0" + s
+    return s
+
+# one %<c> expansion; unknown specifiers echo back with their %
+def dt_spec(dt: DateTime, c: int) -> string:
+    if c == 89:
+        return dt_pad4(dt.year)
+    if c == 121:
+        return dt_pad2(dt.year % 100)
+    if c == 109:
+        return dt_pad2(dt.month)
+    if c == 100:
+        return dt_pad2(dt.day)
+    if c == 72:
+        return dt_pad2(dt.hour)
+    if c == 77:
+        return dt_pad2(dt.minute)
+    if c == 83:
+        return dt_pad2(dt.second)
+    if c == 106:
+        return dt_pad3(datetime_yday(dt))
+    if c == 65:
+        return datetime_weekday_name(datetime_weekday(dt))
+    if c == 97:
+        return datetime_weekday_abbr(datetime_weekday(dt))
+    if c == 66:
+        return datetime_month_name(dt.month)
+    if c == 98:
+        return datetime_month_abbr(dt.month)
+    if c == 37:
+        return "%"
+    return "%" + dt_chr(c)
+
+# the single byte c as a one-character string (str() of an int prints digits,
+# so the char comes out through a one-byte buffer instead)
+def dt_chr(c: int) -> string:
+    p = malloc(2)
+    store_u8(p, 0, c)
+    store_u8(p, 1, 0)
+    return as_string(p)
+
+# strftime subset: %Y %y %m %d %H %M %S %j %A %a %B %b %%
+def datetime_format(dt: DateTime, fmt: string) -> string:
+    out = ""
+    i = 0
+    while i < len(fmt):
+        c = str_get(fmt, i)
+        if c == 37 and i + 1 < len(fmt):
+            out = out + dt_spec(dt, str_get(fmt, i + 1))
+            i = i + 2
+        else:
+            out = out + dt_chr(c)
+            i = i + 1
+    return out
+
+# "YYYY-MM-DD HH:MM:SS" (UTC spelling is the caller's choice: the struct
+# does not remember which clock filled it)
+def datetime_iso(dt: DateTime) -> string:
+    return datetime_format(dt, "%Y-%m-%d %H:%M:%S")
+
+# "YYYY-MM-DD"
+def datetime_iso_date(dt: DateTime) -> string:
+    return datetime_format(dt, "%Y-%m-%d")

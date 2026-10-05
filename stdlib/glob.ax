@@ -1,0 +1,205 @@
+# Aoxn standard library — glob (v0.44.0, docs/stdlib-todo.md #4).
+#
+# Filename-pattern matching and directory search, built on stdlib/os.ax's
+# os_listdir (FindFirstFileW/FindNextFileW under the hood). Patterns are the
+# shell subset: `*` (any run of characters, within one path segment),
+# `?` (one character) and `[a-z]` / `[!a-z]` / `[^a-z]` classes — matched by
+# our own backtracking matcher, NOT the Win32 wildcards (which are cruder
+# and would split the logic in two).
+#
+# Python-parity details kept:
+#   - `*`/`?` do not match a leading `.` unless the PATTERN segment starts
+#     with one (glob's dotfile rule; plain fnmatch has no such rule);
+#   - results come back sorted byte-wise, so output is deterministic;
+#   - a segment without wildcards is only descended into when it exists.
+# NOT supported: `**` (no cross-segment recursion) — documented gap.
+#
+# glob() returns a Vec of path strings (vec_get_str to read; strings leak by
+# the language's design). All recursion returns the grown Vec (the write-back
+# discipline — vec_push invalidates every older copy of the handle).
+#
+# Needs stdlib/os.ax (kernel32 via the CRT: no -l). Plain Aoxn only:
+# self-host compilable.
+
+import * from "stdlib.ax"
+import * from "./os.ax"
+import * from "./pathlib.ax"
+
+# ---- single-segment matching ----
+
+def glob_match(pat: string, name: string) -> bool:
+    return glob_match_at(pat, 0, name, 0)
+
+def glob_match_at(p: string, pi: int, s: string, si: int) -> bool:
+    while pi < len(p):
+        c = str_get(p, pi)
+        if c == 42:
+            # collapse consecutive stars, then let one star eat any run
+            while str_get(p, pi) == 42:
+                pi = pi + 1
+                if pi == len(p):
+                    return True
+            k = si
+            while k <= len(s):
+                if glob_match_at(p, pi, s, k):
+                    return True
+                k = k + 1
+            return False
+        if si >= len(s):
+            return False
+        if c == 63:
+            si = si + 1
+            pi = pi + 1
+        elif c == 91:
+            end = glob_class_end(p, pi)
+            if end < 0:
+                # unterminated class: '[' is literal
+                if str_get(s, si) != 91:
+                    return False
+                si = si + 1
+                pi = pi + 1
+            else:
+                if not glob_class_hit(p, pi, end, str_get(s, si)):
+                    return False
+                si = si + 1
+                pi = end
+        else:
+            if str_get(s, si) != c:
+                return False
+            si = si + 1
+            pi = pi + 1
+    return si == len(s)
+
+# index one past the closing ']' of the class at start, -1 when unterminated
+def glob_class_end(p: string, start: int) -> int:
+    i = start + 1
+    if i < len(p) and (str_get(p, i) == 33 or str_get(p, i) == 94):
+        i = i + 1
+    if i < len(p) and str_get(p, i) == 93:
+        i = i + 1  # a leading ']' is a literal member
+    while i < len(p):
+        if str_get(p, i) == 93:
+            return i + 1
+        i = i + 1
+    return -1
+
+# does the byte ch fall inside the class spelled p[start:end)?
+def glob_class_hit(p: string, start: int, end: int, ch: int) -> bool:
+    i = start + 1
+    neg = False
+    if str_get(p, i) == 33 or str_get(p, i) == 94:
+        neg = True
+        i = i + 1
+    hit = False
+    last = end - 1
+    while i < last:
+        c = str_get(p, i)
+        if i + 2 < last and str_get(p, i + 1) == 45:
+            if ch >= c and ch <= str_get(p, i + 2):
+                hit = True
+            i = i + 3
+        else:
+            if ch == c:
+                hit = True
+            i = i + 1
+    if neg:
+        return not hit
+    return hit
+
+def glob_has_wild(seg: string) -> bool:
+    i = 0
+    while i < len(seg):
+        c = str_get(seg, i)
+        if c == 42 or c == 63 or c == 91:
+            return True
+        i = i + 1
+    return False
+
+# ---- the search ----
+
+def glob_split(p: string) -> Vec:
+    segs = vec_new()
+    i = 0
+    while i < len(p):
+        j = i
+        while j < len(p) and not path_is_sep(str_get(p, j)):
+            j = j + 1
+        if j > i:
+            segs = vec_push_str(segs, str_sub(p, i, j))
+        i = j + 1
+    return segs
+
+def glob_join(prefix: string, seg: string) -> string:
+    if len(prefix) == 0:
+        return seg
+    if path_is_sep(str_get(prefix, len(prefix) - 1)):
+        return prefix + seg
+    return prefix + "\\" + seg
+
+# every matched path under prefix for segments idx..; RETURNS the grown out
+def glob_walk(prefix: string, segs: Vec, idx: int, out: Vec) -> Vec:
+    if idx == segs.len:
+        if len(prefix) > 0:
+            out = vec_push_str(out, prefix)
+        return out
+    seg = vec_get_str(segs, idx)
+    if not glob_has_wild(seg):
+        np = glob_join(prefix, seg)
+        if os_exists(np):
+            out = glob_walk(np, segs, idx + 1, out)
+        return out
+    d = prefix
+    if len(d) == 0:
+        d = "."
+    names = os_listdir(d)
+    dot_seg = str_get(seg, 0) == 46
+    i = 0
+    while i < names.len:
+        name = vec_get_str(names, i)
+        ok = True
+        if not dot_seg and str_get(name, 0) == 46:
+            ok = False
+        if ok and glob_match(seg, name):
+            out = glob_walk(glob_join(prefix, name), segs, idx + 1, out)
+        i = i + 1
+    return out
+
+# paths matching pattern, sorted. Relative patterns search the working
+# directory; `C:/...`, `\...` and `\\server\share\...` roots are kept.
+def glob(pattern: string) -> Vec:
+    out = vec_new()
+    p = pattern
+    if len(p) >= 2 and str_get(p, 1) == 58:
+        base = str_sub(p, 0, 2)
+        p = str_sub(p, 2, len(p))
+        if len(p) > 0 and path_is_sep(str_get(p, 0)):
+            p = str_sub(p, 1, len(p))
+        out = glob_walk(base, glob_split(p), 0, out)
+    elif len(p) >= 2 and path_is_sep(str_get(p, 0)) and path_is_sep(str_get(p, 1)):
+        segs = glob_split(str_sub(p, 2, len(p)))
+        if segs.len >= 2:
+            base = "\\\\" + vec_get_str(segs, 0) + "\\" + vec_get_str(segs, 1)
+            rest = vec_new()
+            i = 2
+            while i < segs.len:
+                rest = vec_push_str(rest, vec_get_str(segs, i))
+                i = i + 1
+            out = glob_walk(base, rest, 0, out)
+    elif len(p) >= 1 and path_is_sep(str_get(p, 0)):
+        out = glob_walk("\\", glob_split(str_sub(p, 1, len(p))), 0, out)
+    else:
+        out = glob_walk("", glob_split(p), 0, out)
+    return glob_sort(out)
+
+# byte-wise insertion sort so glob output is deterministic
+def glob_sort(v: Vec) -> Vec:
+    i = 1
+    while i < v.len:
+        s = vec_get_str(v, i)
+        j = i - 1
+        while j >= 0 and vec_get_str(v, j) > s:
+            vec_set_str(v, j + 1, vec_get_str(v, j))
+            j = j - 1
+        vec_set_str(v, j + 1, s)
+        i = i + 1
+    return v

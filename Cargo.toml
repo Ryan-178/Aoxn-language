@@ -9,7 +9,7 @@ resolver = "2"
 
 [package]
 name = "aoxn"
-version = "0.43.0"
+version = "0.44.0"
 # Two [[bin]] targets live here (aoxn + the aoxn-setup installer stub); a
 # bare `cargo run -- run examples\hello.ax` needs this key or cargo refuses
 # to pick a default binary — the CI smoke test failed on exactly that

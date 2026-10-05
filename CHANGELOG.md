@@ -76,6 +76,99 @@ pure function of the source.
   silently merging them — the stage-1 compiler filters, so merging here would
   make stage-2 accept a program stage-1 rejects. Same status as dict / `None`
   / function pointers / `raise`.
+## [0.44.0] - 2026-10-05
+
+Theme: **the standard library starts.** The first thirteen modules of the
+stdlib roadmap (`docs/stdlib-todo.md` §6, items 1–6 plus the P1
+bisect/heapq pair) land as independent files under `stdlib/`, imported by
+name — none of them touches `stdlib/stdlib.ax`, so the self-host fixed
+point is untouched. Every module ships with a demo (`examples/*_demo.ax`)
+and a Rust-side driver test (`tests/*.rs`); the reference for the whole
+batch is the new `docs/stdlib.md`.
+
+### Added
+
+- **`stdlib/math.ax`** — the CRT trig/exp/pow externs under Python's
+  `math` spellings, and the §0.6 NaN/Inf toolkit the numeric libraries
+  were waiting for: `fdiv` (IEEE-correct guarded division — `/` with a
+  zero denominator is emitted raw and is C UB), `NaN()`/`Inf()`/`NInf()`
+  (the only sanctioned non-finite sources, via `log(-1.0)`/`log(0.0)`),
+  and `is_nan`/`is_inf`/`is_fin`. The capitalised spellings are
+  load-bearing: a lowercase `nan`/`inf`/`copysign` *definition* collides
+  with UCRT symbols at link time (`lld-link: duplicate symbol`), a trap
+  documented in the module header.
+- **`stdlib/time.ax`** — `time_now_ns`/`time_now_us` (QueryPerformanceCounter,
+  with the seconds/remainder split that keeps the i64 conversion from
+  overflowing after ~292 days), `time_unix`/`time_unix_ms`/`time_unix_ft`
+  (`GetSystemTimeAsFileTime`), `time_mono_ms`, `time_sleep`/`time_sleep_ms`.
+- **`stdlib/datetime.ax`** — `DateTime` + Hinnant civil-date conversions
+  with `floor_div` guarding the pre-1970/negative-year branches (pinned:
+  `datetime_from_unix(-1)` is 1969-12-31 23:59:59), `datetime_now` (local,
+  `GetLocalTime`) and `datetime_utcnow`, weekdays (Monday == 0, Python),
+  leap years and month lengths, and a hand-parsed `strftime` subset
+  (`%Y %y %m %d %H %M %S %j %A %a %B %b %%`) — `wcsftime` is
+  locale-dependent and forbidden by the todo.
+- **`stdlib/calendar.ax`** — `cal_monthrange`, `cal_weekday`,
+  `cal_monthcalendar` (6×7 grid, 0 = out of month) and the text-month
+  renderer `cal_month`, Monday-first like Python's default.
+- **`stdlib/pathlib.ax`** — pure path string ops (`path_name/stem/suffix/
+  parent/join/norm/is_abs/with_suffix/with_name/split`), both separators
+  recognized, no filesystem access.
+- **`stdlib/base64.ax`** — RFC 4648 encode (standard + URL-safe) AND the
+  decode direction the SDK codec never had: `b64_decode -> B64{p, n}`
+  (pointer+length, because decoded bytes may contain NUL; `n == -1` marks
+  invalid), liberal in exactly one way (both alphabets everywhere),
+  rejecting orphan characters and trailing garbage.
+- **`stdlib/hashlib.ax`** — SHA-256, SHA-1 and MD5 as pure Aoxn over the
+  v0.38.0 bitwise operators, one-shot (`sha256`/`sha1`/`md5` + `_str` +
+  `_raw`) and incremental (`*_new/_update/_final/_digest`) forms. Pinned
+  by the FIPS 180 / RFC 1321 vectors including the multi-block case.
+  Two uint32-on-i64 rules are documented in the header: mask before any
+  left shift (a 32-bit value `<< 32` overflows i64) and keep everything
+  under 2^32 so `>>` stays logical; the context block reserves **80**
+  schedule words because SHA-1 needs them (64 was a heap-corruption bug
+  caught by the sha1 vector).
+- **`stdlib/hmac.ax`** — RFC 2104 over the `*_raw` one-shots through a
+  **function pointer** (v0.40.0); the one module in the batch marked
+  `selfhost 尚不可编译`. Long keys are hashed first (RFC 4231 case 6,
+  cross-checked against node:crypto); binary keys/messages go through the
+  `(ptr, len)` core.
+- **`stdlib/os.ax`** — the Win32 filesystem core, all `W` APIs with UTF-8 ↔
+  UTF-16 conversion (helpers deliberately duplicated from `net/codec.ax`):
+  `os_mkdir/rmdir/remove/copy/rename`, `os_exists/isdir/isfile/islink`
+  (the INVALID sentinel compares as 4294967295 — the int-return
+  zero-extension trap), `os_getenv/has_env/setenv/unsetenv` (deletion is a
+  NULL value, not the empty string), `os_cwd/chdir`, and `os_listdir`.
+- **`stdlib/glob.ax`** — a backtracking `glob_match` (`*`, `?`, `[a-z]`,
+  `[!a-z]`) and the sorted `glob(pattern) -> Vec` walk over `os_listdir`
+  with Python's dotfile rule; `**` stays unsupported (documented).
+- **`stdlib/json.ax`** — the JSON DOM promoted from `stdlib/net/json.ax`
+  (the OpenAI/Anthropic SDKs import it at the new home; provider-neutral
+  all along), gaining the file-I/O pair: `j_read_file` (err 2 = I/O
+  failure, 1 = parse error, distinguishable via an fopen probe) and
+  `j_write_file`.
+- **`stdlib/bisect.ax`** — `bisect_left/right` (insertion positions),
+  `insort_left/right` (write-back handles), `bisect_find`, plus the `_f`
+  family holding f64 elements in Vec slots through `store_f64`/`load_f64`.
+- **`stdlib/heapq.ax`** — a min-heap over an int `Vec`: `heap_push`,
+  `heap_pop` (result in the `Heap.res` slot), `heap_peek`, `heap_from_vec`,
+  `heap_sorted`.
+- **`docs/stdlib.md`** — the batch's reference: per-module APIs, the
+  Python-parity deltas, and the traps (UCRT symbol collisions, the 80-word
+  schedule, the zero-extended sentinel). `docs/stdlib-todo.md` statuses
+  updated to match.
+
+### Changed
+
+- The stdlib resolution docs now describe the promoted `stdlib/json.ax`;
+  `stdlib/net/codec.ax` keeps `net_b64_encode_*` (it predates base64.ax
+  and stays put). AGENTS.md pointers updated.
+- The "Vec[T] 基座" item resolves as a **slot-view discipline** rather
+  than a new type: f64 through `store_f64`/`load_f64` views, strings via
+  `as_ptr` — the worked examples are the bisect/heapq `_f` families
+  (stdlib-todo §0.3 updated). Generic struct containers remain impossible
+  (no address-of-struct); heterogeneous records still go through the
+  tagged-slab pattern.
 
 ## [0.42.0] - 2026-10-04
 

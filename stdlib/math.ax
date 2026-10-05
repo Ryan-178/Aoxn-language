@@ -1,0 +1,122 @@
+# Aoxn standard library — math (v0.44.0, docs/stdlib-todo.md #28).
+#
+# The float side of the stdlib. `stdlib.ax` already ships sqrt/floor/ceil/
+# abs_f/min_f/max_f/clamp_f/hypot and the integer helpers; this module adds
+# the CRT trigonometry/exponential externs and — the part every numeric
+# library was waiting for — the NaN/Inf toolkit of docs/stdlib-todo.md §0.6:
+# the language has no `inf`/`nan` literals, integer bit patterns cannot be
+# reinterpreted as floats, and float division by zero is emitted raw (C UB),
+# so ALL of it has to come from guarded helpers defined here. numpy/scipy/
+# matplotlib-shaped code should call fdiv instead of `/` and take NaN from
+# NaN(), never from 0.0/0.0.
+#
+# Names follow Python's `math` module (the todo's "rename to Python style"
+# note): sin/cos/tan/exp/log/pow/fmod/degrees/radians/pi/e. Where stdlib.ax
+# already owns a name (sqrt, floor, ceil, hypot, abs_f) it is NOT redefined —
+# `import * from "stdlib/math"` transitively imports stdlib.ax, so those stay
+# reachable under their existing spelling. New zero-arg "constants" follow the
+# no-module-level-bindings rule (`pi()` and `e()` are functions, like the
+# ERR_* codes in stdlib.ax).
+#
+# Plain Aoxn only: no dict/None/fn-ptr/raise, so the self-hosted compiler
+# can compile this file.
+
+import * from "stdlib.ax"
+
+# ---- CRT math (FFI; ucrt provides these, no -l needed) ----
+extern def sin(x: float) -> float
+extern def cos(x: float) -> float
+extern def tan(x: float) -> float
+extern def asin(x: float) -> float
+extern def acos(x: float) -> float
+extern def atan(x: float) -> float
+extern def atan2(y: float, x: float) -> float
+extern def exp(x: float) -> float
+extern def log(x: float) -> float
+extern def log2(x: float) -> float
+extern def log10(x: float) -> float
+extern def pow(x: float, y: float) -> float
+extern def fmod(x: float, y: float) -> float
+extern def trunc(x: float) -> float
+
+# ---- constants (zero-arg functions: no module-level bindings) ----
+
+def pi() -> float:
+    return 3.141592653589793
+
+def e() -> float:
+    return 2.718281828459045
+
+def tau() -> float:
+    return 6.283185307179586
+
+# ---- NaN / Inf synthesis (§0.6 — the ONLY sanctioned sources) ----
+#
+# log(-1.0) returns NaN per C; log(0.0) returns -inf. These three are how
+# every other module and every user program obtains non-finite floats.
+# They are spelled NaN/Inf/NInf in the C text on purpose: a lowercase
+# `nan`/`inf` DEFINITION would collide with the UCRT's own `nan`/`copysign`
+# symbols at link time (the math externs share object files with them).
+
+def NaN() -> float:
+    return log(-1.0)
+
+def Inf() -> float:
+    return -log(0.0)
+
+def NInf() -> float:
+    return log(0.0)
+
+# x is NaN iff it differs from itself (the only self-unequal float)
+def is_nan(x: float) -> bool:
+    return x != x
+
+def is_inf(x: float) -> bool:
+    return x == Inf() or x == NInf()
+
+def is_fin(x: float) -> bool:
+    return not is_nan(x) and not is_inf(x)
+
+# ---- guarded division ----
+
+# fdiv(a, b) is THE division for numeric code: `/` with b == 0.0 is C
+# undefined behaviour (codegen emits the raw operator), fdiv returns the
+# IEEE answer instead — NaN for 0/0, ±inf otherwise (sign of a × sign of b;
+# b's own zero sign is not distinguishable through `==`, see the header).
+def fdiv(a: float, b: float) -> float:
+    if b != 0.0:
+        return a / b
+    if a == 0.0:
+        return NaN()
+    if (a > 0.0 and b > 0.0) or (a < 0.0 and b < 0.0):
+        return Inf()
+    if a > 0.0:
+        return Inf()
+    return NInf()
+
+# ---- Python-style spellings over the externs ----
+
+def degrees(x: float) -> float:
+    return x * 180.0 / pi()
+
+def radians(x: float) -> float:
+    return x * pi() / 180.0
+
+# Python math.copysign: |x| with y's sign. Spelled copysign_f because a
+# bare copysign definition duplicates the UCRT symbol at link time (the
+# same object file that carries the extern math functions defines it).
+def copysign_f(x: float, y: float) -> float:
+    if y < 0.0:
+        return -abs_f(x)
+    return abs_f(x)
+
+# ---- small float helpers the numeric libraries share ----
+
+# linear interpolation; safe at t = 0/1 and for equal endpoints
+def lerp(a: float, b: float, t: float) -> float:
+    return a + (b - a) * t
+
+# map x from [a0, a1] to [b0, b1] through fdiv so degenerate ranges give
+# NaN instead of UB
+def remap(x: float, a0: float, a1: float, b0: float, b1: float) -> float:
+    return b0 + (x - a0) * fdiv(b1 - b0, a1 - a0)

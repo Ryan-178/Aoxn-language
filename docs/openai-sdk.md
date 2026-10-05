@@ -50,7 +50,7 @@ mock server uses).
 | File | What lives there |
 |---|---|
 | `stdlib/net/codec.ax` | base64 (RFC 4648), percent-encoding (RFC 3986), UTF-8 ↔ UTF-16LE — everything WinHTTP and Basic auth need |
-| `stdlib/net/json.ax` | the JSON DOM: 40-byte nodes in one slab, recursive-descent parser, serializer, typed getters with defaults, and a builder (`jb_*`) |
+| `stdlib/json.ax` | the JSON DOM: 40-byte nodes in one slab, recursive-descent parser, serializer, typed getters with defaults, and a builder (`jb_*`) |
 | `stdlib/net/http.ax` | WinHTTP transport (one-shot + streaming), URL split, header assembly, raw-header parsing, retry policy, error names |
 | `stdlib/net/sse.ax` | server-sent-events parser: feed bytes, pull `data:` payloads and `event:` names, `[DONE]` detection, CRLF/LF, comment lines |
 | `stdlib/openai/client.ax` | `OaClient`, OpenAI's headers and User-Agent, the request/retry core, resource functions, response accessors, `OaStream` |

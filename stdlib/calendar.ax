@@ -1,0 +1,101 @@
+# Aoxn standard library — calendar (v0.44.0, docs/stdlib-todo.md #7).
+#
+# Month calendars and weekday queries, built on stdlib/datetime.ax (which is
+# where all the date arithmetic lives). Python's `calendar` defaults to
+# Monday-first weeks; that is kept here (weekday 0 == Monday, as everywhere
+# in the datetime module).
+#
+# Plain Aoxn only (no dict/None/fn-ptr/raise): self-host compilable.
+
+import * from "./datetime.ax"
+
+# weekday of day 1 of the month, and the month's length, as one value
+struct CalRange:
+    wday: int
+    days: int
+
+# (weekday of the 1st, days in month) — Python's calendar.monthrange
+def cal_monthrange(y: int, m: int) -> CalRange:
+    first = DateTime(year=y, month=m, day=1, hour=0, minute=0, second=0)
+    return CalRange(wday=datetime_weekday(first), days=datetime_days_in_month(y, m))
+
+# day-of-week of a date, Monday == 0
+def cal_weekday(y: int, m: int, d: int) -> int:
+    dt = DateTime(year=y, month=m, day=d, hour=0, minute=0, second=0)
+    return datetime_weekday(dt)
+
+def cal_is_leap(y: int) -> bool:
+    return datetime_is_leap(y)
+
+# a 6x7 matrix of day numbers for the month, Monday-first; out-of-month
+# cells are 0 (Python's calendar.monthcalendar)
+def cal_monthcalendar(y: int, m: int) -> VecVec:
+    r = cal_monthrange(y, m)
+    # flatten day numbers into 42 cells, 0 where another month shows
+    cells = vec_new()
+    lead = r.wday
+    i = 0
+    while i < lead:
+        cells = vec_push(cells, 0)
+        i = i + 1
+    d = 1
+    while d <= r.days:
+        cells = vec_push(cells, d)
+        d = d + 1
+    while cells.len < 42:
+        cells = vec_push(cells, 0)
+    weeks = vecvec_new()
+    w = 0
+    while w < 6:
+        row = vec_new()
+        k = 0
+        while k < 7:
+            row = vec_push(row, vec_get(cells, w * 7 + k))
+            k = k + 1
+        weeks = vecvec_push(weeks, row)
+        w = w + 1
+    return weeks
+
+# a text month grid like Python's calendar.month(): a centered
+# "<Month> <Year>" title, the Mo..Su header, and right-aligned day cells
+def cal_month(y: int, m: int) -> string:
+    title = datetime_month_name(m) + " " + str(y)
+    pad = (20 - len(title)) / 2
+    if pad < 0:
+        pad = 0
+    out = ""
+    i = 0
+    while i < pad:
+        out = out + " "
+        i = i + 1
+    out = out + title + "\n"
+    out = out + "Mo Tu We Th Fr Sa Su\n"
+    r = cal_monthrange(y, m)
+    col = 0
+    # leading blanks before day 1 (each cell is two chars, space-separated)
+    i = 0
+    while i < r.wday:
+        if col > 0:
+            out = out + " "
+        out = out + "  "
+        col = col + 1
+        i = i + 1
+    d = 1
+    while d <= r.days:
+        if col > 0:
+            out = out + " "
+        out = out + cal_cell(d)
+        col = col + 1
+        if col == 7:
+            out = out + "\n"
+            col = 0
+        d = d + 1
+    if col != 0:
+        out = out + "\n"
+    return out
+
+# a day cell right-aligned in a two-char column (" 1" .. "31")
+def cal_cell(d: int) -> string:
+    if d < 10:
+        return " " + str(d)
+    return str(d)

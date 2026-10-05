@@ -1,0 +1,17 @@
+# pathlib.ax demo — pure path string operations.
+# Run: cargo run -- run examples\pathlib_demo.ax
+import * from "stdlib/pathlib"
+
+def main() -> int:
+    p = "src/lang/parser.ax"
+    print(path_name(p))                    # parser.ax
+    print(path_stem(p))                    # parser
+    print(path_suffix(p))                  # .ax
+    print(path_parent(p))                  # src/lang
+    print(path_join(path_parent(p), "lexer.ax"))  # src\lang\lexer.ax
+    print(path_norm("src\\lang\\..\\lang\\./parser.ax"))
+    print(path_is_abs(p))                  # false
+    print(path_is_abs("C:\\work\\a.ax"))   # true
+    sp = path_split(p)
+    print(sp.dir + " | " + sp.name)        # src/lang | parser.ax
+    return 0

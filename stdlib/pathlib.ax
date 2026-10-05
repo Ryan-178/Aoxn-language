@@ -1,0 +1,170 @@
+# Aoxn standard library — pathlib (v0.44.0, docs/stdlib-todo.md #2).
+#
+# Path manipulation as PURE STRING OPERATIONS — no filesystem access lives
+# here (that is stdlib/os.ax). Both separators (`/` and `\`) are recognized
+# everywhere, because a Windows path may carry either; results never change
+# what they do not touch. Python-parity names: parent / name / stem / suffix
+# / join, spelled `path_*` (Aoxn's flat namespace).
+#
+# A `Path` struct wrapper adds nothing over the functions (Aoxn structs are
+# plain data and the functions are already chainable), so this module ships
+# the functions only — docs/stdlib-todo.md #2's "os.path 兼容门面" role.
+#
+# Plain Aoxn only (no dict/None/fn-ptr/raise): self-host compilable.
+
+import * from "stdlib.ax"
+
+def SEP_F() -> int:
+    return 47  # '/'
+
+def SEP_B() -> int:
+    return 92  # '\'
+
+def path_is_sep(c: int) -> bool:
+    return c == SEP_F() or c == SEP_B()
+
+# the final component, "" when the path ends in a separator
+def path_name(p: string) -> string:
+    i = len(p) - 1
+    while i >= 0:
+        if path_is_sep(str_get(p, i)):
+            return str_sub(p, i + 1, len(p))
+        i = i - 1
+    return p
+
+# everything before the final component ("" when there is no separator;
+# the separator itself is dropped, like Python's os.path.dirname)
+def path_parent(p: string) -> string:
+    i = len(p) - 1
+    while i >= 0:
+        if path_is_sep(str_get(p, i)):
+            return str_sub(p, 0, i)
+        i = i - 1
+    return ""
+
+# absolute in the Windows sense: drive letter prefix or a leading separator
+def path_is_abs(p: string) -> bool:
+    if len(p) == 0:
+        return False
+    if path_is_sep(str_get(p, 0)):
+        return True
+    # "C:" or "C:\..." — a colon before the first separator
+    i = 0
+    while i < len(p) and i < 3:
+        c = str_get(p, i)
+        if c == 58:
+            return True
+        if path_is_sep(c):
+            return False
+        i = i + 1
+    return False
+
+# join: an absolute (or empty) right side wins, otherwise a separator is
+# inserted when `a` does not already end with one
+def path_join(a: string, b: string) -> string:
+    if len(b) == 0:
+        return a
+    if path_is_abs(b):
+        return b
+    if len(a) == 0:
+        return b
+    if path_is_sep(str_get(a, len(a) - 1)):
+        return a + b
+    return a + "\\" + b
+
+# the suffix WITH its dot (".txt"), or "" when the final component has no
+# extension; a leading dot ("." ".." ".gitignore") is a name, not a suffix
+def path_suffix(p: string) -> string:
+    name = path_name(p)
+    i = len(name) - 1
+    while i >= 0:
+        c = str_get(name, i)
+        if c == 46:
+            if i == 0:
+                return ""
+            return str_sub(name, i, len(name))
+        if path_is_sep(c):
+            return ""
+        i = i - 1
+    return ""
+
+# the final component without its suffix (and without the dot)
+def path_stem(p: string) -> string:
+    name = path_name(p)
+    suf = path_suffix(p)
+    if len(suf) == 0:
+        return name
+    return str_sub(name, 0, len(name) - len(suf))
+
+# the path with its suffix replaced ("" removes it); a name without a
+# suffix gains one
+def path_with_suffix(p: string, suffix: string) -> string:
+    stem = path_stem(p)
+    parent = path_parent(p)
+    if len(parent) == 0:
+        return stem + suffix
+    return parent + "\\" + stem + suffix
+
+# the path with its final component replaced
+def path_with_name(p: string, name: string) -> string:
+    parent = path_parent(p)
+    if len(parent) == 0:
+        return name
+    return parent + "\\" + name
+
+# collapse `//` and `\`, resolve `.` and `..` lexically (no filesystem
+# access, no symlink awareness — `..` after a directory the OS may have
+# aliased is NOT special-cased, which Python's PurePath does either)
+def path_norm(p: string) -> string:
+    # keep the root exactly as given: "\\", UNC "\\\\", or drive "C:"/"C:\"
+    prefix = ""
+    i = 0
+    if path_is_abs(p):
+        if path_is_sep(str_get(p, 0)):
+            if len(p) > 1 and path_is_sep(str_get(p, 1)):
+                prefix = "\\\\"
+                i = 2
+            else:
+                prefix = "\\"
+                i = 1
+        else:
+            prefix = str_sub(p, 0, 2)
+            i = 2
+            if i < len(p) and path_is_sep(str_get(p, i)):
+                prefix = prefix + "\\"
+                i = i + 1
+    # split the rest, drop "." and resolve ".." against a stack of parts
+    parts = vec_new()
+    while i <= len(p):
+        j = i
+        while j < len(p) and not path_is_sep(str_get(p, j)):
+            j = j + 1
+        if j > i:
+            part = str_sub(p, i, j)
+            if part == "..":
+                if parts.len > 0:
+                    parts = vec_pop(parts)
+                elif not path_is_abs(p):
+                    parts = vec_push_str(parts, "..")
+            elif part != ".":
+                parts = vec_push_str(parts, part)
+        i = j + 1
+    out = prefix
+    k = 0
+    while k < parts.len:
+        if len(out) > 0 and not path_is_sep(str_get(out, len(out) - 1)):
+            out = out + "\\"
+        out = out + vec_get_str(parts, k)
+        k = k + 1
+    if len(out) == 0:
+        return "."
+    return out
+
+# (directory, file name) split at the LAST separator — Python's
+# os.path.split; the directory keeps no trailing separator except at root
+struct PathSplit:
+    dir: string
+    name: string
+
+def path_split(p: string) -> PathSplit:
+    return PathSplit(dir=path_parent(p), name=path_name(p))

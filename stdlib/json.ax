@@ -1,5 +1,8 @@
-# Aoxn net layer — JSON (v0.41.0; first shipped as stdlib/openai/json.ax in
-# v0.40.1 — it was provider-neutral all along, and the Anthropic SDK shares it).
+# Aoxn standard library — JSON (promoted to stdlib/json.ax in v0.44.0;
+# first shipped as stdlib/openai/json.ax in v0.40.1, then stdlib/net/json.ax
+# from v0.41.0 — it was provider-neutral all along, and the OpenAI/Anthropic
+# SDKs import this exact file at its new home). The v0.44.0 promotion added
+# the file-I/O pair (j_read_file / j_write_file) at the bottom.
 #
 # Aoxn has no dict, no `None`, no `sizeof`, and no address-of-struct. A general
 # JSON DOM therefore cannot live in a `Vec` of `JVal` structs (Vec moves 8-byte
@@ -33,8 +36,8 @@
 # Feature budget: plain Aoxn only (no dict/None/fn-ptr/raise) so the self-
 # hosted compiler can compile this file too.
 
-import * from "../stdlib.ax"
-import * from "./codec.ax"
+import * from "stdlib.ax"
+import * from "./net/codec.ax"
 
 # ---- kinds ----
 
@@ -930,3 +933,28 @@ def jb_push_raw(dom: JDom, i: int, json_text: string) -> JDom:
         return p.dom
     return jb_push(p.dom, i, p.dom.last)
 
+
+# ============================================================
+# file I/O (the v0.44.0 promotion's addition)
+# ============================================================
+
+def j_readable(path: string) -> bool:
+    f = fopen(path, "rb")
+    if f == 0:
+        return False
+    fclose(f)
+    return True
+
+# parse a whole file. err: 0 = ok, 1 = parse error, 2 = I/O failure
+# (missing/unreadable file — read_file() hands back "" and the parser
+# reports the empty document, so the fopen probe here upgrades the cause;
+# an EMPTY but readable file still reports 1, which is the honest error).
+def j_read_file(path: string) -> JParse:
+    p = j_parse(read_file(path))
+    if p.err == 1 and not j_readable(path):
+        p.err = 2
+    return p
+
+# serialize one DOM node to a file (pretty-free, compact spelling)
+def j_write_file(path: string, dom: JDom, i: int) -> bool:
+    return write_file(path, j_dumps(dom, i))

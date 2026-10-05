@@ -1,0 +1,306 @@
+# Aoxn standard library — os (v0.44.0, docs/stdlib-todo.md #1).
+#
+# The Win32 core: directories, file operations, environment, working
+# directory, and directory listing (the traversal primitive stdlib/glob.ax
+# builds on). EVERY path crosses a `W` API, so every path is converted
+# UTF-8 -> UTF-16LE on the way in and back on the way out — non-ASCII paths
+# must work, which rules out the narrow CRT calls the self-hosted loader
+# still uses (its known limitation, AGENTS.md).
+#
+# The UTF-16 helpers are deliberately DUPLICATED from stdlib/net/codec.ax
+# (renamed os_*): codec did the same to stdlib/ui.ax, and a filesystem
+# module should not make programs pull the network layer. Keep the copies
+# in sync if you ever touch them.
+#
+# kernel32 is linked through the CRT: no -l flag. BOOL returns are normalised
+# to bool; GetFileAttributesW returns a DWORD, which arrives ZERO-EXTENDED in
+# i64, so the INVALID sentinel is compared as 4294967295 (not -1) — the same
+# zero-extension trap the web sockets module hit.
+#
+# Plain Aoxn only (no dict/None/fn-ptr/raise): self-host compilable.
+
+import * from "stdlib.ax"
+
+# ---- Win32 externs (kernel32) ----
+
+extern def CreateDirectoryW(path: int, sa: int) -> int
+extern def RemoveDirectoryW(path: int) -> int
+extern def DeleteFileW(path: int) -> int
+extern def CopyFileW(src: int, dst: int, fail_if_exists: int) -> int
+extern def MoveFileW(src: int, dst: int) -> int
+extern def GetFileAttributesW(path: int) -> int
+extern def GetEnvironmentVariableW(name: int, buf: int, size: int) -> int
+extern def SetEnvironmentVariableW(name: int, value: int) -> int
+extern def GetCurrentDirectoryW(n: int, buf: int) -> int
+extern def SetCurrentDirectoryW(path: int) -> int
+extern def FindFirstFileW(pattern: int, data: int) -> int
+extern def FindNextFileW(h: int, data: int) -> int
+extern def FindClose(h: int) -> int
+extern def GetLastError() -> int
+
+def OS_ENVVAR_NOT_FOUND() -> int:
+    return 203       # ERROR_ENVVAR_NOT_FOUND
+
+# ---- attribute bits / sentinels (decimal, repo discipline) ----
+
+def OS_ATTR_DIRECTORY() -> int:
+    return 16         # FILE_ATTRIBUTE_DIRECTORY
+
+def OS_ATTR_REPARSE() -> int:
+    return 1024       # FILE_ATTRIBUTE_REPARSE_POINT (junction/symlink)
+
+def OS_ATTR_INVALID() -> int:
+    return 4294967295 # INVALID_FILE_ATTRIBUTES, zero-extended
+
+def OS_FIND_DATA() -> int:
+    return 592        # sizeof(WIN32_FIND_DATAW)
+
+def OS_FD_NAME() -> int:
+    return 44         # offset of cFileName (WCHAR[260]) in FIND_DATA
+
+# ---- UTF-8 <-> UTF-16LE (kept in sync with stdlib/net/codec.ax) ----
+
+# write one codepoint as UTF-8 at p, return the byte count
+def os_cp_utf8(cp: int, p: int) -> int:
+    if cp < 128:
+        store_u8(p, 0, cp)
+        return 1
+    if cp < 2048:
+        store_u8(p, 0, 192 + cp / 64)
+        store_u8(p, 1, 128 + cp % 64)
+        return 2
+    if cp < 65536:
+        store_u8(p, 0, 224 + cp / 4096)
+        store_u8(p, 1, 128 + (cp / 64) % 64)
+        store_u8(p, 2, 128 + cp % 64)
+        return 3
+    store_u8(p, 0, 240 + cp / 262144)
+    store_u8(p, 1, 128 + (cp / 4096) % 64)
+    store_u8(p, 2, 128 + (cp / 64) % 64)
+    store_u8(p, 3, 128 + cp % 64)
+    return 4
+
+# write s as UTF-16LE at p; return BYTE count
+def os_utf16_write(s: string, p: int) -> int:
+    i = 0
+    n = 0
+    while i < len(s):
+        b = load_u8(s, i)
+        if b < 128:
+            cp = b
+            i = i + 1
+        elif b < 224:
+            cp = (b % 32) * 64 + load_u8(s, i + 1) % 64
+            i = i + 2
+        elif b < 240:
+            cp = (b % 16) * 4096 + (load_u8(s, i + 1) % 64) * 64 + load_u8(s, i + 2) % 64
+            i = i + 3
+        else:
+            cp = (b % 8) * 262144 + (load_u8(s, i + 1) % 64) * 4096 + (load_u8(s, i + 2) % 64) * 64 + load_u8(s, i + 3) % 64
+            i = i + 4
+        if cp >= 65536:
+            v = cp - 65536
+            hi = v / 1024 + 55296
+            lo = v % 1024 + 56320
+            store_u8(p, n, hi % 256)
+            store_u8(p, n + 1, hi / 256)
+            store_u8(p, n + 2, lo % 256)
+            store_u8(p, n + 3, lo / 256)
+            n = n + 4
+        else:
+            store_u8(p, n, cp % 256)
+            store_u8(p, n + 1, cp / 256)
+            n = n + 2
+    return n
+
+# one-shot NUL-terminated UTF-16LE buffer (caller frees)
+def os_to_wide(s: string) -> int:
+    p = malloc(len(s) * 2 + 2)
+    n = os_utf16_write(s, p)
+    store_u8(p, n, 0)
+    store_u8(p, n + 1, 0)
+    return p
+
+# NUL-terminated UTF-16LE buffer -> fresh UTF-8 string
+def os_from_wide(p: int) -> string:
+    n = 0
+    more = True
+    while more and n < 32767:
+        u = load_u8(p, n * 2) + load_u8(p, n * 2 + 1) * 256
+        if u == 0:
+            more = False
+        else:
+            n = n + 1
+    out = malloc(n * 4 + 1)
+    m = 0
+    i = 0
+    while i < n:
+        u = load_u8(p, i * 2) + load_u8(p, i * 2 + 1) * 256
+        cp = u
+        if u >= 55296 and u < 56320 and i + 1 < n:
+            u2 = load_u8(p, (i + 1) * 2) + load_u8(p, (i + 1) * 2 + 1) * 256
+            if u2 >= 56320 and u2 < 57344:
+                cp = 65536 + (u - 55296) * 1024 + (u2 - 56320)
+                i = i + 1
+        m = m + os_cp_utf8(cp, out + m)
+        i = i + 1
+    store_u8(out, m, 0)
+    return as_string(out)
+
+# ---- directories ----
+
+def os_mkdir(path: string) -> bool:
+    w = os_to_wide(path)
+    ok = CreateDirectoryW(w, 0)
+    free(w)
+    return ok != 0
+
+def os_rmdir(path: string) -> bool:
+    w = os_to_wide(path)
+    ok = RemoveDirectoryW(w)
+    free(w)
+    return ok != 0
+
+# ---- files ----
+
+def os_remove(path: string) -> bool:
+    w = os_to_wide(path)
+    ok = DeleteFileW(w)
+    free(w)
+    return ok != 0
+
+# fail_if_exists mirrors the Win32 default (false = overwrite silently)
+def os_copy(src: string, dst: string, fail_if_exists: bool) -> bool:
+    s = os_to_wide(src)
+    d = os_to_wide(dst)
+    flag = 0
+    if fail_if_exists:
+        flag = 1
+    ok = CopyFileW(s, d, flag)
+    free(s)
+    free(d)
+    return ok != 0
+
+def os_rename(src: string, dst: string) -> bool:
+    s = os_to_wide(src)
+    d = os_to_wide(dst)
+    ok = MoveFileW(s, d)
+    free(s)
+    free(d)
+    return ok != 0
+
+# ---- attributes ----
+
+# raw attribute DWORD, or OS_ATTR_INVALID when the path does not exist
+def os_attributes(path: string) -> int:
+    w = os_to_wide(path)
+    a = GetFileAttributesW(w)
+    free(w)
+    return a
+
+def os_exists(path: string) -> bool:
+    return os_attributes(path) != OS_ATTR_INVALID()
+
+def os_isdir(path: string) -> bool:
+    a = os_attributes(path)
+    if a == OS_ATTR_INVALID():
+        return False
+    return (a & OS_ATTR_DIRECTORY()) != 0
+
+def os_isfile(path: string) -> bool:
+    return os_exists(path) and not os_isdir(path)
+
+# reparse points (symlinks, junctions) — callers that recurse MUST check
+# this before descending (docs/stdlib-todo.md #3's cycle rule)
+def os_islink(path: string) -> bool:
+    a = os_attributes(path)
+    if a == OS_ATTR_INVALID():
+        return False
+    return (a & OS_ATTR_REPARSE()) != 0
+
+# ---- environment ----
+
+def os_getenv(name: string) -> string:
+    w = os_to_wide(name)
+    buf = malloc(4096)
+    n = GetEnvironmentVariableW(w, buf, 2048)
+    s = ""
+    if n > 0 and n < 2048:
+        store_u8(buf, n * 2, 0)
+        store_u8(buf, n * 2 + 1, 0)
+        s = os_from_wide(buf)
+    free(w)
+    free(buf)
+    return s
+
+# a variable that exists with an empty value is NOT the same as one that is
+# unset — GetEnvironmentVariableW returns 0 for both, so the distinction
+# comes from GetLastError (ERROR_ENVVAR_NOT_FOUND == 203)
+def os_has_env(name: string) -> bool:
+    w = os_to_wide(name)
+    buf = malloc(4)
+    GetEnvironmentVariableW(w, buf, 2)
+    err = GetLastError()
+    free(w)
+    free(buf)
+    return err != OS_ENVVAR_NOT_FOUND()
+
+def os_setenv(name: string, value: string) -> bool:
+    w = os_to_wide(name)
+    v = os_to_wide(value)
+    ok = SetEnvironmentVariableW(w, v)
+    free(w)
+    free(v)
+    return ok != 0
+
+# deletion is SetEnvironmentVariableW with a NULL value — setting the EMPTY
+# string would create an empty variable, not remove it
+def os_unsetenv(name: string) -> bool:
+    w = os_to_wide(name)
+    ok = SetEnvironmentVariableW(w, 0)
+    free(w)
+    return ok != 0
+
+# ---- working directory ----
+
+def os_cwd() -> string:
+    n = GetCurrentDirectoryW(0, 0)
+    if n <= 0:
+        return ""
+    buf = malloc(n * 2 + 2)
+    GetCurrentDirectoryW(n, buf)
+    s = os_from_wide(buf)
+    free(buf)
+    return s
+
+def os_chdir(path: string) -> bool:
+    w = os_to_wide(path)
+    ok = SetCurrentDirectoryW(w)
+    free(w)
+    return ok != 0
+
+# ---- directory listing ----
+
+# the names in a directory, "." and ".." excluded, discovery order (like
+# os.listdir). Returns an empty Vec when the directory cannot be opened.
+# Caller frees nothing (name strings leak by the language's design).
+def os_listdir(path: string) -> Vec:
+    out = vec_new()
+    pattern = path + "\\*"
+    w = os_to_wide(pattern)
+    data = malloc(OS_FIND_DATA())
+    h = FindFirstFileW(w, data)
+    if h == -1:
+        free(w)
+        free(data)
+        return out
+    more = True
+    while more:
+        name = os_from_wide(data + OS_FD_NAME())
+        if name != "." and name != "..":
+            out = vec_push_str(out, name)
+        more = FindNextFileW(h, data) != 0
+    FindClose(h)
+    free(w)
+    free(data)
+    return out

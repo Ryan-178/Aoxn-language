@@ -840,6 +840,9 @@ Ordered by how much they cost the language's Python parity.
    missing `inf`/`nan` literals). **`docs/language-gaps.md` is the companion**:
    it maps every gap in this roadmap to the libraries it blocks, the files a
    change would touch, its cost, and a ranked order for closing them.
+   **The first 13 modules landed in v0.44.0** (math, time, datetime, calendar,
+   pathlib, base64, hashlib, hmac, os, glob, json — promoted from `net/` —,
+   bisect, heapq; `docs/stdlib.md` is the reference).
 8. Top-level statements as an implicit `main` (module-script mode).
 9. Larger Python features, each of which is a real language design (not just
    syntax): `with`, generators and `yield`, closures and decorators, classes,

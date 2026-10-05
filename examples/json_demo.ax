@@ -1,0 +1,20 @@
+# json.ax demo — parse, build, serialize, and the v0.43.0 file I/O pair.
+# Run: cargo run -- run examples\json_demo.ax
+import * from "stdlib/json"
+import * from "stdlib/os"
+
+def main() -> int:
+    p = j_parse("{\"name\":\"aoxn\",\"year\":2026,\"ok\":true,\"tags\":[\"c\",\"stdlib\"]}")
+    print(str(p.err))
+    root = p.dom.last
+    print(j_get_str(p.dom, root, "name", "?"))
+    print(str(j_get_int(p.dom, root, "year", 0)))
+    tags = j_obj_get(p.dom, root, "tags")
+    print(str(j_len(p.dom, tags)))
+    # persist to a file and read it back
+    if j_write_file("json_demo_tmp.json", p.dom, root):
+        back = j_read_file("json_demo_tmp.json")
+        print(str(back.err))
+        print(j_dumps(back.dom, back.dom.last))
+    os_remove("json_demo_tmp.json")
+    return 0

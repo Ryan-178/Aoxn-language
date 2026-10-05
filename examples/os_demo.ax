@@ -1,0 +1,39 @@
+# os.ax + glob.ax demo — directories, environment, working dir, patterns.
+# Run: cargo run -- run examples\os_demo.ax
+import * from "stdlib/os"
+import * from "stdlib/glob"
+
+def main() -> int:
+    # a throwaway directory, exercised end to end
+    os_mkdir("os_demo_tmp")
+    write_file("os_demo_tmp/one.txt", "1")
+    write_file("os_demo_tmp/two.txt", "2")
+    write_file("os_demo_tmp/skip.log", "x")
+    print(os_isdir("os_demo_tmp"))          # true
+    names = os_listdir("os_demo_tmp")
+    i = 0
+    while i < names.len:
+        print("  " + vec_get_str(names, i))
+        i = i + 1
+    # glob patterns over it (results sorted, dotfiles stay hidden from `*`)
+    hits = glob("os_demo_tmp/*.txt")
+    i = 0
+    while i < hits.len:
+        print("  hit " + vec_get_str(hits, i))
+        i = i + 1
+    # copy / rename / remove
+    os_copy("os_demo_tmp/one.txt", "os_demo_tmp/copy.txt", True)
+    os_rename("os_demo_tmp/copy.txt", "os_demo_tmp/moved.txt")
+    print(os_isfile("os_demo_tmp/moved.txt"))  # true
+    os_remove("os_demo_tmp/moved.txt")
+    # environment and working directory
+    os_setenv("OS_DEMO", "hello")
+    print(os_getenv("OS_DEMO"))             # hello
+    os_unsetenv("OS_DEMO")
+    print(os_cwd())
+    # cleanup
+    os_remove("os_demo_tmp/one.txt")
+    os_remove("os_demo_tmp/two.txt")
+    os_remove("os_demo_tmp/skip.log")
+    os_rmdir("os_demo_tmp")
+    return 0

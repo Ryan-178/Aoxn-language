@@ -1,0 +1,99 @@
+# Aoxn standard library — heapq (v0.44.0, docs/stdlib-todo.md #15).
+#
+# A binary min-heap over a Vec of ints, Python's heapq shape: heap_push /
+# heap_pop / heap_peek / heapify / heap_from_vec. Min-first (the smallest
+# element pops first), exactly like Python.
+#
+# The value-semantics shape: a Heap carries the Vec handle PLUS a `res`
+# slot, because heap_pop must return TWO things (the updated handle and the
+# popped element) and Aoxn functions return one value. Callers follow the
+# write-back discipline — `h = heap_pop(h)`; the result then reads h.res.
+# heap_push grows the buffer (realloc), so its handle comes back too.
+#
+# int elements only (floats would need a second _f family — bisect shows
+# the pattern; string slots would compare pointers, not bytes).
+#
+# Plain Aoxn only (no dict/None/fn-ptr/raise): self-host compilable.
+
+import * from "stdlib.ax"
+
+struct Heap:
+    v: Vec
+    res: int
+
+def heap_new() -> Heap:
+    return Heap(v=vec_new(), res=0)
+
+def heap_len(h: Heap) -> int:
+    return h.v.len
+
+def heap_peek(h: Heap) -> int:
+    return vec_get(h.v, 0)
+
+def heap_swap(v: Vec, i: int, j: int):
+    t = vec_get(v, i)
+    vec_set(v, i, vec_get(v, j))
+    vec_set(v, j, t)
+
+def heap_sift_up(v: Vec, i: int) -> Vec:
+    while i > 0:
+        parent = (i - 1) / 2
+        if vec_get(v, parent) <= vec_get(v, i):
+            return v
+        heap_swap(v, parent, i)
+        i = parent
+    return v
+
+def heap_sift_down(v: Vec, i: int) -> Vec:
+    n = v.len
+    more = True
+    while more:
+        l = 2 * i + 1
+        r = l + 1
+        smallest = i
+        if l < n:
+            if vec_get(v, l) < vec_get(v, smallest):
+                smallest = l
+        if r < n:
+            if vec_get(v, r) < vec_get(v, smallest):
+                smallest = r
+        if smallest == i:
+            more = False
+        else:
+            heap_swap(v, i, smallest)
+            i = smallest
+    return v
+
+# push x; returns the fresh Heap (the buffer may have reallocated)
+def heap_push(h: Heap, x: int) -> Heap:
+    h.v = vec_push(h.v, x)
+    h.v = heap_sift_up(h.v, h.v.len - 1)
+    return h
+
+# pop the smallest; the value lands in h.res, the handle in the return
+def heap_pop(h: Heap) -> Heap:
+    v = h.v
+    h.res = vec_get(v, 0)
+    last = vec_get(v, v.len - 1)
+    v = Vec(data=v.data, len=v.len - 1, cap=v.cap)
+    if v.len > 0:
+        vec_set(v, 0, last)
+        v = heap_sift_down(v, 0)
+    h.v = v
+    return h
+
+# build the heap in place from whatever order v is in
+def heap_from_vec(v: Vec) -> Heap:
+    i = v.len / 2 - 1
+    while i >= 0:
+        v = heap_sift_down(v, i)
+        i = i - 1
+    return Heap(v=v, res=0)
+
+# drain h into an ascending Vec (the heap ends up empty; caller owns both)
+def heap_sorted(h: Heap) -> Vec:
+    out = vec_new()
+    while h.v.len > 0:
+        h = heap_pop(h)
+        out = vec_push(out, h.res)
+    return out

@@ -8,7 +8,7 @@
 # A tool is {name, description, input_schema} where input_schema is a JSON
 # Schema. Writing one as a string literal means hand-escaping every
 # description inside it, so the schema builder below assembles one field at
-# a time and lets net/json.ax do the escaping. `an_tool_raw` is the escape
+# a time and lets the JSON module do the escaping. `an_tool_raw` is the escape
 # hatch for a schema you would rather paste verbatim.
 #
 #   tools = vec_new()
@@ -23,7 +23,7 @@
 
 import * from "../stdlib.ax"
 import * from "./blocks.ax"
-import * from "../net/json.ax"
+import * from "../json.ax"
 
 # a string Vec from literals — the shape every "list of names" argument here
 # wants, spelled once so callers do not hand-roll the vec_new dance

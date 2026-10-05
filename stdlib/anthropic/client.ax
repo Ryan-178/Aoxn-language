@@ -36,7 +36,7 @@
 
 import * from "../stdlib.ax"
 import * from "../net/codec.ax"
-import * from "../net/json.ax"
+import * from "../json.ax"
 import * from "../net/http.ax"
 import * from "../net/sse.ax"
 import * from "./blocks.ax"

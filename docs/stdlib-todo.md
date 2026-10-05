@@ -52,6 +52,12 @@ dict / `None` / fn-ptr / `raise` 在 selfhost 镜像里尚未覆盖
 
 **P0 必须先做 `Vec[T]`**，否则 `collections` 整个落不了地。
 
+**v0.44.0 更新**：以**槽位视图纪律**解决，而非新容器类型——`Vec` 槽就是
+8 字节：int/bool 原生，f64 走 `store_f64`/`load_f64` 视图（`stdlib/bisect.ax`
+的 `_f` 族是成例），string 走 `as_ptr`（`vec_push_str`/`vec_get_str`）。
+泛型**结构体**容器仍不可能（无 struct 取址/无 sizeof），异构记录继续走
+tagged-slab（`stdlib/json.ax`）。`collections`/`itertools`（P2）可以在此之上动工了。
+
 ### 0.4 extern 只能传 int/f64/string/bool，且是定长
 
 - 不能按值传结构体 → 想接 Win32 的 `SYSTEMTIME`、`WIN32_FIND_DATAA` 这类
@@ -69,7 +75,7 @@ v0.40.0 的唯一联合形式是 `T | None`，且 `dict[V]` 的**值类型只有
 被这条直接判死的：`pandas` 的 DataFrame（§5 #3）、所有 ORM 的行对象
 （§5 #12/#14）、`numpy` 的运行期 dtype 分发（§5 #2）。
 
-**已有的正确范式就在仓库里**：`stdlib/net/json.ax` 的 JSON DOM 是一个
+**已有的正确范式就在仓库里**：`stdlib/json.ax`（v0.44.0 自 `net/` 提升）的 JSON DOM 是一个
 **40 字节带 tag 的 slab**（kind / i64 / f64 / ptrA / ptrB），用它绕开了「JSON
 值可以是任意类型」这个问题。凡是要做动态值的库（Variant、DataFrame、ORM 行），
 **照抄这个 tagged-slab 设计**，不要试图发明别的。
@@ -97,8 +103,10 @@ v0.40.0 的唯一联合形式是 `T | None`，且 `dict[V]` 的**值类型只有
 
 `numpy` / `scipy` / `matplotlib` 这三个库**全部**踩在这条上，它们的每一个
 公式（归一化、插值、积分、缩放坐标轴）都得考虑除零与 NaN 传播。
-建议在 `stdlib/math.ax` 里就把 `fdiv` / `is_nan` / `is_inf` 定下来，别让
-每个库各写一遍。
+**已闭合（v0.44.0）**：`stdlib/math.ax` 提供 `fdiv` / `is_nan` / `is_inf` /
+`is_fin` 与 `NaN()` / `Inf()` / `NInf()`（经 `log(-1)`/`log(0)` 合成）。注意
+小写 `nan`/`inf`/`copysign` 的**定义**会与 UCRT 链接符号冲突（数学 extern
+与其共享对象文件），大写/带后缀拼写是有意的。
 
 ### 0.7 断言有了，运行器还没有 —— `unittest` / `pytest` 差一半
 
@@ -148,24 +156,24 @@ v0.42.0 补上了 `assert(cond[, message])`：失败时打印
 
 | # | 模块 | 批次 | 可行性 | 备注 |
 |---|---|---|---|---|
-| 1 | `os` | P0/P1 | ✅ | 底座是 Win32：`CreateDirectoryW`、`RemoveDirectoryW`、`GetEnvironmentVariableW`、`SetEnvironmentVariableW`、`GetFileAttributesW`、`CopyFileW`、`MoveFileW`。遍历/时间戳推迟到 P1（见 `glob`）。所有路径走 **宽字符**（`W` 版本），非 ASCII 路径必须支持。 |
-| 2 | `pathlib` | P0 | ✅ | `struct Path{parts}` + 纯字符串运算（`/ \` 分割、`join`、`suffix`、`stem`、`parent`、`with_suffix`…）。**推荐作为日常写法**，`os.path` 只做兼容门面。 |
+| 1 | `os` | P0/P1 | ✅ **已落地 v0.44.0（核心）** | 底座是 Win32：`CreateDirectoryW`、`RemoveDirectoryW`、`GetEnvironmentVariableW`、`SetEnvironmentVariableW`、`GetFileAttributesW`、`CopyFileW`、`MoveFileW`。遍历（`os_listdir`）已随 v0.44.0 落地；文件时间戳仍待 P1（见 `glob`）。所有路径走 **宽字符**（`W` 版本），非 ASCII 路径必须支持。 |
+| 2 | `pathlib` | P0 | ✅ **已落地 v0.44.0** | 纯字符串运算（`path_*` 函数族，未做 `Path` struct 包装）（`/ \` 分割、`join`、`suffix`、`stem`、`parent`、`with_suffix`…）。**推荐作为日常写法**，`os.path` 只做兼容门面。 |
 | 3 | `shutil` | P1 | ✅ | 递归拷贝/删除用 `FindFirstFileW` 递归 + `CopyFileW`。**必须防目录穿越与符号链接环**（用 `FILE_ATTRIBUTE_REPARSE_POINT` 判环）。 |
-| 4 | `glob` | P0 | ✅ | 建立在 `FindFirstFileW` 上，`*`/`?` 匹配自己写（不用 Win32 的 `FindFirstFile` 通配，它自己就是通配）。`[a-z]` 字符类要写。 |
+| 4 | `glob` | P0 | ✅ **已落地 v0.44.0** | 建立在 `FindFirstFileW` 上，`*`/`?` 匹配自己写（不用 Win32 的 `FindFirstFile` 通配，它自己就是通配）。`[a-z]` 字符类要写。v0.44.0 落地：matcher + `glob()` 遍历（排序输出、dotfile 规则）；`**` 明确不支持。 |
 
 ### 2. 时间、日期
 
 | # | 模块 | 批次 | 可行性 | 备注 |
 |---|---|---|---|---|
-| 5 | `time` | P0 | ✅ | `QueryPerformanceCounter`（**注意：`timespec_get` 在 Windows 上不链接**，AGENTS.md 已记）+ `GetSystemTimeAsFileTime` / `GetTickCount64`。`sleep` → `Sleep`（毫秒，Python 是秒，要自己换算）。 |
-| 6 | `datetime` | P0 | ✅ | 纯整数数学：儒略日/民用日历互转、闰年、`strftime` 的 `%Y-%m-%d %H:%M:%S` 子集。**格式串自己解析**，不要用 `wcsftime`（走 CRT 路径且依赖 locale）。 |
-| 7 | `calendar` | P0 | ✅ | 月历网格、日序数、`weekday`/`monthrange`。直接建在 `datetime` 上。 |
+| 5 | `time` | P0 | ✅ **已落地 v0.44.0** | `QueryPerformanceCounter`（**注意：`timespec_get` 在 Windows 上不链接**，AGENTS.md 已记）+ `GetSystemTimeAsFileTime` / `GetTickCount64`。`sleep` → `Sleep`（毫秒，Python 是秒，要自己换算）。 |
+| 6 | `datetime` | P0 | ✅ **已落地 v0.44.0** | 纯整数数学：儒略日/民用日历互转、闰年、`strftime` 的 `%Y-%m-%d %H:%M:%S` 子集。**格式串自己解析**，不要用 `wcsftime`（走 CRT 路径且依赖 locale）。 |
+| 7 | `calendar` | P0 | ✅ **已落地 v0.44.0** | 月历网格、日序数、`weekday`/`monthrange`。直接建在 `datetime` 上。 |
 
 ### 3. 数据序列化 / 文本解析
 
 | # | 模块 | 批次 | 可行性 | 备注 |
 |---|---|---|---|---|
-| 8 | `json` | P1 | ✅ **已有** | `stdlib/net/json.ax` 已经是一个完整 JSON DOM（40 字节 slab、parse/dumps、往返测试都过了）。**P1 的工作是把它提升为 `stdlib/json.ax` 独立模块 + 补文件 I/O**，不是从零写。 |
+| 8 | `json` | P1 | ✅ **已提升 v0.44.0** | `stdlib/json.ax`（自 `stdlib/net/json.ax` 提升，SDK 同步改 import）+ 补上 `j_read_file`/`j_write_file`（err 2 = I/O 失败，1 = 解析错误）。 |
 | 9 | `csv` | P1 | ✅ | RFC 4180：引号转义、内嵌换行、`\r\n`。**没有 `\r` 字符串转义**（AGENTS.md：只有 `\n \t \\ \"`），CRLF 要用 `store_u8` 写字节 13。 |
 | 10 | `pickle` | P3 | ⛔ **无反射** | 语言没有「遍历一个值的类型/字段」。可行替代是**显式注册**：程序自己声明要序列化的字段清单，`pickle_dump(recs)`。这样能往返，但和 Python pickle 格式不兼容 —— 若目标是「读 `.pkl` 文件」，**直接不做**。 |
 | 11 | `re` | P1 | ⚠️ 大工程 | 回溯匹配器（支持 `* + ? \| () [] {m,n} .`、字符类、非贪婪、锚点）+ 一个手写 DFA 编译步骤会太大。**先只做回溯版**，用 `Vec` 存回溯栈（两个 int 栈：位置、备选点）。预计 2–4k 行。锚定建议：跟一个「HTML/XML 标记提取」的真实用例，避免做成正则引擎而没人用。 |
@@ -174,10 +182,10 @@ v0.42.0 补上了 `assert(cond[, message])`：失败时打印
 
 | # | 模块 | 批次 | 可行性 | 备注 |
 |---|---|---|---|---|
-| 12 | `collections` | P2 | ⚠️ 依赖 P0 `Vec[T]` | `deque`（环形缓冲）、`defaultdict`、`Counter`、`OrderedDict`。`dict[V]` 是**堆句柄**（v0.40.0），复制句柄=共享同一个 dict。**插入序底层已经有了**（`for k in d` 按插入序走 key 数组，`codegen_c.rs:1361`），所以 `OrderedDict` 的真正成本是**查找是 O(n) 线性扫描**（`ax_dict_find_T`，codegen_c.rs:789）——不是保序，是规模。超过几百条就要考虑换结构。 |
+| 12 | `collections` | P2 | ⚠️ 依赖 P0 `Vec[T]` | `deque`（环形缓冲）、`defaultdict`、`Counter`、`OrderedDict`。`dict[V]` 是**堆句柄**（v0.40.0），复制句柄=共享同一个 dict。**插入序底层已经有了**（`for k in d` 按插入序走 key 数组，`codegen_c.rs:1361`），所以 `OrderedDict` 的真正成本是**查找是 O(n) 线性扫描**（`ax_dict_find_T`，codegen_c.rs:789）——不是保序，是规模。超过几百条就要考虑换结构。v0.44.0 起 §0.3 的 slot 视图基座已备。 |
 | 13 | `itertools` | P2 | ⚠️ **没有 `yield`** | 惰性迭代器做不了（`yield` 在 spec roadmap 第 9 条）。**形态改成"批量返回数组"**：`chain(list, list) -> Vec[T]`、`permutations(n) -> Vec[Perm]`、`product(a, b) -> Vec[Tuple]`。无限迭代器（`count`/`cycle`）改为「带 `take(n)` 的生成函数」。**这个降级要在模块头注释里写明**。 |
-| 14 | `bisect` | P1 | ✅ | 便宜。`bisect_left/right` 对有序 `Vec[T]`（**注意：泛型按长度单态化，长度是类型的一部分** → 变长容器要用堆容器）。 |
-| 15 | `heapq` | P1 | ✅ | 标准二叉堆，`heap_push`/`heap_pop`/`heapify`。和 `bisect` 一起做。 |
+| 14 | `bisect` | P1 | ✅ **已落地 v0.44.0** | 便宜。`bisect_left/right` 对有序 `Vec[T]`（**注意：泛型按长度单态化，长度是类型的一部分** → 变长容器要用堆容器）。 |
+| 15 | `heapq` | P1 | ✅ **已落地 v0.44.0** | 标准二叉堆，`heap_push`/`heap_pop`/`heapify`。和 `bisect` 一起做。 |
 
 ### 5. 网络、请求
 
@@ -198,9 +206,9 @@ v0.42.0 补上了 `assert(cond[, message])`：失败时打印
 
 | # | 模块 | 批次 | 可行性 | 备注 |
 |---|---|---|---|---|
-| 21 | `base64` | P0 | ✅ **半有** | `stdlib/net/codec.ax` 有 `net_b64_encode_str`（**没有 decode**）。P0：抽出通用 encode + **补 decode**（`+`/`/` 变体、padding 校验）+ 标准/URL-safe 两套 alphabet。 |
-| 22 | `hashlib` | P0 | ✅ | SHA-256 在 TLS/HTTP2 工作里已经用位运算跑过（v0.38.0 加 `&\|^~<<>>` 就是为此）。补 SHA-1 / MD5，以及 `IncrementalHash` 式分块喂入。 |
-| 23 | `hmac` | P0 | ✅ | 建在 22 上，标准两趟 HMAC。 |
+| 21 | `base64` | P0 | ✅ **已落地 v0.44.0** | encode（标准+URL-safe）+ decode（`B64{p,n}`，两套 alphabet 通用、orphan 拒收）；codec 的 `net_b64_*` 原地保留。 |
+| 22 | `hashlib` | P0 | ✅ **已落地 v0.44.0** | SHA-256 在 TLS/HTTP2 工作里已经用位运算跑过（v0.38.0 加 `&\|^~<<>>` 就是为此）。v0.44.0 已补 SHA-1 / MD5 与增量上下文（`*_new/_update/_final`），全部对拍已知向量。 |
+| 23 | `hmac` | P0 | ✅ **已落地 v0.44.0** | 建在 22 上，标准两趟 HMAC；经 fn-ptr 单实现驱动（`selfhost 尚不可编译`）。 |
 
 ### 8. 命令行、工具
 
@@ -215,7 +223,7 @@ v0.42.0 补上了 `assert(cond[, message])`：失败时打印
 
 | # | 模块 | 批次 | 可行性 | 备注 |
 |---|---|---|---|---|
-| 28 | `math` | P0 | ✅ | `stdlib.ax` 已有 `sqrt/floor/ceil/abs/min/max/clamp/gcd/lcm/isqrt/is_prime/hypot`。补 `sin/cos/exp/log/log2/pow/fmod/trunc`（FFI）与 `pi/e` 常量。**顺手把名字改成 Python 风格**（`abs_i` → `iabs` 之类会破坏兼容，建议**加别名**不改旧名）。 |
+| 28 | `math` | P0 | ✅ **已落地 v0.44.0** | `stdlib.ax` 已有 `sqrt/floor/ceil/abs/min/max/clamp/gcd/lcm/isqrt/is_prime/hypot`。v0.44.0 已补（FFI + `pi()/e()`，Python 风格名字），并内置 §0.6 工具箱（小写 `nan`/`inf`/`copysign` 定义撞 UCRT 链接符号，故 `NaN()/Inf()/copysign_f`）。 |
 | 29 | `random` | P1 | ✅ | **不要用 `rand()`**：MSVC 的 `rand()` 实现固定，同一个种子在任何机器上给同一序列。要跨机器可复现就自己实现 **PCG32 / xoshiro**，外部熵从 `BCryptGenRandom` 或 `SystemFunction036` 取。 |
 | 30 | `typing` | P3 | ⚠️ 多数是 no-op | Aoxn **已经是静态类型 + 单态化**，`typing` 的运行时部分（`TypeVar`/`Generic`）在这里没有对应物。真正缺的是**别名与协议**：需要 `type X = Vec[int]` 形式的类型别名（spec roadmap 第 4 条「模块限定」的近邻）。**先别做**，文档里说明等价物即可。 |
 | 31 | `unittest` | P3 | ⚠️ 形态要改 | 需要「类」来组织 fixture、`with` 来管资源 —— 两者都还没有。可行形态：`test_suite` 注册表 + 一个 `run_tests()` 入口 + `assert_eq/assert_true/assert_raises` 自由函数。**当前阶段的真正测试基建是 `cargo test`（`tests/*.rs`）+ `run_pkg_tests.sh`**，这个模块的收益要重新评估。 |
@@ -236,6 +244,9 @@ v0.42.0 补上了 `assert(cond[, message])`：失败时打印
 - [ ] `docs/spec.md` 的 Roadmap 第 7 条「Standard library expansion」打勾
 - [ ] 若用了 v0.40.0 新特性（dict/None/fn-ptr/raise），在文件头注明
       「**selfhost 尚不可编译**」，并确认固定点测试没把它纳入范围
+
+（v0.44.0 批次以合并式 `docs/stdlib.md` 交付参考文档，未逐模块开 `docs/<name>.md`；
+后续单模块可以继续遵循逐文件约定。）
 
 ---
 
@@ -308,15 +319,14 @@ stdlib/re.ax ──────► lxml(10), beautifulsoup4(9)
 
 ## 6. 建议的起手顺序（可直接开工）
 
-1. **`stdlib/time.ax` + `stdlib/datetime.ax`** —— 最纯粹的 extern + 整数数学，
+1. ✅ **`stdlib/time.ax` + `stdlib/datetime.ax`**（v0.44.0，连同 `calendar`）—— 最纯粹的 extern + 整数数学，
    零语言风险，且 `logging`/`calendar` 都等它。
-2. **`stdlib/pathlib.ax`** —— 纯字符串运算，立刻能用，`os` 的门面基础。
-3. **`stdlib/hashlib.ax` + `hmac` + `base64` decode** —— 算法验证密集、
+2. ✅ **`stdlib/pathlib.ax`**（v0.44.0）—— 纯字符串运算，立刻能用，`os` 的门面基础。
+3. ✅ **`stdlib/hashlib.ax` + `hmac` + `base64` decode**（v0.44.0）—— 算法验证密集、
    测试好写（对拍已知向量）。
-4. **`stdlib/glob.ax` + `os` 遍历** —— 第一次碰 Win32 目录枚举。
-5. **`Vec[T]` 堆容器基座** —— P2 的入场券。
-6. **把 `stdlib/net/json.ax` 提升为 `stdlib/json.ax`** —— 已有实现，
-   是最快的一块 P1。
+4. ✅ **`stdlib/glob.ax` + `os` 遍历**（v0.44.0）—— 第一次碰 Win32 目录枚举。
+5. ✅ **`Vec[T]` 堆容器基座**（v0.44.0 以槽位视图纪律解决，见 §0.3）—— P2 的入场券。
+6. ✅ **把 `stdlib/net/json.ax` 提升为 `stdlib/json.ax`**（v0.44.0，含文件 I/O）—— 已有实现，是最快的一块 P1。
 
 第三方清单接在后面（依赖齐了才动）：
 
@@ -324,5 +334,5 @@ stdlib/re.ax ──────► lxml(10), beautifulsoup4(9)
    `flask`(13) 都等它。
 8. **`stdlib/re.ax`** —— 和 `lxml`(10)、`beautifulsoup4`(9) 共用分词基础。
 9. **`flask`(13)** —— 第三方清单里 ROI 最高，零件已经齐了大半。
-10. **`stdlib/math.ax` 补 `fdiv` / `is_nan` / `is_inf`** —— §0.6 说这是
+10. ✅ **`stdlib/math.ax` 补 `fdiv` / `is_nan` / `is_inf`**（v0.44.0 已做）—— §0.6 说这是
     三个数值库的公共前置，**先做它，比做 numpy 更划算**。

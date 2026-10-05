@@ -1,0 +1,25 @@
+# time.ax + datetime.ax + calendar.ax demo — clocks, civil dates, month grids.
+# Run: cargo run -- run examples\time_demo.ax
+import * from "stdlib/time"
+import * from "stdlib/datetime"
+import * from "stdlib/calendar"
+
+def main() -> int:
+    # wall clocks
+    print(time_unix())                       # seconds since 1970 (UTC)
+    now = datetime_now()                     # local wall clock
+    print(datetime_iso(now))                 # YYYY-MM-DD HH:MM:SS
+    print(datetime_weekday_name(datetime_weekday(now)))
+    # pure calendar math, no clock needed
+    due = datetime_from_unix(1767225600)     # 2026-01-01 00:00:00 UTC
+    print(datetime_iso(due))
+    print(datetime_days_in_month(2024, 2))   # 29
+    # a formatted report
+    print(datetime_format(now, "%A, %B %d, %Y"))
+    # the month grid
+    print(cal_month(now.year, now.month))
+    # monotonic timing
+    t0 = time_now_ns()
+    time_sleep(0.01)
+    print(time_now_ns() - t0 > 0)            # true
+    return 0

@@ -49,7 +49,7 @@ def main() -> int:
 
 ### Install (one file, Windows)
 
-Download **`Aoxn-0.40.1-Setup.exe`** from the
+Download **`Aoxn-0.44.0-Setup.exe`** from the
 [releases page](https://github.com/AlonechatWorkspace/Aoxn-language/releases)
 and double-click it. That single executable carries the compiler, the
 standard library, the UI toolkit and the examples — nothing else to download,
@@ -193,6 +193,36 @@ implicitly, conditions must be `bool`, array indexing is unchecked (C-style),
 and every function must return a value on all paths. Strictness is a feature:
 the guarantees are simple enough for a machine to reason about.
 
+### v0.44.0 on the surface — the standard library starts
+
+Thirteen stdlib modules land as independent files, imported **by name**:
+
+```Aoxn
+import * from "stdlib/datetime"
+import * from "stdlib/hashlib"
+
+def main() -> int:
+    now = datetime_now()                     # local wall clock
+    print(datetime_iso(now))                 # 2026-10-05 21:14:07
+    print(sha256_str("abc"))                 # ba7816bf8f01cfea…
+    print(hmac_sha256("key", "msg"))         # RFC 2104
+    print(b64_decode_str("aGVsbG8="))        # hello — decode now exists
+    print(cal_month(now.year, now.month))    # a text month grid
+    return 0
+```
+
+The batch: `math` (CRT trig/exp + the `fdiv`/`NaN()`/`is_nan` toolkit the
+numeric libraries were waiting for), `time` (QPC monotonic + FILETIME wall
+clock), `datetime` (Hinnant civil-date math, hand-parsed `strftime` subset),
+`calendar`, `pathlib`, `base64` (encode **and** decode, std + URL-safe),
+`hashlib` (SHA-256/SHA-1/MD5, one-shot + incremental, pure Aoxn bitwise),
+`hmac`, `os` (Win32 filesystem core, all-wide UTF-16, env, cwd, listdir),
+`glob` (Python's dotfile rule, sorted output), `json` (the DOM promoted out
+of `net/` + file I/O), `bisect`, `heapq`. None of them touches
+`stdlib/stdlib.ax`, so the self-host fixed point is untouched. Reference —
+per-module APIs, Python deltas and the traps (UCRT symbol collisions, the
+zero-extended sentinel): [`docs/stdlib.md`](docs/stdlib.md).
+
 ### v0.43.0 on the surface — modules you can name
 
 ```Aoxn
@@ -262,7 +292,12 @@ rather than `internal`.
 
 `stdlib/stdlib.ax` is written in Aoxn itself: generic `sort` /
 `binary_search` / aggregation, a growable `Vec`, byte buffers, file IO and
-process spawning.
+process spawning. Since v0.44.0 the stdlib is a set of **named modules**
+under `stdlib/` — `math`, `time`, `datetime`, `calendar`, `pathlib`,
+`base64`, `hashlib`, `hmac`, `os`, `glob`, `json`, `bisect`, `heapq` — each
+its own file, imported by name, documented in
+[`docs/stdlib.md`](docs/stdlib.md) with per-module demos
+(`examples/*_demo.ax`) and driver tests (`tests/*.rs`).
 
 Since v0.27.0 the stdlib ships a **Qt-flavored, immediate-mode UI toolkit**
 in pure Aoxn on raw FFI; v0.29.3 brought it to **Qt grade**: layout
@@ -502,13 +537,15 @@ program. It also compiles the real stdlib and the full `examples/` suite. See
 | `src/codegen_c.rs` | the C-emitting backend (the only backend since v0.29.0) |
 | `src/paths.rs` | install-layout discovery (`AOXN_HOME` / stdlib / bundled clang) + the `aoxn doctor` report |
 | `src/ts/` | the TypeScript front end (TS-M1 W1 complete: S2b type layer + S3 modules) |
-| `stdlib/stdlib.ax` | the standard library, written in Aoxn itself |
+| `stdlib/stdlib.ax` | the standard-library core, written in Aoxn itself |
+| `stdlib/{math,time,datetime,calendar,pathlib,base64,hashlib,hmac,os,glob,json,bisect,heapq}.ax` | the v0.44.0 module batch — `docs/stdlib.md` is its reference |
 | `stdlib/ui.ax`, `stdlib/ui_draw.ax`, `stdlib/ui_win.ax` | the UI toolkit v3: portable core + platform-neutral widget layer (20+ widgets) + the Win32/GDI backend |
 | `stdlib/net/` | the shared API-client layer (v0.41.0, moved out of `stdlib/openai/`): codecs, JSON DOM + builder, WinHTTP transport, SSE — used by both SDKs |
 | `stdlib/openai/` | the OpenAI SDK (v0.40.1): headers, client, resources, accessors, `OaStream` — `docs/openai-sdk.md` |
 | `stdlib/anthropic/` | the Anthropic SDK (v0.41.0): content blocks, tools/schemas, client, `AnStream` + `AnAcc` — `docs/anthropic-sdk.md` |
 | `docs/openai-sdk.md`, `docs/anthropic-sdk.md` | the two SDK references |
-| `examples/*.ax` | demo programs (hello, fib, primes, stdlib_demo, ui_demo, ui_gallery, …) |
+| `docs/stdlib.md` | the standard-library module reference (v0.44.0 batch): per-module APIs, Python-parity deltas, the traps |
+| `examples/*.ax` | demo programs (hello, fib, primes, stdlib_demo, ui_demo, ui_gallery, math/time/pathlib/hashlib/os/json/bisect _demo, …) |
 | `dist/package.ps1`, `src/setup/` | the single-file installer: the packager and the installer stub it fills |
 | `selfhost/` | the compiler rewritten in Aoxn (fixed point reached) |
 | `ide/` | the Aoxn IDE: Tauri 2 + Next.js + Monaco workbench (`ide/src-tauri` is its own Cargo workspace) |
@@ -523,12 +560,14 @@ program. It also compiles the real stdlib and the full `examples/` suite. See
 
 ## Testing & CI
 
-`cargo test` runs the end-to-end suite — 275 tests in the compiler workspace
+`cargo test` runs the end-to-end suite — 282 tests in the compiler workspace
 (pipeline 154, compiler unit tests 21, TypeScript front end 34, UI 9, install
 layout 6, CSS assets 21, CSS assets v0.36 18, symbol export 8, OpenAI SDK 2,
-Anthropic SDK 2)
+Anthropic SDK 2, and one driver test per v0.44.0 stdlib module group:
+hashlib 1, datetime 1, math 1, pathlib 1, containers 1, os+glob 1,
+json file-IO 1)
 plus the `aoxn-pkg`
-crate's 94 via `bash run_pkg_tests.sh`, 369 in
+crate's 94 via `bash run_pkg_tests.sh`, 376 in
 
 total — where every
 pipeline test compiles
@@ -665,10 +704,23 @@ Full reference, including limits: [`docs/css-assets.md`](docs/css-assets.md).
 
 ## Status
 
-**v0.43.0** · **Windows only** · 369 tests green
+**v0.44.0** · **Windows only** · 376 tests green
 (pipeline 154 + lib 21 + assets 21 + assets_v36 18 + symbols 8 + TS 34 + UI 9 +
-OpenAI SDK 2 + Anthropic SDK 2 + install 6 + aoxn-pkg 94; the IDE
-adds 36 Rust + 62 frontend tests of its own) ·
+OpenAI SDK 2 + Anthropic SDK 2 + install 6 + stdlib module drivers 7 +
+aoxn-pkg 94; the IDE adds 36 Rust + 62 frontend tests of its own) ·
+**the standard library starts** (v0.44.0) — the first thirteen modules of the
+stdlib roadmap land as independent files imported by name (`math` `time`
+`datetime` `calendar` `pathlib` `base64` `hashlib` `hmac` `os` `glob` `json`
+`bisect` `heapq`; `docs/stdlib.md` is the reference), none of them touching
+`stdlib/stdlib.ax` so the self-host fixed point is untouched. `math` ships the
+NaN/Inf toolkit the numeric libraries were blocked on (`fdiv`, `NaN()`/`Inf()`,
+`is_nan`/`is_inf` — with capitalised spellings that dodge UCRT link
+collisions); `hashlib` implements SHA-256/SHA-1/MD5 in pure Aoxn bitwise
+arithmetic with the mask-before-left-shift rule and an 80-word schedule
+scratch; `os` walks the Win32 filesystem all-wide with the zero-extended
+INVALID sentinel; `json` is promoted from `net/` with a file-I/O pair;
+`bisect`/`heapq` bring the f64 slot-view discipline that unblocks P2's
+containers ·
 **modules stop being a global** (v0.43.0) — the gap analysis had ranked "no
 namespaces" first for a year: every `import` merged into one namespace, a
 duplicate top-level name was a hard error, and every stdlib module hand-prefixed
@@ -834,7 +886,7 @@ Apache-2.0 — see [`LICENSE`](LICENSE).
 ### 一个 exe 装全部（Windows）
 
 从 [releases 页面](https://github.com/AlonechatWorkspace/Aoxn-language/releases)
-下载 **`Aoxn-0.40.1-Setup.exe`**，双击即可。**这一个 exe 里就带着编译器、标准库、
+下载 **`Aoxn-0.44.0-Setup.exe`**，双击即可。**这一个 exe 里就带着编译器、标准库、
 UI 工具箱和示例程序**——不用再下载别的，也不用自己解压：
 
 ```console
@@ -927,6 +979,34 @@ cargo run -- build examples\fib.ax --O0   # clang -O0
 数组索引不检查（C 风格），函数所有路径必须返回。严格是特性：保证简单到机器
 可以推理。
 
+### v0.44.0 在库面上加了什么——标准库开张
+
+十三个标准库模块以独立文件落地，**按名字导入**：
+
+```Aoxn
+import * from "stdlib/datetime"
+import * from "stdlib/hashlib"
+
+def main() -> int:
+    now = datetime_now()                     # 本地墙上时间
+    print(datetime_iso(now))                 # 2026-10-05 21:14:07
+    print(sha256_str("abc"))                 # ba7816bf8f01cfea…
+    print(hmac_sha256("key", "msg"))         # RFC 2104
+    print(b64_decode_str("aGVsbG8="))        # hello —— decode 方向补齐了
+    print(cal_month(now.year, now.month))    # 文本月历
+    return 0
+```
+
+本批模块：`math`（CRT 三角/指数 + 数值库等了很久的 `fdiv`/`NaN()`/`is_nan`
+工具箱）、`time`（QPC 单调钟 + FILETIME 墙上钟）、`datetime`（Hinnant 民用
+历数学、手写 `strftime` 子集）、`calendar`、`pathlib`、`base64`（编码**和**
+解码、标准 + URL-safe 两套字母表）、`hashlib`（SHA-256/SHA-1/MD5，一次性 +
+增量，纯 Aoxn 位运算）、`hmac`、`os`（Win32 文件系统核心，全宽字符、环境变量、
+工作目录、listdir）、`glob`（Python 的 dotfile 规则、排序输出）、`json`
+（DOM 自 `net/` 提升 + 文件 I/O）、`bisect`、`heapq`。没有一个碰
+`stdlib/stdlib.ax`，自举固定点不动。逐模块 API、与 Python 的差异以及各种坑
+（UCRT 链接符号冲突、零扩展哨兵值）：[`docs/stdlib.md`](docs/stdlib.md)。
+
 ### v0.43.0 在语言面上加了什么——可以点名的模块
 
 ```Aoxn
@@ -992,7 +1072,12 @@ def main() -> int:
 ## 标准库与 UI 工具箱
 
 `stdlib/stdlib.ax` 用 Aoxn 自己写成：泛型 `sort` / `binary_search` / 聚合、
-可增长 `Vec`、字节缓冲、文件 IO 与进程调用。
+可增长 `Vec`、字节缓冲、文件 IO 与进程调用。自 v0.44.0 起标准库是一组
+**具名模块**（`stdlib/` 下）：`math`、`time`、`datetime`、`calendar`、
+`pathlib`、`base64`、`hashlib`、`hmac`、`os`、`glob`、`json`、`bisect`、
+`heapq`——各自独立成文件、按名字导入，参考文档在
+[`docs/stdlib.md`](docs/stdlib.md)，配套 `examples/*_demo.ax` 示例与
+`tests/*.rs` 驱动测试。
 
 自 v0.27.0 起标准库带有 **Qt 风格的立即模式 UI 工具箱**（纯 Aoxn + 原始
 FFI），v0.29.3 升到 **Qt 级**：布局管理器（vbox/hbox/grid +
@@ -1168,21 +1253,25 @@ Web 服务同样能打：[`web/`](web/README.md) 套件用 Aoxn 写了 HTTP/1.1 
 
 （表格同上方英文区：`src/` 编译器、`src/codegen_c.rs` 唯一的 C 发射后端
 （v0.29.0 起）、`src/paths.rs` 安装布局发现、`src/setup/` 单文件安装器、
-`src/ts/` TS 前端（TS-M1 W1 完成）、`stdlib/` 标准库 + UI v3 +
+`src/ts/` TS 前端（TS-M1 W1 完成）、`stdlib/` 标准库核心 + v0.44.0 模块批
+（`docs/stdlib.md`）+ UI v3 +
 **OpenAI SDK**（`stdlib/openai/`，v0.40.1）、`ide/` Aoxn IDE
 （`ide/src-tauri` 是独立 Cargo 工作区）、`dist/` 打包
 脚本、`selfhost/` 自举、`web/` Web 基准、`tests/` 端到端测试（含 C 文本
-固定点与安装布局）、`docs/ide.md` IDE 参考、`docs/spec.md` 语言规范、
+固定点与安装布局）、`docs/stdlib.md` 标准库模块参考、`docs/ide.md` IDE 参考、
+`docs/spec.md` 语言规范、
 `docs/openai-sdk.md`、`docs/anthropic-sdk.md` SDK 参考、
 `wiki/` 双语 wiki——**已冻结**。`docs/` 才是活文档。）
 
 ## 测试与 CI
 
-`cargo test` 跑端到端测试套件——编译器工作区 275 个（pipeline 154、编译器单元
+`cargo test` 跑端到端测试套件——编译器工作区 282 个（pipeline 154、编译器单元
 测试 21、TypeScript 前端 34、UI 9、安装布局 6、CSS 资产 21、CSS 资产 v0.36 18、
-符号导出 8、OpenAI SDK 2、Anthropic SDK 2），另有 `aoxn-pkg` crate 的
+符号导出 8、OpenAI SDK 2、Anthropic SDK 2，以及 v0.44.0 标准库模块组各一个
+驱动测试：hashlib 1、datetime 1、math 1、pathlib 1、containers 1、os+glob 1、
+json 文件 I/O 1），另有 `aoxn-pkg` crate 的
 94 个经
-`bash run_pkg_tests.sh` 运行，合计 369 个——每个 pipeline 测试都是 .ax → 可执行
+`bash run_pkg_tests.sh` 运行，合计 376 个——每个 pipeline 测试都是 .ax → 可执行
 
 文件 → 运行 → 断言 stdout 与退出码。
 其中含自举固定点：stage-1 与 stage-2 编译器对同一程序必须产出逐字节一致的
@@ -1302,10 +1391,19 @@ print(asset_path(styles_fingerprint()))   # …\assets\82b4fb25….css
 
 ## 现状
 
-**v0.43.0** · **只支持 Windows** · 369 测试全绿
+**v0.44.0** · **只支持 Windows** · 376 测试全绿
 （pipeline 154 + lib 21 + assets 21 + assets_v36 18 + symbols 8 + TS 34 + UI 9 +
-OpenAI SDK 2 + Anthropic SDK 2 + 安装布局 6 + aoxn-pkg 94；IDE 另有
-36 个 Rust + 62 个前端测试）·
+OpenAI SDK 2 + Anthropic SDK 2 + 安装布局 6 + 标准库模块驱动 7 + aoxn-pkg 94；
+IDE 另有 36 个 Rust + 62 个前端测试）·
+**标准库开张**（v0.44.0）——stdlib 路线图的前十三个模块以独立文件、按名字导入
+落地（`math` `time` `datetime` `calendar` `pathlib` `base64` `hashlib` `hmac`
+`os` `glob` `json` `bisect` `heapq`；`docs/stdlib.md` 是参考文档），没有一个碰
+`stdlib/stdlib.ax`，自举固定点不动。`math` 带来数值库被卡住的 NaN/Inf 工具箱
+（`fdiv`、`NaN()`/`Inf()`、`is_nan`/`is_inf`——大写拼写躲开 UCRT 链接符号
+冲突）；`hashlib` 用纯 Aoxn 位运算实现 SHA-256/SHA-1/MD5（先掩码再左移的规则、
+80 词的调度暂存）；`os` 全宽字符走 Win32 文件系统（零扩展的 INVALID 哨兵）；
+`json` 自 `net/` 提升并补上文件 I/O；`bisect`/`heapq` 带来解锁 P2 容器的
+f64 槽位视图纪律 ·
 **模块不再是全局的**（v0.43.0）——缺口清单把「没有命名空间」排第一排了整整一年：
 所有 `import` 合并进一个命名空间，重名是硬错误，于是每个 stdlib 模块都得给
 五十多个函数挨个手写前缀（`ui_` / `net_` / `oa_`），别无选择。现在模块可以

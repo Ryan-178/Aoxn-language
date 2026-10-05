@@ -1,0 +1,225 @@
+# The Aoxn standard library (v0.44.0)
+
+The v0.44.0 batch landed the first thirteen modules of the stdlib roadmap
+(`docs/stdlib-todo.md` §6's items 1–6 plus the bisect/heapq pair): every
+module is its own file under `stdlib/`, imported BY NAME —
+`import * from "stdlib/time"` — so none of them touched
+`stdlib/stdlib.ax` (the self-host critical path) or broke the fixed point.
+This file is the reference for the batch; the roadmap that produced it lives
+in `docs/stdlib-todo.md`.
+
+All modules are **plain Aoxn** except `hmac.ax` (function pointers, marked
+`selfhost 尚不可编译` in its header). No module needs a `-l` flag: the Win32
+APIs used (kernel32 time/filesystem) and the CRT math functions all link
+through the default set.
+
+| module | file | one-liner |
+|---|---|---|
+| `math` | `stdlib/math.ax` | CRT trig/exp externs + the NaN/Inf toolkit |
+| `time` | `stdlib/time.ax` | QPC monotonic clock, FILETIME wall clock, `Sleep` |
+| `datetime` | `stdlib/datetime.ax` | civil calendar math + strftime subset |
+| `calendar` | `stdlib/calendar.ax` | month ranges, grids, weekday queries |
+| `pathlib` | `stdlib/pathlib.ax` | pure path string operations |
+| `base64` | `stdlib/base64.ax` | RFC 4648 encode **and** decode, std + URL-safe |
+| `hashlib` | `stdlib/hashlib.ax` | SHA-256 / SHA-1 / MD5, one-shot + incremental |
+| `hmac` | `stdlib/hmac.ax` | RFC 2104 over the hashlib one-shots (fn-ptr) |
+| `os` | `stdlib/os.ax` | Win32 filesystem core, env, cwd, listdir |
+| `glob` | `stdlib/glob.ax` | shell wildcards over `os_listdir` |
+| `json` | `stdlib/json.ax` | the JSON DOM (promoted from `net/`) + file I/O |
+| `bisect` | `stdlib/bisect.ax` | binary search + sorted insertion on `Vec` |
+| `heapq` | `stdlib/heapq.ax` | min-heap over `Vec` |
+
+Demos: `examples/{math,time,pathlib,hashlib,os,json,bisect}_demo.ax`.
+Tests: `tests/{math,pathlib,datetime,hashlib,osglob,containers,json_fileio}.rs`
+(each embeds a driver that prints `PASS` markers; the Rust side asserts the
+marker list and `DONE fails=0`).
+
+## math
+
+Python's `math` spelling for the CRT functions: `sin cos tan asin acos atan
+atan2 exp log log2 log10 pow fmod trunc`, plus `degrees`/`radians`,
+`lerp`, `remap` and `copysign_f`. `sqrt`/`floor`/`ceil`/`hypot`/`abs_f`
+stay in `stdlib.ax` (imported transitively; nothing is redefined).
+
+**The NaN/Inf toolkit (stdlib-todo §0.6)** — the language has no
+`inf`/`nan` literals, no float bitcasting, and emits float division raw, so:
+
+- `fdiv(a, b)` is THE division for numeric code: IEEE-correct for zero
+  denominators (NaN for 0/0, ±Inf otherwise) where `/` is C UB.
+- `NaN()`, `Inf()`, `NInf()` are the only sanctioned non-finite sources
+  (`log(-1.0)` and `log(0.0)` under the hood).
+- `is_nan` / `is_inf` / `is_fin` classify without touching UB.
+
+The capitalized spellings are load-bearing: a lowercase `nan`/`inf`/
+`copysign` **definition** collides with the UCRT's own symbols at link time
+(the math externs share object files with them — `lld-link: duplicate
+symbol`). Never rename them to Python's casing.
+
+Zero-argument "constants" follow the no-module-bindings rule: `pi()`,
+`e()`, `tau()` are functions.
+
+## time
+
+Three clocks, three purposes:
+
+- `time_now_ns()` / `time_now_us()` — monotonic, QueryPerformanceCounter.
+  The seconds and the remainder are converted separately because the naive
+  `c * 1e9 / f` overflows i64 after ~292 days at 10 MHz.
+- `time_unix()` / `time_unix_ms()` / `time_unix_ft()` — wall clock UTC from
+  `GetSystemTimeAsFileTime` (100 ns ticks since 1601, minus the epoch gap).
+- `time_mono_ms()` — cheap monotonic milliseconds since boot.
+- `time_sleep(sec: float)` / `time_sleep_ms(ms: int)` — `Sleep` underneath.
+
+`timespec_get` does NOT link on this toolchain (AGENTS.md); that is why
+everything goes through Win32 externs. kernel32 needs no `-l`.
+
+## datetime
+
+`struct DateTime{year, month, day, hour, minute, second}` plus pure
+calendar arithmetic — Howard Hinnant's `days_from_civil` /
+`civil_from_days`, with every possibly-negative division routed through
+`floor_div` (C `/` truncates toward zero and would corrupt pre-1970 dates;
+`datetime_from_unix(-1)` is 1969-12-31 23:59:59 and tested).
+
+- `datetime_now()` — LOCAL time (`GetLocalTime`); `datetime_utcnow()` — UTC.
+- `datetime_from_unix` / `datetime_to_unix` — exact inverses.
+- `datetime_weekday` — Monday == 0 .. Sunday == 6 (Python), plus
+  `datetime_isoweekday`; `datetime_is_leap`, `datetime_days_in_month`,
+  `datetime_yday`.
+- `datetime_format(dt, fmt)` — the strftime subset `%Y %y %m %d %H %M %S
+  %j %A %a %B %b %%`, parsed by hand (the CRT's `wcsftime` is
+  locale-dependent; the todo forbids it). `datetime_iso` /
+  `datetime_iso_date` are the two fixed spellings.
+
+## calendar
+
+Built on datetime: `cal_monthrange(y, m) -> CalRange{wday, days}`,
+`cal_weekday(y, m, d)`, `cal_is_leap`, `cal_monthcalendar(y, m) -> VecVec`
+(6×7 day numbers, 0 = out of month) and `cal_month(y, m)` — the text grid,
+Monday-first like Python's default.
+
+## pathlib
+
+Pure string operations, no filesystem access (that is `os.ax`): `path_name`
+`path_parent` `path_stem` `path_suffix` `path_join` `path_norm`
+`path_is_abs` `path_with_suffix` `path_with_name` `path_split`. Both
+separators are recognized everywhere; `path_join` inserts `\` and defers to
+an absolute right side; `path_norm` collapses separators and resolves `.`/`..`
+lexically (no symlink awareness — same as Python's PurePath); a leading dot
+does not make a suffix (`.gitignore` has none).
+
+## base64
+
+`b64_encode` / `b64_encode_str` (standard alphabet, `=` padding),
+`b64_encode_url` / `b64_encode_url_str` (`-_`), and the decode direction the
+SDK codec never had: `b64_decode(s) -> B64{p, n}` — a pointer+length because
+decoded bytes may contain NUL and a string cannot (`len()` is strlen). `n
+== -1` marks invalid input. Decode is liberal in exactly one way: both
+alphabets are accepted everywhere; padding is optional; a single orphan
+character (length % 4 == 1) and trailing garbage after `=` are rejected.
+`b64_decode_str` is the text convenience (NUL truncation documented).
+
+`stdlib/net/codec.ax` keeps `net_b64_encode_*` for the SDKs; it predates
+this module and does not move.
+
+## hashlib
+
+SHA-256, SHA-1 and MD5 as pure Aoxn over the v0.38.0 bitwise operators.
+Each digest ships a one-shot (`sha256(data, len) -> hex`, `sha256_str(s)`,
+plus `sha256_raw(data, len, out)` writing raw bytes for HMAC) and an
+incremental context (`sha256_new` / `sha256_update` (write-back) /
+`sha256_final` / `sha256_digest`). Pinned by the FIPS 180 / RFC 1321
+vectors including the >55-byte multi-block case, and incremental == one-shot
+across chunk boundaries.
+
+uint32-on-i64 rules (see the module header): mask every add/rotate back
+under 2^32 so `>>` stays logical, and rotate via `hash_rotr`/`hash_rol`
+which mask BEFORE the left shift (a 32-bit value shifted left 32 would
+overflow i64). The context block is 784 bytes — the schedule scratch holds
+**80** words because SHA-1 needs them; 64 was the heap-corruption bug.
+
+## hmac
+
+`hmac_sha256` / `hmac_sha1` / `hmac_md5(key, msg) -> hex`, one
+implementation (`hmac_bytes`) driven by a **function pointer** to the
+`*_raw` one-shots — the only module in the batch that uses a v0.40.0
+feature, hence `selfhost 尚不可编译` in its header. Keys longer than the 64-
+byte block are hashed first (RFC 2104); binary keys/messages use the
+`(ptr, len)` core directly because strings cannot carry NUL. Verified
+against the RFC 4231 vectors and a 131-byte 0xaa key cross-checked against
+node:crypto.
+
+## os
+
+The Win32 core, everything through the `W` APIs with UTF-8 ↔ UTF-16
+conversion (the `os_to_wide`/`os_from_wide` helpers are deliberately
+DUPLICATED from `net/codec.ax` — a filesystem module should not pull the
+network layer; keep the copies in sync):
+
+- dirs/files: `os_mkdir` `os_rmdir` `os_remove` `os_copy(src, dst,
+  fail_if_exists)` `os_rename`
+- attributes: `os_exists` `os_isdir` `os_isfile` `os_islink` (reparse
+  points — recursive walkers MUST check this before descending),
+  `os_attributes` returns the raw DWORD or `OS_ATTR_INVALID()` =
+  **4294967295** (the zero-extension trap: a 32-bit `int` return arrives
+  zero-extended, so the sentinel is compared unsigned, not against -1)
+- env: `os_getenv` `os_has_env` (distinguishes empty from unset via
+  `GetLastError == 203`) `os_setenv` `os_unsetenv` (deletes via a NULL
+  value — the empty string would create an empty variable)
+- cwd: `os_cwd` `os_chdir`
+- `os_listdir(path) -> Vec` — names without `.`/`..`, discovery order;
+  the traversal primitive `glob.ax` builds on.
+
+## glob
+
+`glob_match(pattern, name)` — the single-segment backtracking matcher
+(`*`, `?`, `[a-z]`/`[!a-z]`/`[^a-z]`, unterminated classes literal) — and
+`glob(pattern) -> Vec` — the sorted, deterministic directory walk over
+`os_listdir`. Python parity kept: `*`/`?` do not match a leading `.` unless
+the pattern segment starts with one; no-wildcard segments are only
+descended when they exist; `C:`/`\`/UNC roots are preserved. NOT supported:
+`**` cross-segment recursion (documented gap). All walk recursion returns
+the grown Vec (the write-back discipline).
+
+## json
+
+The JSON DOM (40-byte tagged slab, parse/dumps/builders — see the module
+header) promoted from `stdlib/net/json.ax` to `stdlib/json.ax` in v0.44.0;
+the OpenAI and Anthropic SDKs import this exact file at its new home. The
+promotion's addition is the file pair:
+
+- `j_read_file(path) -> JParse` — `err`: 0 ok, 1 parse error, **2 I/O
+  failure** (a missing file upgrades the empty-document parse error via an
+  fopen probe; a readable-but-EMPTY file is still err 1).
+- `j_write_file(path, dom, i) -> bool` — `j_dumps` to disk.
+
+## bisect
+
+Binary search and sorted insertion over an int `Vec`:
+`bisect_left`/`bisect_right` return the insertion position (Python
+semantics), `insort_left`/`insort_right` return the NEW Vec handle
+(`vec_reserve` may have reallocated — the write-back rule), `bisect_find`
+returns -1 when absent. The `_f` family holds f64 elements in the same
+8-byte slots via `store_f64`/`load_f64`. No string variants: a string slot
+would compare POINTERS, not bytes.
+
+## heapq
+
+A binary min-heap over an int `Vec`, Python's shape:
+`heap_push(h, x) -> Heap` (handle may have realloc'd),
+`heap_pop(h) -> Heap` (the value lands in `h.res` — the struct carries a
+`res` slot because Aoxn returns one value), `heap_peek`, `heap_len`,
+`heap_from_vec` (heapify in place), `heap_sorted` (full drain into an
+ascending Vec). Ints only; `bisect.ax` shows the float pattern.
+
+## Vec[T] status (stdlib-todo §0.3)
+
+The "generic heap container" that `collections`/`itertools` were waiting
+for is resolved in v0.44.0 as a SLOT-VIEW discipline rather than a new
+type: a `Vec` slot is 8 bytes — int/bool store natively, f64 through the
+`store_f64`/`load_f64` views (bisect/heapq/bisect's `_f` family are the
+worked examples), strings through `as_ptr` (`vec_push_str`/`vec_get_str`
+already existed). Generic STRUCT containers remain impossible (no
+address-of-struct, no `sizeof`), so heterogeneous records still go through
+the tagged-slab pattern (`stdlib/json.ax`); `collections`/`itertools` (P2)
+can now build on the slot views.

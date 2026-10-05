@@ -826,8 +826,10 @@ crates/aoxn-pkg       package manager crate (its own dependency set; see above)
   ALL missing markers into a list before asserting. Asserting inside the
   loop reports one drifted line per test run, which is a slow way to fix a
   hand-transcribed table.
-- **The next 30+ stdlib modules are ROADMAPED in `docs/stdlib-todo.md`**
-  (§2: all 31 Python stdlib modules, batched P0–P3; §5: 15 third-party /
+- **The remaining ~30 stdlib modules are ROADMAPED in `docs/stdlib-todo.md`**
+  (§2: all 31 Python stdlib modules, batched P0–P3 — **11 landed in the
+  v0.44.0 batch** plus the `json.ax` promotion, see the stdlib section above;
+  §5: 15 third-party /
   large libraries — `numpy`/`pandas`/`flask`/`matplotlib`/`pytorch`… —
   ordered by their dependency chain, each feasibility-rated). Its §0 holds the
   SIX HARD constraints that shape every module — read it before writing one.
@@ -843,7 +845,7 @@ crates/aoxn-pkg       package manager crate (its own dependency set; see above)
   inexpressible — that is what kills DataFrame and every ORM. The Anthropic
   SDK's content blocks (a discriminated union with no union type in the
   language) are the worked example of how far JSON text carries you. The tagged-slab
-  design in `stdlib/net/json.ax` (kind / i64 / f64 / ptrA / ptrB) is the
+  design in `stdlib/json.ax` (kind / i64 / f64 / ptrA / ptrB) is the
   in-repo pattern for dynamic values. (argv landed in v0.42.0 — `argc()` /
   `arg(i)`, see the language rules above — so `sys`/`argparse` are unblocked;
   what is still missing is a test runner, see `docs/stdlib-todo.md` §0.7.)
@@ -878,6 +880,56 @@ crates/aoxn-pkg       package manager crate (its own dependency set; see above)
   `oa_err_msg`/`an_err_msg` render transport / HTTP / the body's `error`
   object — nothing raises. `an_status_class`/`an_err_type` expose the
   reference's exception taxonomy as data.
+
+
+## Standard library modules (stdlib/ …) — v0.44.0 batch
+
+- **The first 13 roadmap modules landed** (`docs/stdlib-todo.md` §6 items
+  1–6 + bisect/heapq): `math` `time` `datetime` `calendar` `pathlib`
+  `base64` `hashlib` `hmac` `os` `glob` `json` `bisect` `heapq`, each its
+  own file under `stdlib/`, imported BY NAME (`import * from "stdlib/time"`
+  — or, since v0.43.0, `import time` / `time.now_ns`-style namespaces).
+  **`docs/stdlib.md` is the batch reference** (APIs + Python deltas +
+  traps); demos `examples/{math,time,pathlib,hashlib,os,json,bisect}_demo.ax`;
+  driver tests `tests/{math,pathlib,datetime,hashlib,osglob,containers,
+  json_fileio}.rs` (each embeds an .ax driver printing PASS markers; Rust
+  asserts the marker list and `DONE fails=0`).
+- **None of the new modules may be imported into `stdlib/stdlib.ax`** (the
+  self-host critical path). All are plain Aoxn EXCEPT `hmac.ax` (fn-ptr —
+  header-marked `selfhost 尚不可编译`, off the fixed-point path).
+- **UCRT symbol collisions are a LINK-TIME trap**: a lowercase `nan`,
+  `inf` or `copysign` DEFINITION duplicates UCRT symbols (the math externs
+  share object files with them) → `lld-link: duplicate symbol`. That is why
+  math.ax spells them `NaN()/Inf()/NInf()/copysign_f()`. Extern DECLARATIONS
+  matching CRT names (sin/exp/pow/…) are fine.
+- **hashlib's uint32-on-i64 rules**: mask every add/rotate under 2^32 (so
+  `>>` stays logical) and rotate via `hash_rotr`/`hash_rol`, which mask
+  BEFORE the left shift (a 32-bit value `<< 32` overflows i64). The context
+  block is 784 bytes with an **80-word** schedule scratch — SHA-1 needs 80;
+  the original 64 was a heap-corruption bug (0xC0000374) caught by the
+  sha1 vector.
+- **`os.ax` zero-extension trap**: `GetFileAttributesW` returns a DWORD,
+  which arrives zero-extended in i64 — the INVALID sentinel is compared as
+  **4294967295**, never -1. `os_unsetenv` deletes via a NULL value (the
+  empty string would create an empty variable). The UTF-16 helpers are
+  deliberately duplicated from `net/codec.ax` (same precedent codec set
+  against ui.ax) — keep the copies in sync.
+- **`glob.ax` keeps Python's dotfile rule** (`*` does not match a leading
+  `.` unless the pattern segment starts with one), sorts output byte-wise,
+  and does NOT support `**` (documented gap). The walk's recursion returns
+  the grown Vec — the write-back discipline again.
+- **`stdlib/json.ax` is the promoted DOM** (moved from `stdlib/net/json.ax`
+  in v0.44.0; the SDKs import `../json.ax`), plus the file-I/O pair:
+  `j_read_file` (err 2 = I/O failure vs 1 = parse error — a missing file is
+  upgraded via an fopen probe; readable-but-EMPTY stays 1) and
+  `j_write_file`. `net/codec.ax` keeps `net_b64_encode_*`; base64.ax is the
+  general module with the decode direction.
+- **"Vec[T] 基座" resolved as slot views, not a new type** (stdlib-todo
+  §0.3): a Vec slot is 8 bytes — int/bool natively, f64 via
+  `store_f64`/`load_f64` views (the bisect `_f` family is the worked
+  example), strings via `as_ptr` (`vec_push_str`/`vec_get_str`). Generic
+  STRUCT containers remain impossible (no address-of-struct/no sizeof);
+  heterogeneous records still go through the tagged-slab pattern.
 
 
 ## IDE (ide/) — Tauri 2 + Next.js + Monaco workbench (v0.31.0, continued v0.31.1)
@@ -947,10 +999,14 @@ crates/aoxn-pkg       package manager crate (its own dependency set; see above)
 - `examples/*.ax` — demo programs (hello, fib, primes, vectors, strings, benchmarks, stdlib_demo, ui_demo, ui_gallery); since v0.30.0 they import the stdlib **by name** (`"stdlib"`, `"stdlib/ui_win"`), so the ones shipped in a release archive run from any directory — `selfhost/load.ax` does NOT do name resolution (repo-bound, relative paths only)
 - `web/` — web benchmark suite: HTTP/1.1 server written in Aoxn (FFI sockets)
   vs pnpm+Node.js+Next.js; see `web/README.md` + `docs/web-benchmark.md`
-- `stdlib/stdlib.ax` — the standard library, written in Aoxn itself;
+- `stdlib/stdlib.ax` — the standard library core, written in Aoxn itself;
   `stdlib/ui.ax` + `stdlib/ui_win.ax` — the Qt-flavored immediate-mode UI
   toolkit v3 (layout engine, text selection/multi-line editing, menus,
-  tree/table model+view, signal-slot events)
+  tree/table model+view, signal-slot events);
+  `stdlib/{math,time,datetime,calendar,pathlib,base64,hashlib,hmac,os,glob,json,bisect,heapq}.ax`
+  — the v0.44.0 module batch (`docs/stdlib.md` is its reference;
+  `stdlib/net/` holds the SDK-shared transport, `stdlib/openai/` +
+  `stdlib/anthropic/` the two SDKs)
 - `selfhost/` — the compiler rewritten in Aoxn (fixed point reached; C emitter)
 - `crates/aoxn-pkg/` — the package manager (`aoxn pkg`, beta)
 - `ide/` — the Aoxn IDE (Tauri 2 + Next.js + Monaco); `docs/ide.md` is its

@@ -1,0 +1,15 @@
+# math.ax demo — the NaN/Inf toolkit and the CRT float externs.
+# Run: cargo run -- run examples\math_demo.ax
+import * from "stdlib/math"
+
+def main() -> int:
+    print(sin(pi() / 2.0))          # 1.0
+    print(pow(2.0, 10.0))           # 1024.0
+    print(degrees(pi()))            # 180.0
+    # the §0.6 rule: never divide by zero with `/`, never spell 0.0/0.0 —
+    # fdiv returns the IEEE answer and the predicates classify it
+    print(fdiv(1.0, 4.0))           # 0.25
+    print(is_inf(fdiv(1.0, 0.0)))   # true
+    print(is_nan(fdiv(0.0, 0.0)))   # true
+    print(is_fin(NaN()))            # false
+    return 0

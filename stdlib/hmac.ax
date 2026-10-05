@@ -1,0 +1,88 @@
+# Aoxn standard library — hmac (v0.44.0, docs/stdlib-todo.md #23).
+#
+# HMAC (RFC 2104) over the three hashes in stdlib/hashlib.ax, in the
+# standard two-pass form: H((K ^ opad) || H((K ^ ipad) || message)).
+# One implementation drives all three hashes through a function pointer
+# (v0.40.0) — the hash argument is hashlib's `*_raw(data, len, out)` shape.
+#
+# *** selfhost 尚不可编译 *** — this file uses fn-ptrs, which the self-hosted
+# compiler's mirror (selfhost/codegen.ax) cannot emit yet (docs/stdlib-todo.md
+# §0.1). It is NOT on the fixed-point path; the fixed point never sees it.
+#
+# Keys and messages take the string spelling here; a string cannot carry a
+# NUL byte (len() is strlen), so binary keys/messages go through
+# hmac_bytes() with explicit (ptr, len) pairs. Output is the lowercase hex
+# digest (32 chars for SHA-256, 40 for SHA-1, 32 for MD5).
+#
+# Needs clang + stdlib/hashlib.ax; no -l flags.
+
+import * from "stdlib.ax"
+import * from "./hashlib.ax"
+
+# the RFC 2104 constants
+def HMAC_IPAD() -> int:
+    return 54  # 0x36
+
+def HMAC_OPAD() -> int:
+    return 92  # 0x5c
+
+def HMAC_BLOCK() -> int:
+    return 64  # block size of all three hashes
+
+# the core: key/msg as (ptr, len) — the only form that survives binary keys.
+# h writes hlen raw digest bytes at out.
+def hmac_bytes(kp: int, klen: int, mp: int, mlen: int, h: fn(int, int, int) -> int, hlen: int, out: int):
+    key = malloc(HMAC_BLOCK())
+    i = 0
+    if klen > HMAC_BLOCK():
+        # a key longer than the block is replaced by its hash
+        h(kp, klen, key)
+        i = hlen
+    else:
+        memcpy(key, kp, klen)
+        i = klen
+    while i < HMAC_BLOCK():
+        store_u8(key, i, 0)
+        i = i + 1
+    # inner: H((key ^ ipad) || message)
+    inner = malloc(HMAC_BLOCK() + mlen)
+    i = 0
+    while i < HMAC_BLOCK():
+        store_u8(inner, i, load_u8(key, i) ^ HMAC_IPAD())
+        i = i + 1
+    memcpy(inner + HMAC_BLOCK(), mp, mlen)
+    idig = malloc(hlen)
+    h(inner, HMAC_BLOCK() + mlen, idig)
+    # outer: H((key ^ opad) || inner_digest)
+    outer = malloc(HMAC_BLOCK() + hlen)
+    i = 0
+    while i < HMAC_BLOCK():
+        store_u8(outer, i, load_u8(key, i) ^ HMAC_OPAD())
+        i = i + 1
+    memcpy(outer + HMAC_BLOCK(), idig, hlen)
+    h(outer, HMAC_BLOCK() + hlen, out)
+    free(key)
+    free(inner)
+    free(idig)
+    free(outer)
+
+def hmac_sha256(key: string, msg: string) -> string:
+    out = malloc(32)
+    hmac_bytes(as_ptr(key), len(key), as_ptr(msg), len(msg), sha256_raw, 32, out)
+    s = hashlib_hex(out, 32)
+    free(out)
+    return s
+
+def hmac_sha1(key: string, msg: string) -> string:
+    out = malloc(20)
+    hmac_bytes(as_ptr(key), len(key), as_ptr(msg), len(msg), sha1_raw, 20, out)
+    s = hashlib_hex(out, 20)
+    free(out)
+    return s
+
+def hmac_md5(key: string, msg: string) -> string:
+    out = malloc(16)
+    hmac_bytes(as_ptr(key), len(key), as_ptr(msg), len(msg), md5_raw, 16, out)
+    s = hashlib_hex(out, 16)
+    free(out)
+    return s

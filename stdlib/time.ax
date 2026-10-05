@@ -1,0 +1,86 @@
+# Aoxn standard library — time (v0.44.0, docs/stdlib-todo.md #5).
+#
+# Windows clocks, prefixed `time_`. Three clock sources, three purposes:
+#   - QueryPerformanceCounter  — monotonic, for measuring elapsed time
+#   - GetSystemTimeAsFileTime  — wall clock UTC, 100 ns units since 1601
+#   - GetTickCount64           — cheap monotonic milliseconds since boot
+# `Sleep` is the sleeper (milliseconds; Python's time.sleep takes seconds,
+# so time_sleep does the conversion).
+#
+# `timespec_get` does NOT link on this toolchain (clang/MSVC libs — recorded
+# in AGENTS.md), which is why everything here goes through the Win32 externs
+# instead. kernel32 is linked through the CRT: no -l flag needed.
+#
+# Plain Aoxn only (no dict/None/fn-ptr/raise): self-host compilable.
+
+import * from "stdlib.ax"
+
+extern def QueryPerformanceCounter(counter: int) -> int
+extern def QueryPerformanceFrequency(frequency: int) -> int
+extern def GetSystemTimeAsFileTime(ft: int)
+extern def GetTickCount64() -> int
+extern def Sleep(ms: int)
+
+# 100 ns ticks between 1601-01-01 and 1970-01-01 (the FILETIME epoch gap)
+def FT_UNIX_EPOCH() -> int:
+    return 116444736000000000
+
+# ticks per second of the FILETIME clock
+def FT_PER_SEC() -> int:
+    return 10000000
+
+# monotonic nanoseconds. The naive `c * 1e9 / f` overflows i64 after ~292
+# days at a 10 MHz QPC, so the seconds part and the remainder are converted
+# separately: c / f * 1e9 + (c % f) * 1e9 / f — the remainder term is
+# bounded by 1e9 * f < 1e17.
+def time_now_ns() -> int:
+    ctr = malloc(8)
+    freq = malloc(8)
+    QueryPerformanceCounter(ctr)
+    QueryPerformanceFrequency(freq)
+    c = load_i64(ctr)
+    f = load_i64(freq)
+    free(ctr)
+    free(freq)
+    return c / f * 1000000000 + c % f * 1000000000 / f
+
+# monotonic microseconds (same split, 1e6 scale)
+def time_now_us() -> int:
+    ctr = malloc(8)
+    freq = malloc(8)
+    QueryPerformanceCounter(ctr)
+    QueryPerformanceFrequency(freq)
+    c = load_i64(ctr)
+    f = load_i64(freq)
+    free(ctr)
+    free(freq)
+    return c / f * 1000000 + c % f * 1000000 / f
+
+# UTC seconds since 1970-01-01 (wall clock; may jump with the user's clock)
+def time_unix() -> int:
+    return time_unix_ft() / FT_PER_SEC()
+
+# UTC milliseconds since 1970-01-01
+def time_unix_ms() -> int:
+    return time_unix_ft() / 10000
+
+# raw 100 ns FILETIME ticks since 1601-01-01
+def time_unix_ft() -> int:
+    ft = malloc(8)
+    GetSystemTimeAsFileTime(ft)
+    v = load_i64(ft)
+    free(ft)
+    return v - FT_UNIX_EPOCH()
+
+# milliseconds since boot (cheap, monotonic, lower resolution than QPC)
+def time_mono_ms() -> int:
+    return GetTickCount64()
+
+# sleep in seconds (Python's time.sleep spelling); sub-second sleeps work
+def time_sleep(sec: float):
+    ms = sec * 1000.0
+    Sleep(ms as int)
+
+# sleep in whole milliseconds
+def time_sleep_ms(ms: int):
+    Sleep(ms)

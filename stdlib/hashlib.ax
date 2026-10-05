@@ -1,0 +1,552 @@
+# Aoxn standard library — hashlib (v0.44.0, docs/stdlib-todo.md #22).
+#
+# SHA-256, SHA-1 and MD5 as pure Aoxn over the v0.38.0 bitwise operators,
+# each with a one-shot form (`sha256(data, len) -> hex`) and an incremental
+# context (`sha256_new` / `sha256_update` / `sha256_final`). HMAC lives in
+# stdlib/hmac.ax on top of the `_raw` one-shots.
+#
+# uint32 arithmetic on 64-bit ints, the two rules that make it correct:
+#   - every value is masked back under 2**32 with & 4294967295 after adds
+#     and rotates, so `>>` never sees a negative number and stays logical;
+#   - rotates go through sha_rotr/sha_rol, which mask BEFORE the left shift —
+#     `(x << n)` with x up to 2**32-1 would otherwise overflow i64 for n > 31.
+#   The `&`/`==` precedence trap from AGENTS.md is dodged by parenthesizing
+#   every bitwise expression.
+#
+# Context layout: one malloc'd 784-byte block shared by all three digests —
+#   +0    h[0..8)  i64   state words (SHA-1 uses 5, MD5 uses 4)
+#   +64   buf[64]  bytes pending message bytes
+#   +128  w[80]    i64   message schedule scratch (SHA-1 needs 80)
+#   +640  buflen   i64
+#   +648  total    i64   total bytes fed
+# The struct is one int field, so copies share the block (the dict-handle
+# rule); never free it explicitly — a digest lives as long as the program.
+#
+# Plain Aoxn only (no dict/None/fn-ptr/raise): self-host compilable.
+
+import * from "stdlib.ax"
+
+# ---- shared constants ----
+
+def HASH_M() -> int:
+    return 4294967295  # 2**32 - 1
+
+# offsets into the context block
+def HBUF() -> int:
+    return 64
+
+def HW() -> int:
+    return 128
+
+def HBLEN() -> int:
+    return 768
+
+def HTOTAL() -> int:
+    return 776
+
+# ---- byte<->word helpers (big- and little-endian) ----
+
+def hash_load_be32(p: int) -> int:
+    return (load_u8(p, 0) << 24) + (load_u8(p, 1) << 16) + (load_u8(p, 2) << 8) + load_u8(p, 3)
+
+def hash_store_be32(p: int, v: int):
+    store_u8(p, 0, (v >> 24) & 255)
+    store_u8(p, 1, (v >> 16) & 255)
+    store_u8(p, 2, (v >> 8) & 255)
+    store_u8(p, 3, v & 255)
+
+def hash_load_le32(p: int) -> int:
+    return load_u8(p, 0) + (load_u8(p, 1) << 8) + (load_u8(p, 2) << 16) + (load_u8(p, 3) << 24)
+
+def hash_store_le32(p: int, v: int):
+    store_u8(p, 0, v & 255)
+    store_u8(p, 1, (v >> 8) & 255)
+    store_u8(p, 2, (v >> 16) & 255)
+    store_u8(p, 3, (v >> 24) & 255)
+
+# rotate right / left within 32 bits (x is already masked)
+def hash_rotr(x: int, n: int) -> int:
+    return (((x >> n) | ((x & ((1 << n) - 1)) << (32 - n))) & HASH_M())
+
+def hash_rol(x: int, n: int) -> int:
+    return (((x << n) | (x >> (32 - n))) & HASH_M())
+
+# lowercase hex of n bytes at p — the digest spelling for all of hashlib
+def hashlib_hex(p: int, n: int) -> string:
+    digits = "0123456789abcdef"
+    out = malloc(n * 2 + 1)
+    i = 0
+    while i < n:
+        b = load_u8(p, i)
+        store_u8(out, i * 2, load_u8(digits, b / 16))
+        store_u8(out, i * 2 + 1, load_u8(digits, b % 16))
+        i = i + 1
+    store_u8(out, n * 2, 0)
+    return as_string(out)
+
+# ============================================================
+# SHA-256
+# ============================================================
+
+struct Sha256:
+    p: int
+
+def sha256_new() -> Sha256:
+    c = Sha256(p=malloc(784))
+    store_i64(c.p + 0, 1779033703)     # 0x6a09e667
+    store_i64(c.p + 8, 3144134277)     # 0xbb67ae85
+    store_i64(c.p + 16, 1013904242)    # 0x3c6ef372
+    store_i64(c.p + 24, 2773480762)    # 0xa54ff53a
+    store_i64(c.p + 32, 1359893119)    # 0x510e527f
+    store_i64(c.p + 40, 2600822924)    # 0x9b05688c
+    store_i64(c.p + 48, 528734635)     # 0x1f83d9ab
+    store_i64(c.p + 56, 1541459225)    # 0x5be0cd19
+    store_i64(c.p + HBLEN(), 0)
+    store_i64(c.p + HTOTAL(), 0)
+    return c
+
+def sha256_w(base: int, i: int) -> int:
+    return load_i64(base + HW() + i * 8)
+
+def sha256_setw(base: int, i: int, v: int):
+    store_i64(base + HW() + i * 8, v)
+
+def sha256_compress(c: Sha256) -> Sha256:
+    base = c.p
+    k: [int; 64] = [
+        1116352408, 1899447441, 3049323471, 3921009573,
+        961987163, 1508970993, 2453635748, 2870763221,
+        3624381080, 310598401, 607225278, 1426881987,
+        1925078388, 2162078206, 2614888103, 3248222580,
+        3835390401, 4022224774, 264347078, 604807628,
+        770255983, 1249150122, 1555081692, 1996064986,
+        2554220882, 2821834349, 2952996808, 3210313671,
+        3336571891, 3584528711, 113926993, 338241895,
+        666307205, 773529912, 1294757372, 1396182291,
+        1695183700, 1986661051, 2177026350, 2456956037,
+        2730485921, 2820302411, 3259730800, 3345764771,
+        3516065817, 3600352804, 4094571909, 275423344,
+        430227734, 506948616, 659060556, 883997877,
+        958139571, 1322822218, 1537002063, 1747873779,
+        1955562222, 2024104815, 2227730452, 2361852424,
+        2428436474, 2756734187, 3204031479, 3329325298,
+    ]
+    i = 0
+    while i < 16:
+        sha256_setw(base, i, hash_load_be32(base + HBUF() + i * 4))
+        i = i + 1
+    while i < 64:
+        w15 = sha256_w(base, i - 15)
+        w2 = sha256_w(base, i - 2)
+        s0 = hash_rotr(w15, 7) ^ hash_rotr(w15, 18) ^ (w15 >> 3)
+        s1 = hash_rotr(w2, 17) ^ hash_rotr(w2, 19) ^ (w2 >> 10)
+        sha256_setw(base, i, (sha256_w(base, i - 16) + s0 + sha256_w(base, i - 7) + s1) & HASH_M())
+        i = i + 1
+    a = load_i64(base + 0)
+    b = load_i64(base + 8)
+    cc = load_i64(base + 16)
+    d = load_i64(base + 24)
+    e = load_i64(base + 32)
+    f = load_i64(base + 40)
+    g = load_i64(base + 48)
+    h = load_i64(base + 56)
+    i = 0
+    while i < 64:
+        s1 = hash_rotr(e, 6) ^ hash_rotr(e, 11) ^ hash_rotr(e, 25)
+        ch = (e & f) ^ (~e & g)
+        t1 = (h + s1 + ch + k[i] + sha256_w(base, i)) & HASH_M()
+        s0 = hash_rotr(a, 2) ^ hash_rotr(a, 13) ^ hash_rotr(a, 22)
+        maj = (a & b) ^ (a & cc) ^ (b & cc)
+        t2 = (s0 + maj) & HASH_M()
+        h = g
+        g = f
+        f = e
+        e = (d + t1) & HASH_M()
+        d = cc
+        cc = b
+        b = a
+        a = (t1 + t2) & HASH_M()
+        i = i + 1
+    store_i64(base + 0, (load_i64(base + 0) + a) & HASH_M())
+    store_i64(base + 8, (load_i64(base + 8) + b) & HASH_M())
+    store_i64(base + 16, (load_i64(base + 16) + cc) & HASH_M())
+    store_i64(base + 24, (load_i64(base + 24) + d) & HASH_M())
+    store_i64(base + 32, (load_i64(base + 32) + e) & HASH_M())
+    store_i64(base + 40, (load_i64(base + 40) + f) & HASH_M())
+    store_i64(base + 48, (load_i64(base + 48) + g) & HASH_M())
+    store_i64(base + 56, (load_i64(base + 56) + h) & HASH_M())
+    return c
+
+def sha256_update(c: Sha256, data: int, length: int) -> Sha256:
+    base = c.p
+    off = 0
+    while off < length:
+        space = 64 - load_i64(base + HBLEN())
+        take = space
+        if length - off < take:
+            take = length - off
+        memcpy(base + HBUF() + load_i64(base + HBLEN()), data + off, take)
+        store_i64(base + HBLEN(), load_i64(base + HBLEN()) + take)
+        store_i64(base + HTOTAL(), load_i64(base + HTOTAL()) + take)
+        off = off + take
+        if load_i64(base + HBLEN()) == 64:
+            c = sha256_compress(c)
+            store_i64(base + HBLEN(), 0)
+    return c
+
+# append padding + length, compress the last blocks, write 32 raw bytes
+def sha256_final(c: Sha256, out: int) -> Sha256:
+    base = c.p
+    buflen = load_i64(base + HBLEN())
+    store_u8(base + HBUF() + buflen, 0, 128)
+    buflen = buflen + 1
+    if buflen > 56:
+        while buflen < 64:
+            store_u8(base + HBUF() + buflen, 0, 0)
+            buflen = buflen + 1
+        c = sha256_compress(c)
+        buflen = 0
+    while buflen < 56:
+        store_u8(base + HBUF() + buflen, 0, 0)
+        buflen = buflen + 1
+    bits = load_i64(base + HTOTAL()) * 8
+    hash_store_be32(base + HBUF() + 56, (bits >> 32) & HASH_M())
+    hash_store_be32(base + HBUF() + 60, bits & HASH_M())
+    c = sha256_compress(c)
+    i = 0
+    while i < 8:
+        hash_store_be32(out + i * 4, load_i64(base + i * 8))
+        i = i + 1
+    return c
+
+# hex digest of the bytes so far (the context stays usable)
+def sha256_digest(c: Sha256) -> string:
+    tmp = malloc(32)
+    c = sha256_final(c, tmp)
+    s = hashlib_hex(tmp, 32)
+    free(tmp)
+    return s
+
+def sha256(data: int, length: int) -> string:
+    c = sha256_new()
+    c = sha256_update(c, data, length)
+    return sha256_digest(c)
+
+def sha256_str(s: string) -> string:
+    return sha256(as_ptr(s), len(s))
+
+def sha256_raw(data: int, length: int, out: int) -> int:
+    c = sha256_new()
+    c = sha256_update(c, data, length)
+    c = sha256_final(c, out)
+    return 0
+
+# ============================================================
+# SHA-1
+# ============================================================
+
+struct Sha1:
+    p: int
+
+def sha1_new() -> Sha1:
+    c = Sha1(p=malloc(784))
+    store_i64(c.p + 0, 1732584193)     # 0x67452301
+    store_i64(c.p + 8, 4023233417)     # 0xefcdab89
+    store_i64(c.p + 16, 2562383102)    # 0x98badcfe
+    store_i64(c.p + 24, 271733878)     # 0x10325476
+    store_i64(c.p + 32, 3285377520)    # 0xc3d2e1f0
+    store_i64(c.p + HBLEN(), 0)
+    store_i64(c.p + HTOTAL(), 0)
+    return c
+
+def sha1_w(base: int, i: int) -> int:
+    return load_i64(base + HW() + i * 8)
+
+def sha1_setw(base: int, i: int, v: int):
+    store_i64(base + HW() + i * 8, v)
+
+def sha1_compress(c: Sha1) -> Sha1:
+    base = c.p
+    i = 0
+    while i < 16:
+        sha1_setw(base, i, hash_load_be32(base + HBUF() + i * 4))
+        i = i + 1
+    while i < 80:
+        x = sha1_w(base, i - 3) ^ sha1_w(base, i - 8) ^ sha1_w(base, i - 14) ^ sha1_w(base, i - 16)
+        sha1_setw(base, i, hash_rol(x, 1))
+        i = i + 1
+    a = load_i64(base + 0)
+    b = load_i64(base + 8)
+    cc = load_i64(base + 16)
+    d = load_i64(base + 24)
+    e = load_i64(base + 32)
+    i = 0
+    while i < 80:
+        f = 0
+        k = 0
+        if i < 20:
+            f = (b & cc) | (~b & d)
+            k = 1518500249
+        elif i < 40:
+            f = b ^ cc ^ d
+            k = 1859775393
+        elif i < 60:
+            f = (b & cc) | (b & d) | (cc & d)
+            k = 2400959708
+        else:
+            f = b ^ cc ^ d
+            k = 3395469782
+        t = (hash_rol(a, 5) + (f & HASH_M()) + e + k + sha1_w(base, i)) & HASH_M()
+        e = d
+        d = cc
+        cc = hash_rol(b, 30)
+        b = a
+        a = t
+        i = i + 1
+    store_i64(base + 0, (load_i64(base + 0) + a) & HASH_M())
+    store_i64(base + 8, (load_i64(base + 8) + b) & HASH_M())
+    store_i64(base + 16, (load_i64(base + 16) + cc) & HASH_M())
+    store_i64(base + 24, (load_i64(base + 24) + d) & HASH_M())
+    store_i64(base + 32, (load_i64(base + 32) + e) & HASH_M())
+    return c
+
+def sha1_update(c: Sha1, data: int, length: int) -> Sha1:
+    base = c.p
+    off = 0
+    while off < length:
+        space = 64 - load_i64(base + HBLEN())
+        take = space
+        if length - off < take:
+            take = length - off
+        memcpy(base + HBUF() + load_i64(base + HBLEN()), data + off, take)
+        store_i64(base + HBLEN(), load_i64(base + HBLEN()) + take)
+        store_i64(base + HTOTAL(), load_i64(base + HTOTAL()) + take)
+        off = off + take
+        if load_i64(base + HBLEN()) == 64:
+            c = sha1_compress(c)
+            store_i64(base + HBLEN(), 0)
+    return c
+
+def sha1_final(c: Sha1, out: int) -> Sha1:
+    base = c.p
+    buflen = load_i64(base + HBLEN())
+    store_u8(base + HBUF() + buflen, 0, 128)
+    buflen = buflen + 1
+    if buflen > 56:
+        while buflen < 64:
+            store_u8(base + HBUF() + buflen, 0, 0)
+            buflen = buflen + 1
+        c = sha1_compress(c)
+        buflen = 0
+    while buflen < 56:
+        store_u8(base + HBUF() + buflen, 0, 0)
+        buflen = buflen + 1
+    bits = load_i64(base + HTOTAL()) * 8
+    hash_store_be32(base + HBUF() + 56, (bits >> 32) & HASH_M())
+    hash_store_be32(base + HBUF() + 60, bits & HASH_M())
+    c = sha1_compress(c)
+    i = 0
+    while i < 5:
+        hash_store_be32(out + i * 4, load_i64(base + i * 8))
+        i = i + 1
+    return c
+
+def sha1_digest(c: Sha1) -> string:
+    tmp = malloc(20)
+    c = sha1_final(c, tmp)
+    s = hashlib_hex(tmp, 20)
+    free(tmp)
+    return s
+
+def sha1(data: int, length: int) -> string:
+    c = sha1_new()
+    c = sha1_update(c, data, length)
+    return sha1_digest(c)
+
+def sha1_str(s: string) -> string:
+    return sha1(as_ptr(s), len(s))
+
+def sha1_raw(data: int, length: int, out: int) -> int:
+    c = sha1_new()
+    c = sha1_update(c, data, length)
+    c = sha1_final(c, out)
+    return 0
+
+# ============================================================
+# MD5
+# ============================================================
+
+struct Md5:
+    p: int
+
+def md5_new() -> Md5:
+    c = Md5(p=malloc(784))
+    store_i64(c.p + 0, 1732584193)     # 0x67452301
+    store_i64(c.p + 8, 4023233417)     # 0xefcdab89
+    store_i64(c.p + 16, 2562383102)    # 0x98badcfe
+    store_i64(c.p + 24, 271733878)     # 0x10325476
+    store_i64(c.p + HBLEN(), 0)
+    store_i64(c.p + HTOTAL(), 0)
+    return c
+
+def md5_w(base: int, i: int) -> int:
+    return load_i64(base + HW() + i * 8)
+
+def md5_setw(base: int, i: int, v: int):
+    store_i64(base + HW() + i * 8, v)
+
+# per-round shift amounts (i within the 64-step loop)
+def md5_shift(i: int) -> int:
+    r = i % 4
+    if i < 16:
+        if r == 0:
+            return 7
+        if r == 1:
+            return 12
+        if r == 2:
+            return 17
+        return 22
+    if i < 32:
+        if r == 0:
+            return 5
+        if r == 1:
+            return 9
+        if r == 2:
+            return 14
+        return 20
+    if i < 48:
+        if r == 0:
+            return 4
+        if r == 1:
+            return 11
+        if r == 2:
+            return 16
+        return 23
+    if r == 0:
+        return 6
+    if r == 1:
+        return 10
+    if r == 2:
+        return 15
+    return 21
+
+def md5_compress(c: Md5) -> Md5:
+    base = c.p
+    k: [int; 64] = [
+        3614090360, 3905402710, 606105819, 3250441966,
+        4118548399, 1200080426, 2821735955, 4249261313,
+        1770035416, 2336552879, 4294925233, 2304563134,
+        1804603682, 4254626195, 2792965006, 1236535329,
+        4129170786, 3225465664, 643717713, 3921069994,
+        3593408605, 38016083, 3634488961, 3889429448,
+        568446438, 3275163606, 4107603335, 1163531501,
+        2850285829, 4243563512, 1735328473, 2368359562,
+        4294588738, 2272392833, 1839030562, 4259657740,
+        2763975236, 1272893353, 4139469664, 3200236656,
+        681279174, 3936430074, 3572445317, 76029189,
+        3654602809, 3873151461, 530742520, 3299628645,
+        4096336452, 1126891415, 2878612391, 4237533241,
+        1700485571, 2399980690, 4293915773, 2240044497,
+        1873313359, 4264355552, 2734768916, 1309151649,
+        4149444226, 3174756917, 718787259, 3951481745,
+    ]
+    i = 0
+    while i < 16:
+        md5_setw(base, i, hash_load_le32(base + HBUF() + i * 4))
+        i = i + 1
+    a = load_i64(base + 0)
+    b = load_i64(base + 8)
+    cc = load_i64(base + 16)
+    d = load_i64(base + 24)
+    i = 0
+    while i < 64:
+        f = 0
+        g = 0
+        if i < 16:
+            f = (b & cc) | (~b & d)
+            g = i
+        elif i < 32:
+            f = (d & b) | (~d & cc)
+            g = (5 * i + 1) % 16
+        elif i < 48:
+            f = b ^ cc ^ d
+            g = (3 * i + 5) % 16
+        else:
+            f = cc ^ (b | ~d)
+            g = (7 * i) % 16
+        f = (f & HASH_M()) + a + k[i] + md5_w(base, g)
+        f = f & HASH_M()
+        a = d
+        d = cc
+        cc = b
+        b = (b + hash_rol(f, md5_shift(i))) & HASH_M()
+        i = i + 1
+    store_i64(base + 0, (load_i64(base + 0) + a) & HASH_M())
+    store_i64(base + 8, (load_i64(base + 8) + b) & HASH_M())
+    store_i64(base + 16, (load_i64(base + 16) + cc) & HASH_M())
+    store_i64(base + 24, (load_i64(base + 24) + d) & HASH_M())
+    return c
+
+def md5_update(c: Md5, data: int, length: int) -> Md5:
+    base = c.p
+    off = 0
+    while off < length:
+        space = 64 - load_i64(base + HBLEN())
+        take = space
+        if length - off < take:
+            take = length - off
+        memcpy(base + HBUF() + load_i64(base + HBLEN()), data + off, take)
+        store_i64(base + HBLEN(), load_i64(base + HBLEN()) + take)
+        store_i64(base + HTOTAL(), load_i64(base + HTOTAL()) + take)
+        off = off + take
+        if load_i64(base + HBLEN()) == 64:
+            c = md5_compress(c)
+            store_i64(base + HBLEN(), 0)
+    return c
+
+def md5_final(c: Md5, out: int) -> Md5:
+    base = c.p
+    buflen = load_i64(base + HBLEN())
+    store_u8(base + HBUF() + buflen, 0, 128)
+    buflen = buflen + 1
+    if buflen > 56:
+        while buflen < 64:
+            store_u8(base + HBUF() + buflen, 0, 0)
+            buflen = buflen + 1
+        c = md5_compress(c)
+        buflen = 0
+    while buflen < 56:
+        store_u8(base + HBUF() + buflen, 0, 0)
+        buflen = buflen + 1
+    bits = load_i64(base + HTOTAL()) * 8
+    # MD5 spells the bit length LITTLE-endian
+    hash_store_le32(base + HBUF() + 56, bits & HASH_M())
+    hash_store_le32(base + HBUF() + 60, (bits >> 32) & HASH_M())
+    c = md5_compress(c)
+    i = 0
+    while i < 4:
+        hash_store_le32(out + i * 4, load_i64(base + i * 8))
+        i = i + 1
+    return c
+
+def md5_digest(c: Md5) -> string:
+    tmp = malloc(16)
+    c = md5_final(c, tmp)
+    s = hashlib_hex(tmp, 16)
+    free(tmp)
+    return s
+
+def md5(data: int, length: int) -> string:
+    c = md5_new()
+    c = md5_update(c, data, length)
+    return md5_digest(c)
+
+def md5_str(s: string) -> string:
+    return md5(as_ptr(s), len(s))
+
+def md5_raw(data: int, length: int, out: int) -> int:
+    c = md5_new()
+    c = md5_update(c, data, length)
+    c = md5_final(c, out)
+
+    return 0

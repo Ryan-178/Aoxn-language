@@ -1,0 +1,144 @@
+# Aoxn standard library — base64 (v0.44.0, docs/stdlib-todo.md #21).
+#
+# RFC 4648 encode AND decode, standard and URL-safe alphabets. The SDK-side
+# encoder in stdlib/net/codec.ax (`net_b64_encode_*`) predates this module
+# and stays where it is; this is the general-purpose module with the decode
+# direction codec never had.
+#
+# Decode is liberal in one way only: both alphabets (`+/` and `-_`) are
+# accepted by BOTH decoders, because distinguishing them buys nothing.
+# Padding is optional on input ("Zm8" decodes like "Zm8="); trailing
+# garbage after a `=` is rejected, as is any length that would leave
+# orphan bits. Encode always emits the `=` padding.
+#
+# The decode result is a B64{p, n} — a pointer and a length, because decoded
+# bytes may contain NUL and a string cannot carry those (len() is strlen).
+# Free p when done. The *_str convenience wrappers return a string and are
+# for text payloads only (a NUL inside truncates them, documented here).
+#
+# Plain Aoxn only (no dict/None/fn-ptr/raise): self-host compilable.
+
+import * from "stdlib.ax"
+
+struct B64:
+    p: int
+    n: int
+
+def b64_std_table() -> string:
+    return "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
+
+def b64_url_table() -> string:
+    return "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"
+
+# ---- encode ----
+
+def b64_encode_alpha(data: int, length: int, tbl: string) -> string:
+    out = malloc((length + 2) / 3 * 4 + 1)
+    oi = 0
+    i = 0
+    while i + 2 < length:
+        triple = load_u8(data, i) * 65536 + load_u8(data, i + 1) * 256 + load_u8(data, i + 2)
+        store_u8(out, oi, load_u8(tbl, triple / 262144))
+        store_u8(out, oi + 1, load_u8(tbl, (triple / 4096) % 64))
+        store_u8(out, oi + 2, load_u8(tbl, (triple / 64) % 64))
+        store_u8(out, oi + 3, load_u8(tbl, triple % 64))
+        oi = oi + 4
+        i = i + 3
+    rem = length - i
+    if rem == 1:
+        triple = load_u8(data, i) * 65536
+        store_u8(out, oi, load_u8(tbl, triple / 262144))
+        store_u8(out, oi + 1, load_u8(tbl, (triple / 4096) % 64))
+        store_u8(out, oi + 2, 61)
+        store_u8(out, oi + 3, 61)
+        oi = oi + 4
+    elif rem == 2:
+        triple = load_u8(data, i) * 65536 + load_u8(data, i + 1) * 256
+        store_u8(out, oi, load_u8(tbl, triple / 262144))
+        store_u8(out, oi + 1, load_u8(tbl, (triple / 4096) % 64))
+        store_u8(out, oi + 2, load_u8(tbl, (triple / 64) % 64))
+        store_u8(out, oi + 3, 61)
+        oi = oi + 4
+    store_u8(out, oi, 0)
+    return as_string(out)
+
+def b64_encode(data: int, length: int) -> string:
+    return b64_encode_alpha(data, length, b64_std_table())
+
+def b64_encode_url(data: int, length: int) -> string:
+    return b64_encode_alpha(data, length, b64_url_table())
+
+def b64_encode_str(s: string) -> string:
+    return b64_encode(as_ptr(s), len(s))
+
+def b64_encode_url_str(s: string) -> string:
+    return b64_encode_url(as_ptr(s), len(s))
+
+# ---- decode ----
+
+# one base64 character's 6-bit value; -1 when not a digit of either alphabet
+# (`=` is handled by the caller as padding, not here)
+def b64_val(c: int) -> int:
+    if c >= 65 and c <= 90:
+        return c - 65
+    if c >= 97 and c <= 122:
+        return c - 97 + 26
+    if c >= 48 and c <= 57:
+        return c - 48 + 52
+    if c == 43 or c == 45:
+        return 62
+    if c == 47 or c == 95:
+        return 63
+    return -1
+
+# decode s into a fresh buffer; n == -1 marks invalid input
+def b64_decode(s: string) -> B64:
+    out = malloc(len(s) / 4 * 3 + 3)
+    n = 0
+    acc = 0
+    bits = 0
+    i = 0
+    while i < len(s):
+        c = str_get(s, i)
+        if c == 61:
+            # padding: everything after the first `=` must also be `=`
+            j = i
+            while j < len(s):
+                if str_get(s, j) != 61:
+                    return B64(p=out, n=-1)
+                j = j + 1
+            break
+        v = b64_val(c)
+        if v < 0:
+            return B64(p=out, n=-1)
+        acc = acc * 64 + v
+        bits = bits + 6
+        if bits >= 8:
+            bits = bits - 8
+            store_u8(out, n, (acc >> bits) & 255)
+            n = n + 1
+            acc = acc & ((1 << bits) - 1)
+        i = i + 1
+    # leftover 6 bits means a single orphan character (length % 4 == 1);
+    # 0/4/2-bit remainders are the 4n / 4n+2 / 4n+3 spellings
+    if bits == 6:
+        return B64(p=out, n=-1)
+    return B64(p=out, n=n)
+
+def b64_decode_url(s: string) -> B64:
+    # both alphabets are accepted everywhere; the URL variant exists so
+    # call sites read symmetrically with the encode side
+    return b64_decode(s)
+
+# text convenience: the decoded bytes as a string, "" when invalid.
+# A NUL byte inside the payload truncates the result (len() is strlen) —
+# use b64_decode for binary payloads.
+def b64_decode_str(s: string) -> string:
+    r = b64_decode(s)
+    if r.n < 0:
+        return ""
+    p = malloc(r.n + 1)
+    memcpy(p, r.p, r.n)
+    store_u8(p, r.n, 0)
+    free(r.p)
+    return as_string(p)

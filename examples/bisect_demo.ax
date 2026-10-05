@@ -1,0 +1,30 @@
+# bisect.ax + heapq.ax demo — sorted insertion search and a min-heap.
+# Run: cargo run -- run examples\bisect_demo.ax
+import * from "stdlib/bisect"
+import * from "stdlib/heapq"
+
+def main() -> int:
+    # keep a Vec sorted while inserting
+    a = vec_new()
+    a = insort_right(a, 7)
+    a = insort_right(a, 2)
+    a = insort_right(a, 5)
+    a = insort_right(a, 5)
+    i = 0
+    while i < a.len:
+        print(vec_get(a, i))            # 2 5 5 7
+        i = i + 1
+    print(bisect_left(a, 5))            # 1 (before the equals)
+    print(bisect_right(a, 5))           # 3 (after the equals)
+    print(bisect_find(a, 7))            # 3
+    # a min-heap: smallest pops first
+    h = heap_new()
+    h = heap_push(h, 9)
+    h = heap_push(h, 4)
+    h = heap_push(h, 7)
+    h = heap_push(h, 1)
+    h = heap_pop(h)
+    print(h.res)                        # 1
+    h = heap_pop(h)
+    print(h.res)                        # 4
+    return 0

@@ -46,7 +46,7 @@ suite's mock server uses).
 | File | What lives there |
 |---|---|
 | `stdlib/net/codec.ax` | base64, percent-encoding, UTF-8 ↔ UTF-16LE — **shared with the OpenAI SDK** |
-| `stdlib/net/json.ax` | the JSON DOM: 40-byte nodes in one slab, recursive-descent parser, serializer, typed getters, and a **builder** (`jb_*`) |
+| `stdlib/json.ax` | the JSON DOM: 40-byte nodes in one slab, recursive-descent parser, serializer, typed getters, and a **builder** (`jb_*`) |
 | `stdlib/net/http.ax` | WinHTTP transport (one-shot + streaming), URL split, header assembly, raw-header parsing, retry policy |
 | `stdlib/net/sse.ax` | server-sent-events parser: feed bytes, pull `data:` payloads **and `event:` names**, `[DONE]` detection, CRLF/LF, comment lines |
 | `stdlib/anthropic/blocks.ax` | content-block constructors and the message list |

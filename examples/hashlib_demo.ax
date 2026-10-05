@@ -1,0 +1,21 @@
+# hashlib.ax + hmac.ax + base64.ax demo — digests, MACs, encodings.
+# Run: cargo run -- run examples\hashlib_demo.ax
+import * from "stdlib/hashlib"
+import * from "stdlib/hmac"
+import * from "stdlib/base64"
+
+def main() -> int:
+    print(sha256_str("abc"))
+    print(sha1_str("abc"))
+    print(md5_str("abc"))
+    # an incremental digest over several chunks
+    c = sha256_new()
+    c = sha256_update(c, as_ptr("first "), 6)
+    c = sha256_update(c, as_ptr("second"), 6)
+    print(sha256_digest(c))
+    # keyed authentication
+    print(hmac_sha256("key", "The quick brown fox jumps over the lazy dog"))
+    # encodings (both alphabets; decode accepts either)
+    print(b64_encode_str("hello, aoxn"))
+    print(b64_decode_str("aGVsbG8sIGFveG4="))
+    return 0
