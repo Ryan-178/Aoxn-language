@@ -520,6 +520,19 @@ crates/aoxn-pkg       package manager crate (its own dependency set; see above)
   `ui_clip_get/set` (CF_UNICODETEXT). Render text slices with
   `ui_measure_sub`/`ui_draw_text_sub` (frame-arena based — never `str_sub`
   on a frame path).
+- **v0.45.0 internals worth knowing**: text click/drag positioning goes
+  through `text_pos_in_range` (O(n) — one measure per codepoint, summed;
+  never re-measure `s[0..j)` per codepoint, that was O(n²)); the caret
+  x-offset rides a one-entry cache at st 532..535 (key: id/caret/len —
+  keep `caret_offset`'s `from` a pure function of (s, caret));
+  `TreeModel` blocks are 4 slots per node (parent, expanded, label, child
+  count — `tree_has_child` is O(1) and `tree_set_parent` maintains the
+  count on re-parent); all five scrollbars are one `sb_widget`; popup
+  lists clamp to the first 32 items and `overlay_item_str` answers ""
+  out of range (a scrolled 40-item popup used to `as_string` a garbage
+  pointer); an open menu consumes the arrow/Enter/Esc key edges and the
+  WM_CHAR queue for its frame — modal, so call `ui_menubar`/`ui_menu`
+  before the page content.
 - **GDI stock pens: `DC_PEN = 19`, `DC_BRUSH = 18`** — `GetStockObject(20)`
   is out of range and fails silently (no outline ever drew; fixed in
   v0.29.2). Keep the decimal-constant discipline: no hex literals, no
@@ -527,7 +540,9 @@ crates/aoxn-pkg       package manager crate (its own dependency set; see above)
 - The shared heap block (`st`, 1024 i64 slots) layout is documented in the
   `ui.ax` header comment — extend it there when adding state. Slots
   820/821 = the clip-rect stack, 822/823 = the clipboard buffer,
-  532 = the close request consumed by `plat_pump` (see below).
+  532..535 = the caret x-offset cache (owner id / caret / length / width;
+  the old "532 = close request" note was stale — close detection has been
+  the `IsWindow` poll since v2).
 - **GDI `DC_PEN`/`DC_BRUSH` traps (Windows)**: `GetStockObject(20)` is out
   of range and fails silently. Keep the decimal-constant discipline in the
   UI sources: no hex literals there (bitwise/shift operators exist since

@@ -312,6 +312,14 @@ a menu is open switches menus; outside click / Esc closes). `ui_menu`
 draws the open menu's items as a floating overlay (via `ui_present`) and
 returns `MenuPick{open, pick}`.
 
+An open menu is keyboard-navigable: mouse hover or Up/Down move the
+highlight (both wrap), Enter picks the highlighted item, Esc closes. The
+open menu is also **modal for input** — it consumes the arrow/Enter/Esc
+edges and the WM_CHAR queue for that frame, so widgets drawn after it do
+not fire on the same frame. Call `ui_menubar`/`ui_menu` before the page
+content (the natural order) for that to hold. A popup lists at most the
+first 32 items.
+
 ### Model/view without interfaces (tree & table)
 
 Qt's model/view shape adapted to a language with no interfaces: a model is
@@ -321,7 +329,7 @@ a **heap block behind a one-field struct**, so views can mutate it in place
 | Model | Construction / access | View |
 |---|---|---|
 | `TableModel` | `table_model_new(rows, cols)`, `tm_set/tm_get`, `tm_set_header/tm_header`, `tm_set_colw/tm_colw`, `tm_rows/tm_cols` | `ui_table(c, x, y, w, h, m, sel_row, scroll) -> TableRet` |
-| `TreeModel` | `tree_model_new(n)`, `tree_set_label/tree_label`, `tree_set_parent/tree_parent`, `tree_set_expanded/tree_expanded`, `tree_depth/tree_visible` | `ui_tree(c, x, y, w, h, m, sel, scroll) -> TreeRet` |
+| `TreeModel` | `tree_model_new(n)`, `tree_set_label/tree_label`, `tree_set_parent/tree_parent`, `tree_set_expanded/tree_expanded`, `tree_depth/tree_visible`, `tree_has_child` (O(1) — the model carries a per-node child count that `tree_set_parent` maintains, including on re-parent) | `ui_tree(c, x, y, w, h, m, sel, scroll) -> TreeRet` |
 
 `ui_tree` toggles a node's expansion **directly on the model** when the
 +/- is clicked; `ui_table` draws header + rows with per-column widths
@@ -450,14 +458,33 @@ window, draw frames, close itself).
 - single window per process; no MDI or child windows
 - `ui_textbox`/`ui_textedit` have no rich text; the editor has no
   undo/redo or word-wrap (long lines clip)
-- `ui_menubar` supports one menu level (no nested submenus) and no
-  keyboard arrow navigation inside an open menu (Esc closes)
+- `ui_menubar` supports one menu level (no nested submenus)
 - `ui_table` has no column resize/drag-reorder or cell editing;
   `ui_listbox`/`ui_combobox`/`ui_menu` take up to 32 items in a floating
-  popup (`overlay_items_store` clamp)
+  popup (`overlay_items_store` clamp — longer lists silently show their
+  first 32 entries)
 - full-window repaint each frame — fine at widget scale, not optimized
   for huge canvases
 - no animations/timing APIs; `cap_ms` and `plat_now_ms` (tooltip delay,
   caret blink) are the only pacing controls
 - once the new module system settles, `ui`/`ui_draw`/the backends should be
   migrated like the rest of the stdlib
+
+## Performance notes (v0.45.0)
+
+- **Text positioning is O(n) per click/drag**: `text_pos_in_range`
+  measures one codepoint at a time and accumulates widths; the textbox
+  and both textedit call sites share it (the per-codepoint re-measure of
+  `s[0..j)` that made long lines O(n²) is gone).
+- **The caret x-offset is cached** at st 532..535 (owner id / caret /
+  length / width) — an idle focused textbox or textedit measures nothing
+  per frame; the cache misses exactly when the text or caret moved.
+- **`tree_has_child` is O(1)** against the per-node child count in the
+  `TreeModel` block (4 slots per node: parent, expanded, label, child
+  count); the tree view used to scan the whole model per visible row.
+- **One scrollbar**: list/tree/table/textedit/scroll-area all drive the
+  same `sb_widget` (groove + thumb + claim/drag/release); the scrollbar
+  hit column is the full widget height even when the track starts below
+  a header.
+- Rendering cost is unchanged by design: one GDI fill/text call per
+  widget op, one `BitBlt` per frame (`plat_present`).

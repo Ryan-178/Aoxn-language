@@ -5,6 +5,65 @@ minor bumps while pre-1.0: each minor version is a language milestone.
 
 ## [Unreleased]
 
+## [0.45.0] - 2026-10-05
+
+Theme: **the UI toolkit gets a performance and correctness pass.** Same
+widget set, same immediate-mode design — the fixes are inside the
+machinery.
+
+### Fixed
+
+- **Scrolling a combobox/menu popup past 32 items read garbage pointers.**
+  The overlay item slots end at `st 815` (32 entries), but the popup record
+  stored the *unclamped* item count, so a long list scrolled into the
+  tooltip/layout slots and handed `as_string` a bogus pointer. Both widgets
+  now clamp the popup to the first 32 items (the documented limit), and
+  `overlay_item_str` itself answers `""` for any index outside `784..815`
+  instead of dereferencing whatever lives there.
+
+### Performance
+
+- **Text click/drag positioning is O(n), not O(n²).** `text_pos_from_x`
+  re-measured `s[0..j)` for every codepoint, and `ui_textedit` carried two
+  inline copies of the same loop — a click into a several-thousand-char
+  line measured megabytes of text through GDI. The new
+  `text_pos_in_range` measures one codepoint at a time and accumulates;
+  the textbox and both textedit call sites share it.
+- **`tree_has_child` is O(1).** The `TreeModel` block grew a fourth slot
+  per node (child count, maintained by `tree_set_parent` including on
+  re-parent), so the tree view stops scanning every node per visible row
+  per frame — big trees rendered O(n²) before. `tree_has_child` /
+  `tree_nth_visible` moved to `ui.ax` where the other model math lives.
+- **The caret x-offset is cached again** (st 532..535: owner id / caret /
+  length / width) for the textbox and the textedit blink — the docs have
+  claimed this cache since v2 and the v3 rewrite dropped it; an idle
+  focused field measures nothing per frame again.
+
+### Added
+
+- **Menu keyboard navigation.** An open menu highlights an item (mouse
+  hover or Up/Down, both wrap), Enter picks it, Esc closes — the
+  "no keyboard navigation inside an open menu" known limit is gone. The
+  open menu is modal for input: it consumes the navigation keys and the
+  WM_CHAR queue, so a textbox or button drawn after it does not fire on
+  the same frame (call `ui_menubar`/`ui_menu` before the page content).
+
+### Changed
+
+- The five copies of the vertical scrollbar (list/tree/table/textedit/
+  scroll area) are one `sb_widget` — same hit column (full widget height),
+  same thumb math, same claim/drag/release cycle; `ui_scroll_begin` now
+  also drags on the press frame like every other scrollbar.
+- `ui_fini` frees `msg`/`pt`/`rect` directly (the old `for i in
+  range(0, 1)` wrapper is gone).
+
+### Tests
+
+- `ui_v3_portable` pins the O(1) `tree_has_child` (including re-parent
+  bookkeeping), `tree_nth_visible` bounds, and the `overlay_item_str`
+  out-of-range clamp; the v2 window smoke now drives a 40-item combobox
+  (past the popup clamp) through 60 frames.
+
 ## [0.44.1] - 2026-10-05
 
 ### Fixed

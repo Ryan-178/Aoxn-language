@@ -367,6 +367,9 @@ fn ui_window_v2_widgets_smoke() {
     let dir = temp_dir("v2smoke");
     let src = dir.join("ui_v2smoke.ax");
     let exe = dir.join("ui_v2smoke.exe");
+    // 40 items: past the 32-slot popup clamp — the combobox must build its
+    // popup record (and scroll math) against the clamped count without
+    // ever reading an out-of-range overlay slot
     std::fs::write(
         &src,
         format!(
@@ -375,6 +378,7 @@ fn ui_window_v2_widgets_smoke() {
             r#"def main() -> int:
     c = ui_init("ui v2 smoke", 640, 480)
     items = ["one", "two", "three"]
+    big = ["i0", "i1", "i2", "i3", "i4", "i5", "i6", "i7", "i8", "i9", "i10", "i11", "i12", "i13", "i14", "i15", "i16", "i17", "i18", "i19", "i20", "i21", "i22", "i23", "i24", "i25", "i26", "i27", "i28", "i29", "i30", "i31", "i32", "i33", "i34", "i35", "i36", "i37", "i38", "i39"]
     tabs = ["A", "B"]
     txt = "hi"
     n = 0
@@ -390,7 +394,7 @@ fn ui_window_v2_widgets_smoke() {
         ui_toggle(c, 10, 106, 120, 26, "t", True)
         ui_spinbox(c, 10, 142, 100, 1, 0, 5)
         ui_listbox(c, 10, 182, 180, 90, items, 3, 0, 0)
-        ui_combobox(c, 10, 284, 180, items, 3, 0)
+        ui_combobox(c, 10, 284, 180, big, 40, 0)
         ui_tabs(c, 10, 326, 200, tabs, 2, 0)
         ui_groupbox(c, 10, 368, 200, 80, "g")
         sc = ui_scroll_begin(c, 230, 10, 200, 150, 0, 600)
@@ -513,6 +517,16 @@ fn ui_v3_portable() {
     tree_set_expanded(tr, 0, True)
     tree_set_expanded(tr, 1, True)
     print(tree_visible(tr, 2))
+    print(tree_has_child(tr, 0))
+    print(tree_has_child(tr, 1))
+    print(tree_has_child(tr, 3))
+    tree_set_parent(tr, 2, 0)
+    print(tree_has_child(tr, 1))
+    print(tree_has_child(tr, 0))
+    print(tree_nth_visible(tr, 1))
+    print(tree_nth_visible(tr, 99))
+    print(overlay_item_str(c, 40))
+    print(overlay_item_str(c, -1))
     ui_state_free(c)
     return 0
 "#
@@ -549,6 +563,15 @@ fn ui_v3_portable() {
         "2",              // tree_depth(2) (2 -> 1 -> 0)
         "false",          // visible before expansion
         "true",           // visible after expanding ancestors
+        "true",           // tree_has_child(0): node 1 points at it
+        "true",           // tree_has_child(1): node 2 points at it
+        "false",          // tree_has_child(3): leaf
+        "false",          // after reparenting 2 -> 0, node 1 is a leaf
+        "true",           // ...and node 0 has both remaining children
+        "1",              // tree_nth_visible(1) = node 1 (all expanded)
+        "-1",             // tree_nth_visible past the end
+        "",               // overlay_item_str clamps out-of-range to ""
+        "",               // ...on both sides
     ];
     assert_eq!(lines.len(), expected.len(), "unexpected output: {out:?}");
     for (got, want) in lines.iter().zip(expected.iter()) {

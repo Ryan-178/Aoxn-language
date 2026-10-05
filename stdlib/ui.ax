@@ -34,8 +34,7 @@
 #                  545 kind (0 none, 1 combo popup, 2 tooltip)
 #                  546 owner widget id
 #                  547..551 x, y, w, item_h, n
-#                  552 current item, 553 scroll (items), 554 items/text ptr
-#       556/557  tooltip hover id / hover start (ms)
+#                  552 current item, 553 scroll (items), 554 items/text ptr#       556/557  tooltip hover id / hover start (ms)
 #       558      layout stack depth
 #       560..719 layout stack: 8 levels x 20 slots (kind, inner x/y/w/h,
 #                  cursor x/y, spacing, cols, col, row_h, ...)
@@ -653,7 +652,12 @@ def overlay_items_store[N](c: UI, items: [string; N], n: int):
         st_set(c, 784 + i, as_ptr(items[i]))
         i = i + 1
 
+# popup items live at st 784..815; anything outside that window reads as ""
+# instead of a garbage pointer (a popup scrolled past the clamp used to
+# reach into the tooltip/layout slots and crash on as_string)
 def overlay_item_str(c: UI, i: int) -> string:
+    if i < 0 or i > 31:
+        return ""
     return as_string(st_get(c, 784 + i))
 
 # tooltip hover tracking: call with the hovered widget id; returns how long
@@ -1020,8 +1024,10 @@ def tm_get(m: TableModel, row: int, col: int) -> string:
         return as_string(p)
     return ""
 
-# TreeModel block: [0] count, then per node 3 slots: parent (-1 = root),
-# expanded (0/1), label string ptr.
+# TreeModel block: [0] count, then per node 4 slots: parent (-1 = root),
+# expanded (0/1), label string ptr, child count. The count is maintained by
+# tree_set_parent so tree_has_child is O(1) — the tree view asks it for
+# every visible row every frame, and a scan per row made big trees O(n²).
 
 struct TreeModel:
     p: int
@@ -1029,12 +1035,12 @@ struct TreeModel:
 def tree_model_new(n: int) -> TreeModel:
     if n < 1:
         n = 1
-    p = malloc((1 + 3 * n) * 8)
-    fill_zero(p, (1 + 3 * n) * 8)
+    p = malloc((1 + 4 * n) * 8)
+    fill_zero(p, (1 + 4 * n) * 8)
     store_i64(p, n)
     i = 0
     while i < n:
-        store_i64(p + (1 + i * 3) * 8, -1)
+        store_i64(p + (1 + i * 4) * 8, -1)
         i = i + 1
     return TreeModel(p=p)
 
@@ -1043,11 +1049,20 @@ def tree_count(m: TreeModel) -> int:
 
 def tree_set_parent(m: TreeModel, i: int, parent: int):
     if i >= 0 and i < tree_count(m):
-        store_i64(m.p + (1 + i * 3) * 8, parent)
+        old = load_i64(m.p + (1 + i * 4) * 8)
+        if old == parent:
+            return
+        if old >= 0 and old < tree_count(m):
+            op = m.p + (1 + old * 4 + 3) * 8
+            store_i64(op, load_i64(op) - 1)
+        if parent >= 0 and parent < tree_count(m):
+            np = m.p + (1 + parent * 4 + 3) * 8
+            store_i64(np, load_i64(np) + 1)
+        store_i64(m.p + (1 + i * 4) * 8, parent)
 
 def tree_parent(m: TreeModel, i: int) -> int:
     if i >= 0 and i < tree_count(m):
-        return load_i64(m.p + (1 + i * 3) * 8)
+        return load_i64(m.p + (1 + i * 4) * 8)
     return -1
 
 def tree_set_expanded(m: TreeModel, i: int, open: bool):
@@ -1055,24 +1070,30 @@ def tree_set_expanded(m: TreeModel, i: int, open: bool):
         v = 0
         if open:
             v = 1
-        store_i64(m.p + (1 + i * 3 + 1) * 8, v)
+        store_i64(m.p + (1 + i * 4 + 1) * 8, v)
 
 def tree_expanded(m: TreeModel, i: int) -> bool:
     if i >= 0 and i < tree_count(m):
-        return load_i64(m.p + (1 + i * 3 + 1) * 8) == 1
+        return load_i64(m.p + (1 + i * 4 + 1) * 8) == 1
     return False
 
 def tree_set_label(m: TreeModel, i: int, s: string):
     if i >= 0 and i < tree_count(m):
-        store_i64(m.p + (1 + i * 3 + 2) * 8, as_ptr(s))
+        store_i64(m.p + (1 + i * 4 + 2) * 8, as_ptr(s))
 
 def tree_label(m: TreeModel, i: int) -> string:
     if i >= 0 and i < tree_count(m):
-        p = load_i64(m.p + (1 + i * 3 + 2) * 8)
+        p = load_i64(m.p + (1 + i * 4 + 2) * 8)
         if p == 0:
             return ""
         return as_string(p)
     return ""
+
+# O(1) against the per-node child count (tree_set_parent keeps it)
+def tree_has_child(m: TreeModel, i: int) -> bool:
+    if i >= 0 and i < tree_count(m):
+        return load_i64(m.p + (1 + i * 4 + 3) * 8) > 0
+    return False
 
 def tree_depth(m: TreeModel, i: int) -> int:
     d = 0
@@ -1090,3 +1111,18 @@ def tree_visible(m: TreeModel, i: int) -> bool:
             return False
         p = tree_parent(m, p)
     return True
+
+# the i-th visible node in flat order (-1 when the row is past the end);
+# click-to-select in the tree view walks this way
+def tree_nth_visible(m: TreeModel, nth: int) -> int:
+    n = tree_count(m)
+    v = 0
+    j = 0
+    found = -1
+    while j < n:
+        if tree_visible(m, j):
+            if v == nth:
+                found = j
+            v = v + 1
+        j = j + 1
+    return found

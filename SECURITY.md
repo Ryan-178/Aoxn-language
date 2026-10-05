@@ -16,8 +16,8 @@ minors do not.
 
 | Version | Supported |
 |---|---|
-| `0.44.x` (current) | ✅ yes |
-| `0.43.x` and earlier | ❌ no — please reproduce on `main` or the latest release |
+| `0.45.x` (current) | ✅ yes |
+| `0.44.x` and earlier | ❌ no — please reproduce on `main` or the latest release |
 | `main` (development) | ✅ yes, fixes land here first |
 
 Fix versions are always noted in [`CHANGELOG.md`](CHANGELOG.md). If you need a
@@ -355,8 +355,8 @@ Aoxn 处于 pre-1.0 阶段：只有最新的版本线接收安全修复，旧的
 
 | 版本 | 支持情况 |
 |---|---|
-| `0.44.x`（当前） | ✅ 支持 |
-| `0.43.x` 及更早 | ❌ 不支持——请在 `main` 或最新发布上复现 |
+| `0.45.x`（当前） | ✅ 支持 |
+| `0.44.x` 及更早 | ❌ 不支持——请在 `main` 或最新发布上复现 |
 | `main`（开发线） | ✅ 支持，修复最先落在这里 |
 
 修复版本永远记在 [`CHANGELOG.md`](CHANGELOG.md)。如需把修复反向移植到旧

@@ -49,7 +49,7 @@ def main() -> int:
 
 ### Install (one file, Windows)
 
-Download **`Aoxn-0.44.1-Setup.exe`** from the
+Download **`Aoxn-0.45.0-Setup.exe`** from the
 [releases page](https://github.com/AlonechatWorkspace/Aoxn-language/releases)
 and double-click it. That single executable carries the compiler, the
 standard library, the UI toolkit and the examples — nothing else to download,
@@ -304,13 +304,18 @@ in pure Aoxn on raw FFI; v0.29.3 brought it to **Qt grade**: layout
 managers (vbox/hbox/grid with stretch), real text input with caret,
 UTF-8-aware editing and **text selection** (Shift+arrows/drag, Ctrl+A/C/X/V
 clipboard), a **multi-line editor**, a keyboard focus chain (Tab/Enter/
-Space), a **menu bar**, **tree/table model+view** (heap `TreeModel`/
-`TableModel`), **signal-slot events** without function pointers, and 20+
-widgets (buttons, toggles, checkboxes, radio groups, sliders, spin boxes,
-text fields, list boxes, floating combo boxes, tabs, group boxes, scroll
-areas, tooltips), disabled groups, floating overlays and 16-role light/dark
-themes. Widgets are plain functions called every frame and the application
-owns all state, which is what fits a language without callbacks (yet).
+Space), a **menu bar** (keyboard-navigable and input-modal since v0.45.0:
+Up/Down wrap, Enter picks, Esc closes), **tree/table model+view** (heap
+`TreeModel`/`TableModel`), **signal-slot events** without function pointers,
+and 20+ widgets (buttons, toggles, checkboxes, radio groups, sliders, spin
+boxes, text fields, list boxes, floating combo boxes, tabs, group boxes,
+scroll areas, tooltips), disabled groups, floating overlays and 16-role
+light/dark themes. Widgets are plain functions called every frame and the
+application owns all state, which is what fits a language without callbacks
+(yet). v0.45.0 is a performance and correctness pass over the machinery:
+O(n) text positioning, an O(1) `tree_has_child`, the caret-measure cache,
+one shared scrollbar and a popup-overflow clamp — same widget set, same
+APIs.
 
 **The toolkit is three files** — a portable core (`ui.ax`), a
 platform-neutral widget layer (`ui_draw.ax`) and the Win32/GDI backend
@@ -704,10 +709,26 @@ Full reference, including limits: [`docs/css-assets.md`](docs/css-assets.md).
 
 ## Status
 
-**v0.44.1** · **Windows only** · 376 tests green
+**v0.45.0** · **Windows only** · 376 tests green
 (pipeline 154 + lib 21 + assets 21 + assets_v36 18 + symbols 8 + TS 34 + UI 9 +
 OpenAI SDK 2 + Anthropic SDK 2 + install 6 + stdlib module drivers 7 +
 aoxn-pkg 94; the IDE adds 36 Rust + 62 frontend tests of its own) ·
+**the UI toolkit gets a performance and correctness pass** (v0.45.0) —
+scrolling a combobox/menu popup past 32 items used to hand `as_string` a
+garbage pointer (the overlay item slots end at 32, but the popup record kept
+the unclamped count; both widgets now clamp and `overlay_item_str` answers
+`""` out of range); text click/drag positioning is O(n) instead of O(n²) —
+one measure per codepoint accumulated, where the old code re-measured
+`s[0..j)` per codepoint and the multi-line editor carried two inline copies
+of that loop; `tree_has_child` is O(1) against a per-node child count the
+`TreeModel` block carries (4 slots per node, maintained on re-parent — big
+trees used to render O(n²)); the caret x-offset cache the docs have promised
+since v2 exists again (st 532..535, so an idle focused field measures
+nothing per frame); an open menu is keyboard-navigable (Up/Down wrap, Enter
+picks, Esc closes) and modal for input, consuming the navigation keys and
+the WM_CHAR queue so widgets behind it do not fire; the five copies of the
+vertical scrollbar are one `sb_widget`, and `ui_fini` lost its
+`for i in range(0, 1)` wrapper ·
 **os_getenv stops truncating long values** (v0.44.1) — the v0.44.0
 implementation read environment variables into a fixed 2048-character buffer
 and treated the Win32 "buffer too small" answer as failure, so any longer
@@ -893,7 +914,7 @@ Apache-2.0 — see [`LICENSE`](LICENSE).
 ### 一个 exe 装全部（Windows）
 
 从 [releases 页面](https://github.com/AlonechatWorkspace/Aoxn-language/releases)
-下载 **`Aoxn-0.44.1-Setup.exe`**，双击即可。**这一个 exe 里就带着编译器、标准库、
+下载 **`Aoxn-0.45.0-Setup.exe`**，双击即可。**这一个 exe 里就带着编译器、标准库、
 UI 工具箱和示例程序**——不用再下载别的，也不用自己解压：
 
 ```console
@@ -1090,11 +1111,15 @@ def main() -> int:
 FFI），v0.29.3 升到 **Qt 级**：布局管理器（vbox/hbox/grid +
 千分比拉伸）、真文本输入（光标、UTF-8 感知编辑、**文本选区** Shift+方向键/
 拖拽、Ctrl+A/C/X/V 剪贴板）、**多行编辑器**、键盘焦点链（Tab/Enter/Space）、
-**菜单栏**、**树/表格模型视图**（堆 `TreeModel`/`TableModel`）、无函数指针的
+**菜单栏**（v0.45.0 起支持键盘导航且对输入模态：↑/↓ 循环移动、Enter 选中、
+Esc 关闭）、**树/表格模型视图**（堆 `TreeModel`/`TableModel`）、无函数指针的
 **信号槽事件**、20 余控件（按钮、切换钮、复选框、单选组、滑条、微调框、
 文本框、列表框、浮层下拉框、标签页、分组框、滚动区、工具提示）、禁用态、
 浮层覆盖与 16 色亮/暗主题。控件是每帧调用的普通函数，状态由应用自己
 持有——这正是"暂无回调"的语言所能承载的形态（用法示例见上方英文区）。
+v0.45.0 是对内部机制的一次性能与正确性整备：O(n) 文本定位、O(1) 的
+`tree_has_child`、光标测量缓存、共享滚动条与浮层溢出钳制——控件集合与
+API 面保持不变。
 
 **工具箱由三个文件组成**：可移植内核（`ui.ax`）、与平台无关的控件层
 （`ui_draw.ax`）、以及 Win32/GDI 后端（`ui_win.ax`）。一行 import 即可引入：
@@ -1398,10 +1423,21 @@ print(asset_path(styles_fingerprint()))   # …\assets\82b4fb25….css
 
 ## 现状
 
-**v0.44.1** · **只支持 Windows** · 376 测试全绿
+**v0.45.0** · **只支持 Windows** · 376 测试全绿
 （pipeline 154 + lib 21 + assets 21 + assets_v36 18 + symbols 8 + TS 34 + UI 9 +
 OpenAI SDK 2 + Anthropic SDK 2 + 安装布局 6 + 标准库模块驱动 7 + aoxn-pkg 94；
 IDE 另有 36 个 Rust + 62 个前端测试）·
+**UI 工具箱性能与正确性整备**（v0.45.0）——下拉框/菜单浮层滚动超过 32 项时会
+把垃圾指针递给 `as_string`（浮层条目槽位只有 32 个，浮层记录里却存着未钳制的
+数量；现在两侧都钳制，`overlay_item_str` 越界一律返回空串）；文本点击/拖拽
+定位从 O(n²) 降为 O(n)（逐码点测量累加，旧实现每个码点都重测 `s[0..j)`，
+多行编辑器里还内联了两份同样的循环）；`tree_has_child` 凭模型块里每节点一槽
+的子节点计数变 O(1)（每节点 4 槽，re-parent 时同步维护——大树此前渲染
+O(n²)）；文档自 v2 起承诺的光标 x 偏移缓存重新存在（st 532..535，空闲聚焦的
+输入框每帧零测量）；打开的菜单支持键盘导航（↑/↓ 循环、Enter 选中、Esc 关闭）
+且对输入模态——吞掉本帧的方向键/Enter/Esc 与 WM_CHAR，后面的控件不会同帧
+误触发；五份竖向滚动条合并为一个 `sb_widget`，`ui_fini` 去掉了
+`for i in range(0, 1)` 包裹 ·
 **os_getenv 不再截断长值**（v0.44.1）——v0.44.0 的实现把环境变量读进固定
 2048 字符的缓冲，把 Win32「缓冲太小」的回答当失败处理，更长的值一律返回
 空串；GitHub Actions 的 `PATH` 正好超过这个长度，标准库 os+glob 测试就是在
