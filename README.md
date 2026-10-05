@@ -193,6 +193,42 @@ implicitly, conditions must be `bool`, array indexing is unchecked (C-style),
 and every function must return a value on all paths. Strictness is a feature:
 the guarantees are simple enough for a machine to reason about.
 
+### v0.43.0 on the surface — modules you can name
+
+```Aoxn
+# util.ax and shapes.ax both define `area`. That used to be a hard error.
+import util
+import shapes as s
+from util import area            # one name, unqualified (imports are top-level)
+
+def main() -> int:
+    print(util.area(2))         # qualify across files — no prefixes needed
+    print(s.area(3))            # `as` renames the MODULE, not its members
+    print(area(4))              # the name `from` brought in
+    return 0
+```
+
+```Aoxn
+import shapes
+
+def scale(c: shapes.Circle) -> shapes.Circle:   # a type reached through a module
+    return shapes.Circle(r=c.r * 2)             # ...and constructed through it
+
+def main() -> int:
+    return scale(shapes.Circle(r=2)).r
+```
+
+The Python spellings all work and mean what they say in Python:
+`from m import *`, `from m import a, b`, `from m import a as b`, `import m`,
+`import m as n`. A **named import imports exactly what it lists** — anything
+else stays out of scope — and a module binding is a namespace, not a value, so
+`x = util` is an error while `util.f()` is not. A specifier can be written bare
+and dotted (`import stdlib.net.json`, dots being the `/` subpath separator) or
+quoted; the bare form also looks in the importing file's own directory, so
+`import util` finds the `util.ax` next to it. Importing two modules that both
+define `f` is fine as long as you reach them through their modules —
+star-importing both into one scope is a conflict, reported by name.
+
 ### v0.42.0 on the surface
 
 ```Aoxn
@@ -487,12 +523,12 @@ program. It also compiles the real stdlib and the full `examples/` suite. See
 
 ## Testing & CI
 
-`cargo test` runs the end-to-end suite — 261 tests in the compiler workspace
-(pipeline 141, compiler unit tests 20, TypeScript front end 34, UI 9, install
+`cargo test` runs the end-to-end suite — 275 tests in the compiler workspace
+(pipeline 154, compiler unit tests 21, TypeScript front end 34, UI 9, install
 layout 6, CSS assets 21, CSS assets v0.36 18, symbol export 8, OpenAI SDK 2,
-Anthropic SDK 2, installer 3)
+Anthropic SDK 2)
 plus the `aoxn-pkg`
-crate's 94 via `bash run_pkg_tests.sh`, 355 in
+crate's 94 via `bash run_pkg_tests.sh`, 369 in
 
 total — where every
 pipeline test compiles
@@ -629,10 +665,27 @@ Full reference, including limits: [`docs/css-assets.md`](docs/css-assets.md).
 
 ## Status
 
-**v0.42.0** · **Windows only** · 355 tests green
-(pipeline 141 + lib 20 + assets 21 + assets_v36 18 + symbols 8 + TS 34 + UI 9 +
-OpenAI SDK 2 + Anthropic SDK 2 + install 6 + setup 3 + aoxn-pkg 94; the IDE
+**v0.43.0** · **Windows only** · 369 tests green
+(pipeline 154 + lib 21 + assets 21 + assets_v36 18 + symbols 8 + TS 34 + UI 9 +
+OpenAI SDK 2 + Anthropic SDK 2 + install 6 + aoxn-pkg 94; the IDE
 adds 36 Rust + 62 frontend tests of its own) ·
+**modules stop being a global** (v0.43.0) — the gap analysis had ranked "no
+namespaces" first for a year: every `import` merged into one namespace, a
+duplicate top-level name was a hard error, and every stdlib module hand-prefixed
+all fifty-odd of its functions because it had no choice. A module can now be
+**bound as a namespace and reached through it** — `import util`, then
+`util.f(...)`, `util.Point(x=1, y=2)`, `x: util.Point` — so two modules may both
+define `f` and the hand-written prefix (`ui_`, `net_`, `oa_`) becomes optional
+rather than mandatory. The **Python spellings** all work
+(`from util import *`, `from util import a, b`, `from util import a as b`,
+`import util as u`), a specifier may be bare and dotted (`stdlib.net.json`) or
+quoted, a bare one finds the `util.ax` beside the importing file, and
+`import "path"` — removed in W1-S3 — is back. A **named import now really
+filters**: `from util import a` imports `a` and nothing else, where before the
+list was parsed and ignored. The generated C of a program that compiled before
+is byte-identical — a name is only prefixed when two modules contend for it,
+and such a program never compiled — so `codegen_c.rs` needed no change and the
+self-host fixed point holds ·
 **the everyday gaps close** (v0.42.0) — radix integer literals
 (`0x1F` / `0b101`; before, `0x10` lexed as `0` + the identifier `x10` and the
 error pointed at nothing), the two missing string escapes (`\r` — the byte the
@@ -874,6 +927,40 @@ cargo run -- build examples\fib.ax --O0   # clang -O0
 数组索引不检查（C 风格），函数所有路径必须返回。严格是特性：保证简单到机器
 可以推理。
 
+### v0.43.0 在语言面上加了什么——可以点名的模块
+
+```Aoxn
+# util.ax 和 shapes.ax 都定义了 area。此前这是硬错误。
+import util
+import shapes as s
+from util import area            # 只取一个名字，不加限定（import 只能写在顶层）
+
+def main() -> int:
+    print(util.area(2))         # 跨文件限定访问——不再需要前缀
+    print(s.area(3))            # as 改的是「模块」的名字，不是它成员的名字
+    print(area(4))              # from 带进来的那个名字
+    return 0
+```
+
+```Aoxn
+import shapes
+
+def scale(c: shapes.Circle) -> shapes.Circle:   # 经模块引用的类型
+    return shapes.Circle(r=c.r * 2)             # 以及经模块构造
+
+def main() -> int:
+    return scale(shapes.Circle(r=2)).r
+```
+
+Python 的写法全部可用，且含义与 Python 一致：`from m import *`、
+`from m import a, b`、`from m import a as b`、`import m`、`import m as n`。
+**具名导入只导入列出的名字**，其余名字不在作用域内；模块绑定是命名空间而非
+值，所以 `util.f()` 成立而 `x = util` 是编译错误。模块说明符可写成裸的点号形式
+（`import stdlib.net.json`，点即 `/` 子路径分隔符）或加引号；裸写法还会先在
+导入文件自己的目录里找，所以 `import util` 能找到旁边的 `util.ax`。两个模块
+都定义 `f` 时，只要经各自的模块访问就没问题——把两个都星号导入到同一作用域
+则会冲突，并且会指名道姓地报出来。
+
 ### v0.42.0 在语言面上加了什么
 
 ```Aoxn
@@ -1091,11 +1178,11 @@ Web 服务同样能打：[`web/`](web/README.md) 套件用 Aoxn 写了 HTTP/1.1 
 
 ## 测试与 CI
 
-`cargo test` 跑端到端测试套件——编译器工作区 261 个（pipeline 141、编译器单元
-测试 20、TypeScript 前端 34、UI 9、安装布局 6、CSS 资产 21、CSS 资产 v0.36 18、
-符号导出 8、OpenAI SDK 2、Anthropic SDK 2、安装器 3），另有 `aoxn-pkg` crate 的
+`cargo test` 跑端到端测试套件——编译器工作区 275 个（pipeline 154、编译器单元
+测试 21、TypeScript 前端 34、UI 9、安装布局 6、CSS 资产 21、CSS 资产 v0.36 18、
+符号导出 8、OpenAI SDK 2、Anthropic SDK 2），另有 `aoxn-pkg` crate 的
 94 个经
-`bash run_pkg_tests.sh` 运行，合计 355 个——每个 pipeline 测试都是 .ax → 可执行
+`bash run_pkg_tests.sh` 运行，合计 369 个——每个 pipeline 测试都是 .ax → 可执行
 
 文件 → 运行 → 断言 stdout 与退出码。
 其中含自举固定点：stage-1 与 stage-2 编译器对同一程序必须产出逐字节一致的
@@ -1215,10 +1302,23 @@ print(asset_path(styles_fingerprint()))   # …\assets\82b4fb25….css
 
 ## 现状
 
-**v0.42.0** · **只支持 Windows** · 355 测试全绿
-（pipeline 141 + lib 20 + assets 21 + assets_v36 18 + symbols 8 + TS 34 + UI 9 +
-OpenAI SDK 2 + Anthropic SDK 2 + 安装布局 6 + setup 3 + aoxn-pkg 94；IDE 另有
+**v0.43.0** · **只支持 Windows** · 369 测试全绿
+（pipeline 154 + lib 21 + assets 21 + assets_v36 18 + symbols 8 + TS 34 + UI 9 +
+OpenAI SDK 2 + Anthropic SDK 2 + 安装布局 6 + aoxn-pkg 94；IDE 另有
 36 个 Rust + 62 个前端测试）·
+**模块不再是全局的**（v0.43.0）——缺口清单把「没有命名空间」排第一排了整整一年：
+所有 `import` 合并进一个命名空间，重名是硬错误，于是每个 stdlib 模块都得给
+五十多个函数挨个手写前缀（`ui_` / `net_` / `oa_`），别无选择。现在模块可以
+**作为命名空间绑定并通过它访问**——`import util` 之后 `util.f(...)`、
+`util.Point(x=1, y=2)`、`x: util.Point` 都成立——两个模块可以各自定义 `f`，
+手写前缀从此是**可选**而非必须。**Python 写法全部可用**
+（`from util import *`、`from util import a, b`、`from util import a as b`、
+`import util as u`）；模块说明符可以写成裸的点号形式（`stdlib.net.json`）
+或加引号，裸写法还会先找导入文件同目录的 `util.ax`；W1-S3 删掉的
+`import "path"` 也回来了。**具名导入现在真的只导入列出的名字**——此前那份列表
+被解析后直接忽略。既有程序生成的 C 逐字节不变：只有两个模块争抢同一个名字时
+才加前缀，而那种程序在 v0.43.0 之前根本编译不过——所以 `codegen_c.rs` 一行没改，
+自举固定点照样成立 ·
 **日常缺口闭合**（v0.42.0）——进制整数字面量（`0x1F` / `0b101`；此前 `0x10`
 会被切成 `0` 加标识符 `x10`，报错指向一个不存在的东西）、缺的两个字符串转义
 （`\r`——各 HTTP/SSE 层一直在手写的那个字节——和给字节缓冲用的 `\0`）、

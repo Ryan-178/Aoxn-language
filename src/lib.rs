@@ -11,13 +11,14 @@ pub mod parser;
 pub mod paths;
 pub mod pkg_manifest;
 pub mod platform;
+pub mod resolve;
 pub mod symbols;
 pub mod tailwind;
 pub mod ts;
 pub mod typecheck;
 
-use crate::ast::{FnDecl, Program, StructDecl};
-use std::collections::HashSet;
+use crate::ast::Program;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -330,23 +331,43 @@ pub(crate) fn parse_sources(sources: &[String]) -> Result<Program, Vec<Diag>> {
 /// come back as diagnostics exactly as they do for a build — a file that
 /// does not parse has no reliable outline.
 pub fn program_symbols(paths: &[String]) -> Result<Vec<symbols::Symbol>, Vec<Diag>> {
-    let program = load_program(paths)?;
-    Ok(symbols::collect(&program))
+    // The outline must name what the SOURCE spells. `load_program` hands back
+    // the flattened namespace, where a module imported as `import m` has had
+    // its declarations prefixed so nothing else can collide with them — an
+    // editor showing `m_util_button` would be telling the author nothing.
+    let (flat, _assets) = load_flattened(paths)?;
+    let (structs, funcs) = flat.with_source_names();
+    Ok(symbols::collect(&Program { imports: vec![], structs, funcs, assets: Default::default() }))
 }
 
 /// file-path based entry: resolve imports recursively
 fn load_program(entries: &[String]) -> Result<Program, Vec<Diag>> {
+    let (flat, assets) = load_flattened(entries)?;
+    let (mut structs, mut funcs) = (flat.structs, flat.funcs);
+    // CSS accessors become ordinary functions before typecheck, so an unused
+    // `import "./x.css"` costs nothing and codegen needs no asset awareness.
+    assets::inject_all(&assets, Some(&mut structs), &mut funcs);
+    Ok(Program { imports: vec![], structs, funcs, assets })
+}
+
+/// Load every entry, resolve the module graph, and hand back the flat
+/// namespace plus the stylesheets the program pulled in.
+fn load_flattened(entries: &[String]) -> Result<(resolve::Flattened, assets::AssetSet), Vec<Diag>> {
     files::clear();
     let mut state = LoadState {
         visited: HashSet::new(),
+        by_canon: HashMap::new(),
         stack: Vec::new(),
-        structs: Vec::new(),
-        funcs: Vec::new(),
+        modules: Vec::new(),
+        order: Vec::new(),
         assets: assets::AssetSet::default(),
         imports: assets::ImportState::default(),
     };
+    let mut entry_ids = Vec::new();
     for entry in entries {
-        load_file(Path::new(entry), &mut state)?;
+        if let Some(id) = load_file(Path::new(entry), &entry_key(Path::new(entry)), &mut state)? {
+            entry_ids.push(id);
+        }
     }
     // `--tailwind` (env-carried, like --cpu/AOXN_CPU) scans everything the
     // program imports and prepends the generated utilities to the bundle, so
@@ -376,12 +397,11 @@ fn load_program(entries: &[String]) -> Result<Program, Vec<Diag>> {
             state.assets.prepend_tw(&generated.css);
         }
     }
-    // CSS accessors become ordinary functions before typecheck, so an unused
-    // `import "./x.css"` costs nothing and codegen needs no asset awareness.
-    let mut funcs = state.funcs;
-    let mut structs = state.structs;
-    assets::inject_all(&state.assets, Some(&mut structs), &mut funcs);
-    Ok(Program { imports: vec![], structs, funcs, assets: state.assets })
+    // Namespaces are resolved here, on the AST, and the result is the flat
+    // program every later stage already expects (see `src/resolve.rs`).
+    let LoadState { modules, order, assets, .. } = state;
+    let flat = resolve::resolve(modules, &order, &entry_ids)?;
+    Ok((flat, assets))
 }
 
 /// The CSS assets `entries` pulls in, bundled and fingerprinted, without
@@ -394,15 +414,56 @@ pub fn collect_assets(entries: &[String]) -> Result<assets::AssetSet, Vec<Diag>>
 
 struct LoadState {
     visited: HashSet<PathBuf>,
+    /// canonical path -> the module that path became. Kept beside `visited`
+    /// because the two are written together and an include-once hit has to
+    /// name the module it is hitting.
+    by_canon: HashMap<PathBuf, usize>,
     stack: Vec<PathBuf>,
-    structs: Vec<StructDecl>,
-    funcs: Vec<FnDecl>,
+    /// every source file, in the order it was first reached
+    modules: Vec<resolve::Module>,
+    /// post-order module indices: an imported module's declarations are
+    /// emitted before the importer's, which is what the pre-v0.43.0 loader's
+    /// recursion produced and therefore what keeps the C text stable
+    order: Vec<usize>,
     assets: assets::AssetSet,
     /// include-once + cycle stack for `@import` inside stylesheets
     imports: assets::ImportState,
 }
 
-fn load_file(path: &Path, state: &mut LoadState) -> Result<(), Vec<Diag>> {
+/// The dotted key a module is known by: the import spelling with `/` turned
+/// into `.`, a leading `./` dropped and the source extension removed.
+///
+/// It is what `import a.b.c` binds and what a mangling prefix is built from.
+/// Identity is the canonical path, never this — the same file reached through
+/// two spellings is ONE module, and the first spelling reached wins.
+fn module_key_for(spec: &str) -> String {
+    let s = spec.replace('\\', "/");
+    let s = s.strip_prefix("./").unwrap_or(&s);
+    let mut out = String::new();
+    for (i, seg) in s.split('/').filter(|s| !s.is_empty()).enumerate() {
+        if i > 0 {
+            out.push('.');
+        }
+        let seg = ["ax", "ts", "tsx"]
+            .iter()
+            .find_map(|e| seg.strip_suffix(&format!(".{e}")))
+            .unwrap_or(seg);
+        out.push_str(seg);
+    }
+    out
+}
+
+/// An entry file is known by its stem, so `import main` from another file
+/// reaches the module `aoxn run main.ax` started from.
+fn entry_key(path: &Path) -> String {
+    path.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_else(|| "main".to_string())
+}
+
+/// Load one file and everything it imports.
+///
+/// Returns the module's index, or `None` when the path names a CSS asset —
+/// a stylesheet is bundled, never resolved, so it is not a module.
+fn load_file(path: &Path, key: &str, state: &mut LoadState) -> Result<Option<usize>, Vec<Diag>> {
     let canonical = std::fs::canonicalize(path)
         .map_err(|e| vec![Diag::at("io", u32::MAX, 0, 0, format!("cannot open '{}': {e}", path.display()))])?;
     if state.stack.contains(&canonical) {
@@ -414,8 +475,13 @@ fn load_file(path: &Path, state: &mut LoadState) -> Result<(), Vec<Diag>> {
             .collect();
         return Err(vec![Diag::at("io", u32::MAX, 0, 0, format!("circular import: {}", cycle.join(" -> ")))]);
     }
+    // A `.css` file is an asset, not source. The test comes before the
+    // include-once probe because an asset leaves no module behind, so an
+    // include-once hit on one must return "nothing", not "module 0"
+    // (docs/css-assets.md).
+    let is_css = assets::is_css(&canonical);
     if state.visited.contains(&canonical) {
-        return Ok(()); // include-once
+        return Ok(if is_css { None } else { Some(state.by_canon[&canonical]) });
     }
     state.visited.insert(canonical.clone());
     state.stack.push(canonical.clone());
@@ -432,17 +498,13 @@ fn load_file(path: &Path, state: &mut LoadState) -> Result<(), Vec<Diag>> {
     let pretty_path = pretty(canonical.clone());
     let file_id = files::register(pretty_path.display().to_string());
     let label = pretty_path.display().to_string();
-    // A `.css` file is an asset, not source. It must be diverted here, after
-    // include-once and cycle detection but before the front-end dispatch:
-    // otherwise the extension check below falls through to the Aoxn lexer and
-    // a stylesheet reports `unexpected character '{'`, which says nothing
-    // about the real problem (docs/css-assets.md).
-    if assets::is_css(&canonical) {
+    if is_css {
         state.stack.pop();
         return timed(&format!("asset {label}"), || {
             assets::load(&canonical, file_id, &mut state.assets, &mut state.imports)
         })
-        .map_err(|d| vec![d]);
+        .map_err(|d| vec![d])
+        .map(|_| None);
     }
     // .ts/.tsx go through the TS-M1 front end, everything else the Aoxn one;
     // both lower into the same AST (docs/ts-m1-spec.md)
@@ -454,11 +516,22 @@ fn load_file(path: &Path, state: &mut LoadState) -> Result<(), Vec<Diag>> {
         timed(&format!("parse {label}"), || parser::parse(tokens)).map_err(|d| vec![d])?
     };
 
+    // Claim the module slot before recursing: an import cycle is caught by
+    // the stack above, so nothing can reach back into a half-built module.
+    let idx = state.modules.len();
+    state.by_canon.insert(canonical.clone(), idx);
+    state.modules.push(resolve::Module {
+        key: key.to_string(),
+        structs: Vec::new(),
+        funcs: Vec::new(),
+        imports: Vec::new(),
+    });
+
     // resolve this file's imports relative to its own directory
     let dir = canonical.parent().map(|p| p.to_path_buf()).unwrap_or_default();
     for imp in &program.imports {
-        let imp_path = resolve_import(&dir, &imp.path);
-        load_file(&imp_path, state).map_err(|diags| {
+        let imp_path = resolve_import_spelled(&dir, &imp.path, imp.path_quoted);
+        let target = load_file(&imp_path, &module_key_for(&imp.path), state).map_err(|diags| {
             // attach the import site to resolution errors that lack one
             let out: Vec<Diag> = diags
                 .into_iter()
@@ -473,12 +546,18 @@ fn load_file(path: &Path, state: &mut LoadState) -> Result<(), Vec<Diag>> {
                 .collect();
             out
         })?;
+        // a stylesheet import binds nothing: the asset pipeline turned it into
+        // accessors long before the namespace layer sees it
+        if let Some(target) = target {
+            state.modules[idx].imports.push(resolve::Import { target, kind: imp.kind.clone(), pos: imp.pos });
+        }
     }
 
-    state.structs.extend(program.structs);
-    state.funcs.extend(program.funcs);
+    state.modules[idx].structs = program.structs;
+    state.modules[idx].funcs = program.funcs;
     state.stack.pop();
-    Ok(())
+    state.order.push(idx);
+    Ok(Some(idx))
 }
 
 /// Drop the `\\?\` verbatim prefix Windows `canonicalize` adds.
@@ -490,13 +569,27 @@ fn pretty(p: PathBuf) -> PathBuf {
     paths::strip_verbatim(p)
 }
 
-fn resolve_import(dir: &Path, import: &str) -> PathBuf {
+/// `quoted` records whether the specifier was written in quotes.
+///
+/// The quoted spelling is the Aoxn-native one and resolves EXACTLY as it
+/// always has: package manifest, then `aox_modules`, then the installed
+/// stdlib. The bare Python-style spelling first looks next to the importing
+/// file, so `import util` finds the `util.ax` beside it the way Python finds a
+/// sibling module. Only the new spelling gains that step, which is what keeps
+/// every existing import's resolution identical (v0.43.0).
+fn resolve_import_spelled(dir: &Path, import: &str, quoted: bool) -> PathBuf {
     let p = Path::new(import);
     if p.is_absolute() {
         return complete_module_path(p.to_path_buf());
     }
     if import.starts_with("./") || import.starts_with("../") {
         return complete_module_path(dir.join(p));
+    }
+    if !quoted {
+        let sibling = complete_module_path(dir.join(p));
+        if sibling.is_file() {
+            return sibling;
+        }
     }
     // Bare identifiers are package imports (`import * from "http"`). Since
     // v0.29.1 the loader consults the package's `aox_modules/<name>/aoxn.json`
@@ -606,8 +699,8 @@ pub fn dependency_files(entries: &[String]) -> Option<Vec<PathBuf>> {
                 }
             }
         } else {
-            for imp in scan_imports(&src) {
-                stack.push(resolve_import(&dir, &imp));
+            for (imp, quoted) in scan_imports(&src) {
+                stack.push(resolve_import_spelled(&dir, &imp, quoted));
             }
         }
         out.push(canonical);
@@ -617,41 +710,79 @@ pub fn dependency_files(entries: &[String]) -> Option<Vec<PathBuf>> {
 }
 
 /// Paths of every top-level import declaration in `src`, for every module
-/// form (`import * from "p"`, `import { a } from "p"`, `import d from "p"`,
-/// and the removed legacy `import "p"` which may linger in un-migrated
-/// sources). The grammar only allows imports at top level, so a line-based
+/// form: `import * from "p"`, `import { a } from "p"`, `import d from "p"`,
+/// `import "p"`, `import p`, `from p import ...`, and the quoted or
+/// Python-dotted spelling of any of them.
+///
+/// This feeds the build cache key, so it must see a specifier spelled ANY way
+/// the grammar accepts — miss one and editing that file silently serves a
+/// stale exe. The grammar only allows imports at top level, so a line-based
 /// scan is exact for well-formed programs and may only *over*-include on
-/// malformed input (safe for a cache key: more dependencies means fewer
-/// cache hits, never a stale hit).
-fn scan_imports(src: &str) -> Vec<String> {
+/// malformed input (safe for a cache key: more dependencies means fewer cache
+/// hits, never a stale hit).
+fn scan_imports(src: &str) -> Vec<(String, bool)> {
     let mut out = Vec::new();
     for line in src.lines() {
-        let rest = match line.trim_start().strip_prefix("import") {
-            Some(r) => r,
-            None => continue,
+        let line = line.trim_start();
+        // `from p import q` puts the specifier BETWEEN the two keywords;
+        // every `import ...` form puts it after a `from` or right after the
+        // keyword itself.
+        let spec = if let Some(rest) = strip_kw(line, "from") {
+            match split_kw(rest, "import") {
+                Some((before, _)) => before,
+                None => continue,
+            }
+        } else if let Some(rest) = strip_kw(line, "import") {
+            match split_kw(rest, "from") {
+                Some((_, after)) => after,
+                None => rest,
+            }
+        } else {
+            continue;
         };
-        // word boundary: `imports` / `important` are not import declarations
-        if rest.starts_with(|c: char| c.is_alphanumeric() || c == '_') {
-            continue;
-        }
-        let rest = rest.trim_start();
-        if let Some(quoted) = rest.strip_prefix('"') {
+        let spec = spec.trim_start();
+        if let Some(quoted) = spec.strip_prefix('"') {
             if let Some(end) = quoted.find('"') {
-                out.push(quoted[..end].to_string());
+                out.push((quoted[..end].to_string(), true));
             }
             continue;
         }
-        // module form: the quoted path follows `from`
-        if let Some(fi) = rest.find("from") {
-            let after = rest[fi + 4..].trim_start();
-            if let Some(quoted) = after.strip_prefix('"') {
-                if let Some(end) = quoted.find('"') {
-                    out.push(quoted[..end].to_string());
-                }
-            }
+        // a bare specifier: `stdlib`, `stdlib.net.json`, `./util.ax`
+        let bare: String = spec
+            .chars()
+            .take_while(|c| c.is_alphanumeric() || matches!(c, '_' | '.' | '/' | '-' | '\\'))
+            .collect();
+        if !bare.is_empty() {
+            out.push((bare, false));
         }
     }
     out
+}
+
+/// `import` / `from` at the start of a line, requiring a word boundary so
+/// `imports` and `important` are not declarations.
+fn strip_kw<'a>(line: &'a str, kw: &str) -> Option<&'a str> {
+    let rest = line.strip_prefix(kw)?;
+    if rest.starts_with(|c: char| c.is_alphanumeric() || c == '_') {
+        return None;
+    }
+    Some(rest.trim_start())
+}
+
+/// Split on a standalone `kw`, returning the text before and after it.
+fn split_kw<'a>(s: &'a str, kw: &str) -> Option<(&'a str, &'a str)> {
+    let mut from = 0;
+    while let Some(i) = s[from..].find(kw) {
+        let at = from + i;
+        let before_ok = at == 0 || !s[..at].ends_with(|c: char| c.is_alphanumeric() || c == '_');
+        let after = &s[at + kw.len()..];
+        let after_ok = !after.starts_with(|c: char| c.is_alphanumeric() || c == '_');
+        if before_ok && after_ok {
+            return Some((&s[..at], after));
+        }
+        from = at + kw.len();
+    }
+    None
 }
 
 /// Extra flags forwarded verbatim to every clang invocation (v0.42.0).

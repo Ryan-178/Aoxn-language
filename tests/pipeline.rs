@@ -1385,6 +1385,225 @@ fn string_sources_reject_imports() {
     assert!(msg.contains("requires compiling from files"), "{msg}");
 }
 
+// ---- module namespaces + the Python import spellings (v0.43.0) ----
+
+/// Write `files` into a fresh directory and build+run `main.ax` there,
+/// returning its stdout.
+fn build_and_run_modules(tag: &str, files: &[(&str, &str)]) -> String {
+    let dir = tmp_dir(tag);
+    for (name, body) in files {
+        let p = dir.join(name);
+        if let Some(parent) = p.parent() {
+            std::fs::create_dir_all(parent).unwrap();
+        }
+        std::fs::write(p, body).unwrap();
+    }
+    let exe = dir.join(format!("out{EXE}"));
+    aoxn::build_paths_exe(&[dir.join("main.ax").display().to_string()], &exe, true)
+        .expect("compilation failed");
+    let out = Command::new(&exe).output().unwrap();
+    String::from_utf8_lossy(&out.stdout).to_string()
+}
+
+/// The headline capability: two modules that both define `helper` coexist
+/// once they are imported as modules instead of merged.
+#[test]
+fn namespace_qualified_access_disambiguates_same_named_functions() {
+    let out = build_and_run_modules(
+        "qualified",
+        &[
+            ("a.ax", "def helper() -> int:\n    return 1\n"),
+            ("b.ax", "def helper() -> int:\n    return 2\n"),
+            ("main.ax", "import a\nimport b\n\ndef main() -> int:\n    print(a.helper() + b.helper())\n    return 0\n"),
+        ],
+    );
+    assert_eq!(out, "3\n");
+}
+
+#[test]
+fn namespace_qualified_construction_and_type_annotation() {
+    let out = build_and_run_modules(
+        "qualified-struct",
+        &[
+            ("geo.ax", "struct Point:\n    x: int\n    y: int\n"),
+            ("main.ax", "import geo\n\ndef main() -> int:\n    p: geo.Point = geo.Point(x=3, y=4)\n    print(p.x + p.y)\n    return 0\n"),
+        ],
+    );
+    assert_eq!(out, "7\n");
+}
+
+#[test]
+fn namespace_alias_renames_the_module_not_its_members() {
+    let out = build_and_run_modules(
+        "alias",
+        &[
+            ("geo.ax", "def area() -> int:\n    return 12\n"),
+            ("main.ax", "import geo as g\n\ndef main() -> int:\n    print(g.area())\n    return 0\n"),
+        ],
+    );
+    assert_eq!(out, "12\n");
+}
+
+#[test]
+fn namespace_bare_specifier_finds_the_sibling_file() {
+    let out = build_and_run_modules(
+        "sibling",
+        &[
+            ("util.ax", "def twice(n: int) -> int:\n    return n * 2\n"),
+            ("main.ax", "import util\n\ndef main() -> int:\n    print(util.twice(21))\n    return 0\n"),
+        ],
+    );
+    assert_eq!(out, "42\n");
+}
+
+#[test]
+fn python_star_import_merges_the_whole_module() {
+    let out = build_and_run_modules(
+        "star",
+        &[
+            ("util.ax", "def a() -> int:\n    return 1\n\ndef b() -> int:\n    return 2\n"),
+            ("main.ax", "from util import *\n\ndef main() -> int:\n    print(a() + b())\n    return 0\n"),
+        ],
+    );
+    assert_eq!(out, "3\n");
+}
+
+#[test]
+fn python_named_import_renames_with_as() {
+    let out = build_and_run_modules(
+        "named-as",
+        &[
+            ("util.ax", "def a() -> int:\n    return 6\n\ndef b() -> int:\n    return 7\n"),
+            ("main.ax", "from util import a as alpha, b as beta\n\ndef main() -> int:\n    print(alpha() * beta())\n    return 0\n"),
+        ],
+    );
+    assert_eq!(out, "42\n");
+}
+
+// The bare `import "p"` spelling W1-S3 removed is back (v0.43.0) and means
+// the same as `import * from "p"`.
+#[test]
+fn bare_import_path_is_revived() {
+    let out = build_and_run_modules(
+        "bare",
+        &[
+            ("util.ax", "def v() -> int:\n    return 9\n"),
+            ("main.ax", "import \"./util.ax\"\n\ndef main() -> int:\n    print(v())\n    return 0\n"),
+        ],
+    );
+    assert_eq!(out, "9\n");
+}
+
+/// Selective import really filters: the unlisted name is not in scope. This
+/// is the behaviour change — before v0.43.0 the list was parsed and ignored.
+#[test]
+fn named_import_excludes_what_it_does_not_list() {
+    let dir = tmp_dir("filtered");
+    std::fs::write(
+        dir.join("util.ax"),
+        "def a() -> int:\n    return 1\n\ndef b() -> int:\n    return 2\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("main.ax"),
+        "from util import a\n\ndef main() -> int:\n    print(a())\n    return b()\n",
+    )
+    .unwrap();
+    let exe = dir.join(format!("out{EXE}"));
+    let diags = aoxn::build_paths_exe(&[dir.join("main.ax").display().to_string()], &exe, true)
+        .expect_err("`b` was not imported, so it must not resolve");
+    let msg = &diags[0].message;
+    assert!(msg.contains("undefined") && msg.contains("'b'"), "{msg}");
+}
+
+/// A name two modules provide cannot be star-imported unqualified — the
+/// diagnostic has to say what to do instead.
+#[test]
+fn two_star_imports_of_one_name_is_a_named_error() {
+    let dir = tmp_dir("conflict");
+    std::fs::write(dir.join("a.ax"), "def helper() -> int:\n    return 1\n").unwrap();
+    std::fs::write(dir.join("b.ax"), "def helper() -> int:\n    return 2\n").unwrap();
+    std::fs::write(
+        dir.join("main.ax"),
+        "import * from \"./a.ax\"\nimport * from \"./b.ax\"\n\ndef main() -> int:\n    return 0\n",
+    )
+    .unwrap();
+    let exe = dir.join(format!("out{EXE}"));
+    let diags = aoxn::build_paths_exe(&[dir.join("main.ax").display().to_string()], &exe, true)
+        .expect_err("two modules cannot both provide `helper` unqualified");
+    assert!(diags[0].message.contains("comes from two modules"), "{:?}", diags);
+}
+
+#[test]
+fn importing_a_name_the_module_does_not_have_is_an_error() {
+    let dir = tmp_dir("missing-name");
+    std::fs::write(dir.join("util.ax"), "def a() -> int:\n    return 1\n").unwrap();
+    std::fs::write(
+        dir.join("main.ax"),
+        "from util import nosuch\n\ndef main() -> int:\n    return 0\n",
+    )
+    .unwrap();
+    let exe = dir.join(format!("out{EXE}"));
+    let diags = aoxn::build_paths_exe(&[dir.join("main.ax").display().to_string()], &exe, true)
+        .expect_err("the module has no such name");
+    assert!(diags[0].message.contains("no top-level name 'nosuch'"), "{:?}", diags);
+}
+
+/// A module used as a namespace is not a value — `x = util` has to fail
+/// rather than silently do something.
+#[test]
+fn module_binding_is_not_a_value() {
+    let dir = tmp_dir("ns-value");
+    std::fs::write(dir.join("util.ax"), "def a() -> int:\n    return 1\n").unwrap();
+    std::fs::write(
+        dir.join("main.ax"),
+        "import util\n\ndef main() -> int:\n    x = util\n    return 0\n",
+    )
+    .unwrap();
+    let exe = dir.join(format!("out{EXE}"));
+    let diags = aoxn::build_paths_exe(&[dir.join("main.ax").display().to_string()], &exe, true)
+        .expect_err("a module namespace has no runtime value");
+    assert!(diags[0].message.contains("unknown variable 'util'"), "{:?}", diags);
+}
+
+/// A diamond still resolves: `d`'s names reach the program through both `a`
+/// and `b`, because a star import re-exports.
+#[test]
+fn diamond_star_imports_still_reach_the_program() {
+    let out = build_and_run_modules(
+        "diamond",
+        &[
+            ("d.ax", "def shared() -> int:\n    return 1\n"),
+            ("a.ax", "import * from \"./d.ax\"\n\ndef av() -> int:\n    return shared() + 1\n"),
+            ("b.ax", "import * from \"./d.ax\"\n\ndef bv() -> int:\n    return shared() + 2\n"),
+            ("main.ax", "import * from \"./a.ax\"\nimport * from \"./b.ax\"\n\ndef main() -> int:\n    print(shared() + av() + bv())\n    return 0\n"),
+        ],
+    );
+    assert_eq!(out, "6\n");
+}
+
+/// The load-bearing invariant behind the whole design: a program that compiled
+/// before v0.43.0 emits the SAME C. Mangling is reserved for names two modules
+/// provide, and such a program has none.
+#[test]
+fn whole_module_merge_emits_unmangled_names() {
+    let dir = tmp_dir("stable-c");
+    std::fs::write(
+        dir.join("util.ax"),
+        "def helper() -> int:\n    return 40\n\nstruct Point:\n    x: int\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("main.ax"),
+        "import * from \"./util.ax\"\n\ndef main() -> int:\n    p = Point(x=2)\n    return helper() + p.x\n",
+    )
+    .unwrap();
+    let entry = dir.join("main.ax").display().to_string();
+    let c = aoxn::compile_paths_to_c(&[entry], true).expect("compilation failed");
+    assert!(c.contains("long long helper(void)"), "helper must keep its bare name");
+    assert!(!c.contains("util_helper"), "nothing may be prefixed when no name collides: {c}");
+}
+
 // ---- stdlib v0.9: raw memory, Vec, buffers, file IO ----
 
 #[test]
@@ -2528,6 +2747,26 @@ fn dependency_files_follows_import_chain() {
         .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
         .collect();
     assert_eq!(names, vec!["lib.ax", "main.ax", "mid.ax"], "transitive deps missing");
+
+    // The bare Python-style specifier resolves against the importing file's
+    // OWN directory, which the dependency scan only knows because
+    // `scan_imports` reports whether a specifier was quoted. Miss that and
+    // editing `util.ax` silently serves a stale exe.
+    std::fs::write(base.join("util.ax"), "def twice(n: int) -> int:\n    return n * 2\n").unwrap();
+    std::fs::write(
+        base.join("bare.ax"),
+        "import * from \"./lib.ax\"\nfrom util import twice\n\ndef main() -> int:\n    print(twice(2))\n    return 0\n",
+    )
+    .unwrap();
+    let files = aoxn::dependency_files(&[base.join("bare.ax").display().to_string()])
+        .expect("dependency scan failed");
+    let names: Vec<String> = files
+        .iter()
+        .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
+        .collect();
+    assert!(names.contains(&"util.ax".to_string()), "bare sibling import missing from the cache key: {names:?}");
+    assert!(names.contains(&"lib.ax".to_string()), "quoted sibling import missing from the cache key: {names:?}");
+    let _ = std::fs::remove_file(base.join("bare.ax"));
 
     // a missing entry disables the cache instead of producing a wrong key
     assert!(aoxn::dependency_files(&[base.join("nope.ax").display().to_string()]).is_none());

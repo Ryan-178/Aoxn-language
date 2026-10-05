@@ -85,11 +85,55 @@ pub struct Program {
 #[derive(Debug)]
 pub struct ImportDecl {
     pub path: String,
-    /// `None` = `import * from "p"` (whole-module merge);
-    /// `Some(names)` = named/default imports (`import { a, b } from "p"`,
-    /// `import d from "p"`). M1 merges the whole module either way.
-    pub names: Option<Vec<String>>,
+    pub kind: ImportKind,
+    /// the specifier was written in quotes (`"stdlib/net/json"`). A BARE
+    /// Python-style specifier additionally probes the importing file's own
+    /// directory, which is how `import util` finds the `util.ax` next to it;
+    /// the quoted spelling keeps the package/stdlib resolution it has always
+    /// had, untouched (v0.43.0).
+    pub path_quoted: bool,
     pub pos: Pos,
+}
+
+/// What an import brings into the importing module (v0.43.0).
+///
+/// The Python spellings and the Aoxn-native ones lower to the same three
+/// shapes, so a program written either way resolves identically:
+///
+/// | source                     | shape                       |
+/// |----------------------------|-----------------------------|
+/// | `from p import *`          | `Star`                      |
+/// | `import * from "p"`        | `Star`                      |
+/// | `import "p"`               | `Star` (revived in v0.43.0) |
+/// | `from p import a, b as c`  | `Names`                     |
+/// | `import { a, b } from "p"` | `Names`                     |
+/// | `import d from "p"`        | `Names([d])`                |
+/// | `import p` / `import p as q` | `Module`                  |
+#[derive(Debug, Clone)]
+pub enum ImportKind {
+    /// every top-level name of the module, bound unqualified
+    Star,
+    /// only the listed names, each optionally renamed
+    Names(Vec<ImportedName>),
+    /// the module itself, reachable as `alias.member` (or `path.member` when
+    /// unaliased). The binding is a namespace, not a value: using it as one is
+    /// an error, exactly like a struct with no runtime representation.
+    Module { alias: Option<String> },
+}
+
+#[derive(Debug, Clone)]
+pub struct ImportedName {
+    /// the name as the exporting module spells it
+    pub name: String,
+    /// the name it is bound to locally, when `as` renamed it
+    pub alias: Option<String>,
+}
+
+impl ImportedName {
+    /// the spelling the importing module uses.
+    pub fn local(&self) -> &str {
+        self.alias.as_deref().unwrap_or(&self.name)
+    }
 }
 
 /// sentinel array length inside a generic declaration: `[T; N]` parses to

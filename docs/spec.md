@@ -205,26 +205,43 @@ def main() -> int:
   be generic, and may only use the scalar types (`int`, `float`, `bool`,
   `string`, `void`) - aggregate parameters by value would need a struct ABI
   the `extern` surface cannot spell.
-- **Imports** (W1-S3 module forms) load another file and merge it into one
-  namespace:
+- **Imports** load another file and decide what of it enters scope. The
+  Python spellings and the Aoxn-native ones are interchangeable:
   ```Aoxn
-  import * from "./util.ax"        # whole-module merge
-  import { helper, Vec } from "./util.ax"   # named (M1 merges all names)
-  import main_config from "./cfg.ax"        # default import
+  import util                     # bind the module: util.helper()
+  import util as u                # ...under another name: u.helper()
+  from util import *              # merge every top-level name
+  from util import helper         # merge just this one
+  from util import helper as h    # merge it under another name
+  import "./util.ax"              # the whole module (W1-S3's removed form, back)
+
+  import * from "./util.ax"            # == from util import *
+  import { helper } from "./util.ax"   # == from util import helper
+  import cfg from "./cfg.ax"           # == from cfg import cfg
   ```
+  A **named** import brings in exactly what it lists; anything else stays out
+  of scope, and referring to it is an error (v0.43.0 — before that the list
+  was parsed and ignored). A **module** binding is a namespace, not a value:
+  `m.f(...)` and `m.Type` work, `x = m` does not. Two modules may both define
+  `f` as long as they are reached through their modules; star-importing both
+  into one scope is a conflict, because the name would have two meanings.
+
   Paths starting `./` or `../` resolve relative to the importing file, with
-  extension completion (`.ax`/`.ts`/`.tsx`, `index.<ext>`); bare names are
-  resolved first as package imports under `aox_modules/` (through the
-  package's `aoxn.json` `main` / `exports`), then against the **installed
-  standard library** (v0.30.0), where `stdlib` means the stdlib directory
-  and `stdlib/ui` a module inside it — `$AOXN_STDLIB`, else
-  `$AOXN_HOME/lib/stdlib`, else the checkout, so a program written against
-  an installed toolchain compiles from any directory (see
-  `docs/install.md`). A project-local package always wins. Each file is
-  included exactly once (canonical path); circular imports are compile
-  errors. `Aoxn run main.ax` alone is enough — imports pull in
-  dependencies. The bare legacy form `import "path"` was **removed** in
-  W1-S3; write `import * from "path"`.
+  extension completion (`.ax`/`.ts`/`.tsx`, `index.<ext>`). An **unquoted**
+  specifier additionally looks in the importing file's own directory first, so
+  `import util` finds the `util.ax` beside it, the way Python finds a sibling
+  module; failing that it is resolved as a package import under
+  `aox_modules/` (through the package's `aoxn.json` `main` / `exports`), then
+  against the **installed standard library** (v0.30.0), where `stdlib` means
+  the stdlib directory and `stdlib/ui` a module inside it — `$AOXN_STDLIB`,
+  else `$AOXN_HOME/lib/stdlib`, else the checkout, so a program written
+  against an installed toolchain compiles from any directory (see
+  `docs/install.md`). A **quoted** specifier skips the sibling probe and
+  resolves exactly as it always has. A project-local package always wins.
+  Dots are the subpath separator, so `stdlib.net.json` is `stdlib/net/json`.
+  Each file is included exactly once (canonical path); circular imports are
+  compile errors. `Aoxn run main.ax` alone is enough — imports pull in
+  dependencies.
 - Multiple entry files on the command line (`Aoxn build a.ax b.ax`) are also
   merged, with import resolution applied to each.
 
@@ -807,7 +824,9 @@ Ordered by how much they cost the language's Python parity.
    unpacking (`a, b = f()`), which need tuple or multi-target support in the
    AST.
 3. Default parameter values (`def f(x: int = 3)`).
-4. Module qualification (`lib.sort(...)`), selective imports, package layout.
+4. Package layout (`aoxn.json` `exports` conventions are already honoured;
+   publishing conventions are not). Module qualification and selective
+   imports **shipped in v0.43.0**.
 5. String indexing / iteration (needs a `char` type or substring slices);
    f-string format specifiers (`{x:.2f}`) and multi-line f-strings.
 6. Memory: string interning or arena freeing (currently concatenation leaks);

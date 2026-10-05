@@ -82,7 +82,15 @@ impl Parser {
         }
         while *self.peek() != Tok::Eof {
             match self.peek() {
+                // `from p import ...` is identifier-led, so the top-level loop
+                // recognizes the keyword itself rather than a token kind.
                 Tok::Import => {
+                    imports.push(self.import_decl()?);
+                    while *self.peek() == Tok::Newline {
+                        self.bump();
+                    }
+                }
+                Tok::Ident(n) if n == "from" => {
                     imports.push(self.import_decl()?);
                     while *self.peek() == Tok::Newline {
                         self.bump();
@@ -106,62 +114,247 @@ impl Parser {
                         self.bump();
                     }
                 }
-                _ => return Err(self.perr(self.pos().line, self.pos().col, "expected 'import', 'def' or 'struct' at top level")),
+                // the `from` spelling keeps the original wording so the pinned
+                // substring stays put
+                _ => return Err(self.perr(self.pos().line, self.pos().col, "expected 'import', 'def' or 'struct' at top level (a module import may also start with `from`)")),
             }
         }
         Ok(Program { imports, structs, funcs, assets: crate::assets::AssetSet::default() })
     }
 
-    fn import_decl(&mut self) -> Result<ImportDecl, Diag> {
-        let pos = self.pos();
-        self.eat(&Tok::Import)?;
-        // W1-S3 module forms:
-        //   import * from "p"        whole-module merge
-        //   import { a, b } from "p" named imports
-        //   import d from "p"        default import
-        if matches!(self.peek(), Tok::Str(_)) {
-            return Err(self.perr(pos.line, pos.col, "bare `import \"path\"` was removed in W1-S3; write `import * from \"path\"`"));
-        }
-        let names = if matches!(self.peek(), Tok::Star) {
-            self.bump();
-            None
-        } else if matches!(self.peek(), Tok::LBrace) {
-            self.bump();
-            let mut ns = Vec::new();
-            while !matches!(self.peek(), Tok::RBrace) {
-                match self.bump() {
-                    Tok::Ident(n) => ns.push(n),
-                    other => {
-                        return Err(self.perr(pos.line, pos.col, format!("expected an identifier in import list, found {other:?}")))
+    /// A module path: either a quoted specifier (`"stdlib/net/json"`,
+    /// `"./util.ax"`) or a Python-style dotted name (`stdlib.net.json`).
+    /// Dots become the `/` subpath separator, so the bare spelling reaches
+    /// exactly the same resolution as the quoted one.
+    fn module_path(&mut self) -> Result<(String, bool), Diag> {
+        match self.peek().clone() {
+            Tok::Str(s) => {
+                self.bump();
+                Ok((s, true))
+            }
+            Tok::Ident(_) => {
+                let mut out = String::new();
+                loop {
+                    match self.bump() {
+                        Tok::Ident(n) => out.push_str(&n),
+                        Tok::Dot => out.push('/'),
+                        other => {
+                            return Err(self.perr(
+                                self.pos().line,
+                                self.pos().col,
+                                format!("expected a module path, found {other:?}"),
+                            ))
+                        }
                     }
-                }
-                if !matches!(self.peek(), Tok::Comma) {
+                    if matches!(self.peek(), Tok::Dot) {
+                        self.bump();
+                        continue;
+                    }
                     break;
                 }
-                self.bump();
+                Ok((out, false))
             }
+            other => Err(self.perr(
+                self.pos().line,
+                self.pos().col,
+                format!("expected a module path, found {other:?}"),
+            )),
+        }
+    }
+
+    /// `a`, `a as b`, `a, b as c` — the member list of `from p import ...`
+    /// and of `import { ... } from "p"`.
+    fn import_name_list(&mut self, pos: Pos) -> Result<Vec<ImportedName>, Diag> {
+        let mut out = Vec::new();
+        loop {
+            let name = match self.bump() {
+                Tok::Ident(n) => n,
+                other => {
+                    return Err(self.perr(
+                        pos.line,
+                        pos.col,
+                        format!("expected an identifier in the import list, found {other:?}"),
+                    ))
+                }
+            };
+            let alias = if matches!(self.peek(), Tok::Ident(n) if n == "as") {
+                self.bump();
+                match self.bump() {
+                    Tok::Ident(n) => Some(n),
+                    other => {
+                        return Err(self.perr(
+                            pos.line,
+                            pos.col,
+                            format!("expected a name after `as`, found {other:?}"),
+                        ))
+                    }
+                }
+            } else {
+                None
+            };
+            out.push(ImportedName { name, alias });
+            if !matches!(self.peek(), Tok::Comma) {
+                break;
+            }
+            self.bump();
+            if matches!(self.peek(), Tok::RBrace) {
+                break; // trailing comma
+            }
+        }
+        Ok(out)
+    }
+
+    /// Every module form, Python's and Aoxn's, lower to the three shapes in
+    /// `ImportKind`. See `ast.rs` for the spelling table.
+    fn import_decl(&mut self) -> Result<ImportDecl, Diag> {
+        let pos = self.pos();
+        let kind = if matches!(self.peek(), Tok::Import) {
+            self.import_decl_after_kw(pos)?
+        } else {
+            self.import_decl_from(pos)?
+        };
+        // A leftover token on the line means the declaration did not consume
+        // what it should; `tok()` would report it, but naming the import is
+        // more useful than naming whatever followed.
+        if !matches!(self.peek(), Tok::Newline | Tok::Eof) {
+            let t = self.peek().clone();
+            return Err(self.perr(
+                self.pos().line,
+                self.pos().col,
+                format!("unexpected {t:?} after the import declaration"),
+            ));
+        }
+        Ok(ImportDecl { path: kind.0, path_quoted: kind.1, kind: kind.2, pos })
+    }
+
+    /// `import ...` — the Aoxn-native spellings plus the bare path revived in
+    /// v0.43.0.
+    fn import_decl_after_kw(&mut self, pos: Pos) -> Result<(String, bool, ImportKind), Diag> {
+        self.eat(&Tok::Import)?;
+        if matches!(self.peek(), Tok::Star) {
+            // import * from "p"
+            self.bump();
+            self.expect_from(pos)?;
+            let (path, quoted) = self.module_path()?;
+            return Ok((path, quoted, ImportKind::Star));
+        }
+        if matches!(self.peek(), Tok::LBrace) {
+            // import { a, b as c } from "p"
+            self.bump();
+            let names = self.import_name_list(pos)?;
             match self.bump() {
                 Tok::RBrace => {}
-                other => return Err(self.perr(pos.line, pos.col, format!("expected `}}` after import list, found {other:?}"))),
-            }
-            Some(ns)
-        } else {
-            match self.bump() {
-                Tok::Ident(n) => Some(vec![n]),
                 other => {
-                    return Err(self.perr(pos.line, pos.col, format!("expected `*`, `{{`, or a name after `import`, found {other:?}")))
+                    return Err(self.perr(
+                        pos.line,
+                        pos.col,
+                        format!("expected `}}` after the import list, found {other:?}"),
+                    ))
                 }
             }
-        };
-        match self.bump() {
-            Tok::Ident(n) if n == "from" => {}
-            other => return Err(self.perr(pos.line, pos.col, format!("expected `from` after the import clause, found {other:?}"))),
+            self.expect_from(pos)?;
+            let (path, quoted) = self.module_path()?;
+            return Ok((path, quoted, ImportKind::Names(names)));
         }
-        let path = match self.bump() {
-            Tok::Str(s) => s,
-            other => return Err(self.perr(pos.line, pos.col, format!("expected a string path after `from`, found {other:?}"))),
+        if matches!(self.peek(), Tok::Str(_)) {
+            // import "p" — revived in v0.43.0, equivalent to `import * from "p"`
+            let (path, quoted) = self.module_path()?;
+            if matches!(self.peek(), Tok::Ident(n) if n == "as") {
+                return Err(self.perr(
+                    pos.line,
+                    pos.col,
+                    "`import \"p\" as q` names nothing; write `import q` to bind the module itself",
+                ));
+            }
+            return Ok((path, quoted, ImportKind::Star));
+        }
+        // `import d from "p"` (named) vs `import d` / `import d as m` (module).
+        // The `from` after an optional alias is what tells them apart.
+        let first = match self.bump() {
+            Tok::Ident(n) => n,
+            other => {
+                return Err(self.perr(
+                    pos.line,
+                    pos.col,
+                    format!("expected `*`, `{{`, a name, or a module path after `import`, found {other:?}"),
+                ))
+            }
         };
-        Ok(ImportDecl { path, names, pos })
+        let mut path = first;
+        while matches!(self.peek(), Tok::Dot) {
+            self.bump();
+            match self.bump() {
+                Tok::Ident(n) => {
+                    path.push('/');
+                    path.push_str(&n);
+                }
+                other => {
+                    return Err(self.perr(
+                        pos.line,
+                        pos.col,
+                        format!("expected a name after `.`, found {other:?}"),
+                    ))
+                }
+            }
+        }
+        let alias = if matches!(self.peek(), Tok::Ident(n) if n == "as") {
+            self.bump();
+            match self.bump() {
+                Tok::Ident(n) => Some(n),
+                other => {
+                    return Err(self.perr(
+                        pos.line,
+                        pos.col,
+                        format!("expected a name after `as`, found {other:?}"),
+                    ))
+                }
+            }
+        } else {
+            None
+        };
+        if matches!(self.peek(), Tok::Ident(n) if n == "from") {
+            self.bump();
+            let (full, quoted) = self.module_path()?;
+            let names = match alias {
+                Some(alias) => vec![ImportedName { name: path, alias: Some(alias) }],
+                None => vec![ImportedName { name: path, alias: None }],
+            };
+            return Ok((full, quoted, ImportKind::Names(names)));
+        }
+        Ok((path, false, ImportKind::Module { alias }))
+    }
+
+    /// `from p import ...` — the Python spelling.
+    fn import_decl_from(&mut self, pos: Pos) -> Result<(String, bool, ImportKind), Diag> {
+        self.eat(&Tok::Ident("from".into()))?;
+        let (path, quoted) = self.module_path()?;
+        match self.bump() {
+            // `import` is a keyword token; the identifier spelling is accepted
+            // too because the two spellings meet here (`from p import q`).
+            Tok::Import => {}
+            Tok::Ident(ref n) if n == "import" => {}
+            other => {
+                return Err(self.perr(
+                    pos.line,
+                    pos.col,
+                    format!("expected `import` after the module path, found {other:?}"),
+                ))
+            }
+        }
+        let kind = if matches!(self.peek(), Tok::Star) {
+            self.bump();
+            ImportKind::Star
+        } else {
+            ImportKind::Names(self.import_name_list(pos)?)
+        };
+        Ok((path, quoted, kind))
+    }
+
+    fn expect_from(&mut self, pos: Pos) -> Result<(), Diag> {
+        match self.bump() {
+            Tok::Ident(n) if n == "from" => Ok(()),
+            other => Err(self.perr(pos.line, pos.col, format!("expected `from` after the import clause, found {other:?}"))),
+        }
     }
 
     fn struct_decl(&mut self) -> Result<StructDecl, Diag> {
@@ -318,7 +511,29 @@ impl Parser {
             Tok::TyString => Type::Str,
             Tok::TyVoid => Type::Void,
             Tok::None => Type::None,
-            Tok::Ident(n) => Type::Struct(n),
+            Tok::Ident(n) => {
+                    // `m.Point` — a struct reached through a module (v0.43.0).
+                    // The dotted spelling is kept whole here; the loader maps
+                    // it to whatever flat name it resolves to.
+                    let mut name = n;
+                    while matches!(self.peek(), Tok::Dot) {
+                        self.bump();
+                        match self.bump() {
+                            Tok::Ident(part) => {
+                                name.push('.');
+                                name.push_str(&part);
+                            }
+                            other => {
+                                return Err(self.perr(
+                                    self.pos().line,
+                                    self.pos().col,
+                                    format!("expected a type name after `.`, found {other:?}"),
+                                ))
+                            }
+                        }
+                    }
+                    Type::Struct(name)
+                }
             Tok::LBracket => {
                 let elem = Box::new(self.ty()?);
                 self.eat(&Tok::Semi)?;
@@ -867,9 +1082,20 @@ impl Parser {
         loop {
             match self.peek() {
                 Tok::LParen => {
-                    // only bare names are callable
+                    // Bare names are callable, and so is a qualified one
+                    // (`m.f(...)`, v0.43.0) — no other dotted call parsed
+                    // before, so flattening the chain onto the name is
+                    // unambiguous. Whether `m` turns out to be a module or a
+                    // struct is the loader's call, not the parser's.
                     let name = match &e {
                         Expr::Var { name, .. } => name.clone(),
+                        Expr::Field { .. } => match dotted_name(&e) {
+                            Some(n) => n,
+                            None => {
+                                let p = e.pos();
+                                return Err(self.perr(p.line, p.col, "only named functions can be called"));
+                            }
+                        },
                         other => {
                             let p = other.pos();
                             return Err(self.perr(p.line, p.col, "only named functions can be called"));
@@ -1035,3 +1261,21 @@ impl Parser {
 
 
 
+
+/// Flatten a `Var`/`Field` chain into the dotted spelling `a.b.c`.
+///
+/// Only chains rooted at a plain identifier qualify: `p.x.y` is a struct
+/// field read, and `a.b.c` is a path into a module. Both look identical
+/// here, which is why the loader — the only stage that knows which modules a
+/// program imported — decides (v0.43.0).
+fn dotted_name(e: &Expr) -> Option<String> {
+    match e {
+        Expr::Var { name, .. } if !name.contains('.') => Some(name.clone()),
+        Expr::Var { .. } => None,
+        Expr::Field { obj, name, .. } => {
+            let base = dotted_name(obj)?;
+            Some(format!("{base}.{name}"))
+        }
+        _ => None,
+    }
+}

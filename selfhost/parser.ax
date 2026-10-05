@@ -357,7 +357,9 @@ def parse_program(p: PState) -> PState:
         if p.err == 1:
             break
         k = pk(p)
-        if k == TK_IMPORT():
+        # `from p import q` is identifier-led, so the top-level loop
+        # recognizes the keyword itself rather than a token kind
+        if k == TK_IMPORT() or (k == TK_IDENT() and tk_sval(p.st, p.idx) == "from"):
             p = parse_import(p)
         elif k == TK_DEF():
             p = parse_fn(p, 0)
@@ -376,33 +378,116 @@ def parse_program(p: PState) -> PState:
     p.root = root
     return p
 
-def parse_import(p: PState) -> PState:
-    p = new_node(p, N_IMPORT(), "", 0)
-    n = p.res_node
-    p = pbump(p)
-    # W1-S3 module forms: `import * from "./p"` (whole merge) and
-    # `import name from "p"` (name list ignored: the loader merges all).
-    # The bare `import "p"` form was removed in W1-S3.
-    if pk(p) == TK_STAR():
-        p = pbump(p)
-    elif pk(p) == TK_IDENT():
-        p = pbump(p)
-    else:
-        if pk(p) == TK_STR():
-            p = perr(p, "bare `import \"path\"` was removed in W1-S3; write `import * from \"path\"`")
-        else:
-            p = perr(p, "expected `*` or a name after 'import'")
-    if pk(p) == TK_IDENT() and tk_sval(p.st, p.idx) == "from":
-        p = pbump(p)
-    else:
-        p = perr(p, "expected `from` in import")
+def parse_module_path(p: PState) -> PState:
+    # A quoted specifier, or the Python-style dotted spelling. The dotted form
+    # is normalized to the `/` subpath the loader resolves, so both reach the
+    # same file (v0.43.0).
     if pk(p) == TK_STR():
         p = new_node(p, N_STR(), tk_sval(p.st, p.idx), 0)
         sn = p.res_node
-        p = set_child(p, n, sn)
+        p = set_child(p, sn, -1)
         p = pbump(p)
-    else:
-        p = perr(p, "expected a string path after 'from'")
+        return p
+    if pk(p) != TK_IDENT():
+        return perr(p, "expected a module path")
+    acc = tk_sval(p.st, p.idx)
+    p = pbump(p)
+    while pk(p) == TK_DOT():
+        p = pbump(p)
+        if pk(p) != TK_IDENT():
+            return perr(p, "expected a name after `.` in the module path")
+        acc = acc + "/" + tk_sval(p.st, p.idx)
+        p = pbump(p)
+    p = new_node(p, N_STR(), acc, 0)
+    sn = p.res_node
+    p = set_child(p, sn, -1)
+    return p
+
+def parse_import(p: PState) -> PState:
+    # v0.43.0 module forms. The self-hosted loader merges every module into one
+    # namespace and has no binding layer, so it accepts exactly the forms that
+    # MEAN a whole-module merge:
+    #
+    #   from p import *        import * from "p"     import "p"      import p
+    #
+    # A SELECTIVE import (`from p import a`) is refused rather than silently
+    # merged: the stage-1 compiler since v0.43.0 imports only what it lists,
+    # so merging here would make stage-2 accept a program stage-1 rejects.
+    # Refusing turns that divergence into an error the author can see. Same
+    # status as dict / None / fn pointers / raise.
+    if pk(p) == TK_IDENT() and tk_sval(p.st, p.idx) == "from":
+        p = pbump(p)
+        p = parse_module_path(p)
+        if p.err == 1:
+            return p
+        path = p.res_node
+        if pk(p) == TK_IMPORT():
+            p = pbump(p)
+        else:
+            p = perr(p, "expected `import` after the module path")
+            return p
+        if pk(p) != TK_STAR():
+            p = perr(p, "selective imports (`from p import a`) need the stage-1 compiler; use `from p import *`")
+            return p
+        p = pbump(p)
+        p = set_child(p, path, -1)
+        p.res_node = path
+        return p
+
+    p = new_node(p, N_IMPORT(), "", 0)
+    n = p.res_node
+    p = pbump(p)
+    if pk(p) == TK_STAR():
+        # import * from "p"
+        p = pbump(p)
+        if not (pk(p) == TK_IDENT() and tk_sval(p.st, p.idx) == "from"):
+            p = perr(p, "expected `from` in import")
+            return p
+        p = pbump(p)
+        p = parse_module_path(p)
+        if p.err == 1:
+            return p
+        p = set_child(p, n, p.res_node)
+        p.res_node = n
+        return p
+    if pk(p) == TK_STR():
+        # import "p" — revived in v0.43.0, equivalent to `import * from "p"`
+        p = parse_module_path(p)
+        if p.err == 1:
+            return p
+        p = set_child(p, n, p.res_node)
+        p.res_node = n
+        return p
+    if pk(p) != TK_IDENT():
+        p = perr(p, "expected `*`, a module path, or a name after 'import'")
+        return p
+    # `import d from "p"` is a selective import; `import d` / `import d as m`
+    # bind the module. The `from` after an optional alias tells them apart.
+    acc = tk_sval(p.st, p.idx)
+    p = pbump(p)
+    while pk(p) == TK_DOT():
+        p = pbump(p)
+        if pk(p) != TK_IDENT():
+            p = perr(p, "expected a name after `.` in the module path")
+            return p
+        acc = acc + "/" + tk_sval(p.st, p.idx)
+        p = pbump(p)
+    if pk(p) == TK_IDENT() and tk_sval(p.st, p.idx) == "as":
+        p = pbump(p)
+        if pk(p) != TK_IDENT():
+            p = perr(p, "expected a name after `as`")
+            return p
+        p = pbump(p)
+    if pk(p) == TK_IDENT() and tk_sval(p.st, p.idx) == "from":
+        p = perr(p, "selective imports (`import { a } from \"p\"`) need the stage-1 compiler; use `import * from \"p\"`")
+        return p
+    # `import p` — the module binding. Merging it is right for every program
+    # the self-hosted loader can still compile, and a program that then says
+    # `p.f()` fails here on the unknown name `p`, not silently.
+    p = new_node(p, N_STR(), acc, 0)
+    sn = p.res_node
+    p = set_child(p, sn, -1)
+    p = set_child(p, n, sn)
     p.res_node = n
     return p
 

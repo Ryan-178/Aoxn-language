@@ -380,9 +380,10 @@ impl Parser {
             let path = pth.clone();
             self.i += 1;
             self.end_stmt()?;
-            return Ok(ImportDecl { path, names: None, pos });
+            return Ok(ImportDecl { path, kind: ImportKind::Star, path_quoted: true, pos });
         }
-        let names = if self.at_punct("*") {
+        let mut names: Vec<ImportedName> = Vec::new();
+        let kind = if self.at_punct("*") {
             // `import * from "p"` is the whole-module merge every Aoxn source
             // uses, and it has never needed a namespace object. Only
             // `import * as ns` does — that stays a TS-M2 feature. Peeking one
@@ -395,10 +396,9 @@ impl Parser {
                 ));
             }
             self.i += 1; // consume the `*`; `from` follows
-            None
+            ImportKind::Star
         } else if self.at_punct("{") {
             self.i += 1;
-            let mut ns = Vec::new();
             while !self.at_punct("}") {
                 // `type X` members are type-only: erased in M1
                 if matches!(&self.peek().tok, Tok::Ident(n) if n == "type") {
@@ -406,17 +406,24 @@ impl Parser {
                     self.expect_ident()?;
                 } else {
                     let (n, _) = self.expect_ident()?;
-                    ns.push(n);
+                    let alias = if matches!(&self.peek().tok, Tok::Ident(a) if a == "as") {
+                        self.i += 1;
+                        Some(self.expect_ident()?.0)
+                    } else {
+                        None
+                    };
+                    names.push(ImportedName { name: n, alias });
                 }
                 if !self.eat_punct(",") {
                     break;
                 }
             }
             self.expect_punct("}")?;
-            Some(ns)
+            ImportKind::Names(names)
         } else {
             let (n, _) = self.expect_ident()?;
-            Some(vec![n])
+            names.push(ImportedName { name: n, alias: None });
+            ImportKind::Names(names)
         };
         if !(matches!(&self.peek().tok, Tok::Ident(n) if n == "from")) {
             return Err(self.err_here("expected `from` in import"));
@@ -434,13 +441,13 @@ impl Parser {
         // enough for `styles.title` to become a typed field read at the use
         // site. Only the default-import form binds one name; `import * from`
         // and bare side-effect imports keep merging the module as before.
-        if let (Some(bound), true) = (&names, is_css_module_path(&path)) {
+        if let (ImportKind::Names(bound), true) = (&kind, is_css_module_path(&path)) {
             if bound.len() == 1 {
                 self.css_modules
-                    .insert(bound[0].clone(), css_module_accessor(&path));
+                    .insert(bound[0].local().to_string(), css_module_accessor(&path));
             }
         }
-        Ok(ImportDecl { path, names, pos })
+        Ok(ImportDecl { path, kind, path_quoted: true, pos })
     }
 
     fn map_type(&mut self) -> Result<Type, Diag> {

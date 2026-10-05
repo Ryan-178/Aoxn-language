@@ -16,8 +16,8 @@ minors do not.
 
 | Version | Supported |
 |---|---|
-| `0.42.x` (current) | ✅ yes |
-| `0.41.x` and earlier | ❌ no — please reproduce on `main` or the latest release |
+| `0.43.x` (current) | ✅ yes |
+| `0.42.x` and earlier | ❌ no — please reproduce on `main` or the latest release |
 | `main` (development) | ✅ yes, fixes land here first |
 
 Fix versions are always noted in [`CHANGELOG.md`](CHANGELOG.md). If you need a
@@ -241,6 +241,18 @@ though a bug report about the *documentation* is welcome.
   arithmetic on their arguments is intentional.
 - **Memory growth from string concatenation.** Concat results are never freed
   (immutable strings, no GC yet). It is stated behavior, not a leak bug.
+- **Where an unquoted import specifier resolves (v0.43.0).** `import util`
+  looks in the *importing file's own directory* first, then `aox_modules/`,
+  then the installed stdlib. The quoted spelling (`import * from "util"`)
+  skips the sibling probe and resolves exactly as it always has. This is
+  compile-time resolution over the author's own source tree — it decides
+  which file the compiler reads, nothing more — but it does mean a specifier
+  that used to reach only a package can now pick up a local file. Quote the
+  specifier if the package is what you meant. Where two modules contend for
+  one name, the compiler disambiguates by prefixing the emitted C identifier
+  with the module's path — and that prefix is filtered down to ASCII
+  alphanumerics and `_` before it reaches the generated text, so no path
+  character can escape the identifier.
 - **Antivirus quarantining the freshly installed compiler.** Aoxn ships one
   unsigned `Setup.exe` that unpacks an unsigned `aoxn.exe`, and Windows Smart
   App Control / Defender routinely quarantine a new, unsigned executable
@@ -328,8 +340,8 @@ Aoxn 处于 pre-1.0 阶段：只有最新的版本线接收安全修复，旧的
 
 | 版本 | 支持情况 |
 |---|---|
-| `0.42.x`（当前） | ✅ 支持 |
-| `0.41.x` 及更早 | ❌ 不支持——请在 `main` 或最新发布上复现 |
+| `0.43.x`（当前） | ✅ 支持 |
+| `0.42.x` 及更早 | ❌ 不支持——请在 `main` 或最新发布上复现 |
 | `main`（开发线） | ✅ 支持，修复最先落在这里 |
 
 修复版本永远记在 [`CHANGELOG.md`](CHANGELOG.md)。如需把修复反向移植到旧
@@ -495,6 +507,14 @@ tag，请在报告里说明，我们再商量。
   就不安全；对其参数做不检查的指针运算是有意为之。
 - **字符串拼接的内存增长。** 拼接结果永不释放（不可变字符串，尚无 GC）。这是
   成文行为，不是泄漏 bug。
+- **不带引号的 import 说明符去哪里找（v0.43.0）。** `import util` 会**先**在
+  导入文件自己的目录里找，然后才是 `aox_modules/`，最后是已安装的标准库；
+  而加引号的写法（`import * from "util"`）跳过同目录探测，解析行为与此前完全
+  一致。这是编译期、在作者自己的源码树里做的解析——它只决定编译器读哪个文件，
+  仅此而已——但也意味着一个此前只会命中某个包的说明符，现在可能命中一个本地
+  文件。若你指的确实是那个包，把说明符加上引号。当两个模块争抢同一个名字时，
+  编译器用「模块路径」作前缀来区分发出的 C 标识符——而该前缀在进入生成文本前
+  会被过滤成 ASCII 字母数字与 `_`，因此路径中的任何字符都无法逃出标识符。
 - **杀毒软件隔离刚安装的编译器。** Aoxn 只发布一个未签名的 `Setup.exe`，它解
   出一个同样未签名的 `aoxn.exe`；而 Windows Smart App Control 与 Defender 常常
   在新生成、未签名的可执行文件*首次运行之后*将其隔离。安装器不回避这一点：它在

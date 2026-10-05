@@ -294,12 +294,45 @@ crates/aoxn-pkg       package manager crate (its own dependency set; see above)
 - The compiler library `src/` has zero external crate dependencies. The C
   emitter is plain string building — no LLVM handles, no FFI of its own
   beyond what user programs declare.
-- Multi-file: `load_program` (lib.rs) resolves `import "..."` recursively —
+- Multi-file: `load_program` (lib.rs) resolves imports recursively —
   include-once per canonical path, cycles rejected via an import stack,
   paths relative to the importing file. String-based APIs (`build_exe`)
   reject imports; only path-based entry points resolve them. A resolved
   `.css` target is diverted to the asset pipeline (`src/assets.rs`) instead
   of a front end; see the CSS assets section below.
+- **Namespaces (v0.43.0): `src/resolve.rs` is the module layer, and it runs
+  BEFORE typecheck, ON THE AST.** Each module gets a binding table (what its
+  imports bring in, plus the namespace `import m` binds); every reference is
+  rewritten to the flat name the whole program shares. `typecheck.rs` and
+  `codegen_c.rs` therefore still see ONE flat namespace, and neither was
+  touched.
+  - **A name keeps its bare spelling unless two or more modules provide it**
+    (`ui.button` -> `ui_button`), or unless it is not spellable unqualified
+    at all (what a selective import left out). A contended program did not
+    compile before v0.43.0, so **every existing program emits byte-identical
+    C** — which is what keeps the self-host fixed point true with NO stage-2
+    mirror of the binding layer. Do not "always mangle": that changes every
+    program's C and breaks the fixed point.
+  - **A star import re-exports** (a module's own names plus what IT
+    star-imported), which is what keeps a diamond resolving; a named import
+    does not. Each re-exported name travels with the module that ORIGINALLY
+    declared it, so a stdlib function arriving through two paths is one
+    function and not a "comes from two modules" conflict. Dropping that
+    origin is what makes both SDKs fail to compile.
+  - **An entry module's own names are always visible** — `entries` is passed
+    to `resolve` for exactly this. Without it every program's `main` would
+    be prefixed.
+  - **An unquoted specifier probes the importing file's own directory; a
+    quoted one does not.** `ImportDecl.path_quoted` carries that difference
+    all the way into `scan_imports`, which the build-cache key depends on —
+    miss it and editing a bare-imported module silently serves a stale exe.
+  - `aoxn symbols` must report SOURCE spellings
+    (`Flattened::with_source_names`); the IDE's outline and go-to-definition
+    read that one table.
+  - **stage-2 has the grammar but not the bindings**: `selfhost/parser.ax`
+    parses every form and REFUSES selective imports rather than merging
+    them, because stage-1 filters and a silent merge would make stage-2
+    accept what stage-1 rejects.
 
 ## C backend invariants (src/codegen_c.rs; mirrored by selfhost/codegen.ax)
 
@@ -548,8 +581,11 @@ crates/aoxn-pkg       package manager crate (its own dependency set; see above)
   dispatches on extension (`.ts`/`.tsx` → `ts::parser`), `aoxn build foo.ts`
   just works. TS lowers into the EXISTING `crate::ast` (console.log→print,
   x.length→len(x), object literal→StructLit via interface annotation).
-- Legacy Aoxn `import "path"` is REMOVED (one-shot switch in W1-S3) — use
-  `import * from "path"` everywhere, including stdlib/selfhost sources.
+- `import "path"` was removed in W1-S3 and **revived in v0.43.0** as
+  equivalent to `import * from "path"`; the Python spellings (`from x import
+  *`, `import x as y`) work in a `.ts` file too. Every source in this repo
+  still uses `import * from "..."`, which is the form the self-hosted
+  compiler can also compile.
 - **`import * from "p"` compiled in .ax files but NOT in .ts files until
   v0.36.0** — the TS arm that should have handled the whole-module merge
   returned an error on seeing `*`, so a `.ts` file could import nothing at all

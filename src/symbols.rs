@@ -309,9 +309,15 @@ mod tests {
     /// so the file-name and cross-file behaviour is tested as a caller
     /// experiences it rather than through a test-only shortcut.
     fn syms_on_disk(files: &[(&str, &str)], entry: &str) -> Vec<Symbol> {
+        // The directory is per CALL, not per entry name: tests run in
+        // parallel threads, and two of them naming their entry `main.ax`
+        // would otherwise share a directory and overwrite each other's
+        // fixtures mid-run.
+        static SEQ: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
         let dir = std::env::temp_dir().join(format!(
-            "aoxn-symbols-{}-{}",
+            "aoxn-symbols-{}-{}-{}",
             std::process::id(),
+            SEQ.fetch_add(1, std::sync::atomic::Ordering::SeqCst),
             entry.replace(['/', '\\'], "_")
         ));
         let _ = std::fs::remove_dir_all(&dir);
@@ -411,6 +417,26 @@ mod tests {
         assert_eq!(clamp.line, 1);
         let main = s.iter().find(|s| s.name == "main").expect("entry fn");
         assert!(main.file.ends_with("main.ax"), "{}", main.file);
+    }
+
+    #[test]
+    fn a_namespace_imported_module_is_outlined_under_its_own_names() {
+        // `import util` makes the resolver prefix the module's declarations so
+        // nothing can collide with them. The outline must not show those
+        // prefixes: an editor listing `util_button` would send the author
+        // looking for a name the file does not contain (v0.43.0).
+        let s = syms_on_disk(
+            &[
+                ("util.ax", "def button() -> int:\n    return 1\n\nstruct Point:\n    x: int\n"),
+                ("main.ax", "import util\n\ndef main() -> int:\n    return util.button()\n"),
+            ],
+            "main.ax",
+        );
+        let button = s.iter().find(|s| s.name == "button").expect("the source spelling");
+        assert!(button.file.ends_with("util.ax"), "{}", button.file);
+        let point = s.iter().find(|s| s.name == "Point").expect("the source spelling");
+        assert!(point.file.ends_with("util.ax"), "{}", point.file);
+        assert!(s.iter().all(|s| !s.name.contains("util_")), "{s:?}");
     }
 
     #[test]
