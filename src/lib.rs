@@ -948,8 +948,11 @@ pub fn link_opts(obj_path: &Path, exe_path: &Path, libs: &[String], lib_paths: &
     for lib in libs {
         cmd.arg(format!("-l{lib}"));
     }
-    // C math (fmod/sqrt/...) is folded into the Windows CRT link, so there is
-    // no `-lm` to add here.
+    // platform defaults: C math (`fmod`/`sqrt`/...) is a separate library on
+    // Linux; the Windows CRT link covers it, so the list is empty there.
+    for lib in crate::platform::default_link_libs() {
+        cmd.arg(format!("-l{lib}"));
+    }
     // Windows Defender / Smart App Control routinely hold a freshly written
     // .obj for a few hundred milliseconds, and the linker then fails with
     // "could not open ...obj" or "unable to remove file: permission

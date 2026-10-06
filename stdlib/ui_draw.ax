@@ -1101,6 +1101,97 @@ def ui_scroll_begin(c: UI, x: int, y: int, w: int, h: int, scroll_y: int, conten
 def ui_scroll_end(c: UI):
     ui_clip_pop(c)
 
+# ---- horizontal scroll area ----
+#
+# The horizontal twin of ui_scroll_begin/ui_scroll_end: a clipped viewport
+# whose content is drawn at (x - scroll_x, y + pad), with a BOTTOM scrollbar
+# over track [x, x+w) and content clipped to [x, x+w) x [y, y+h-sbw).
+# Nests with the vertical variant: the clip stack intersects, so
+# begin+begin_h+draw+end+end_h leaves the content region only. Wheel input
+# is not wired yet (Windows WM_MOUSEHWHEEL / X11 buttons 6+7); drag the bar.
+
+# ---- shared horizontal scrollbar (mirror of sb_widget: x/y swap, the
+# thumb rides on c.mx, the hit row is the FULL widget width) ----
+
+def sb_widget_h(c: UI, x: int, y: int, w: int, h: int, sbw: int, sx: int, sw: int, total: int, visible: int, scroll: int, maxs: int, off: bool) -> int:
+    id = ui_wid_id(x, y + h)
+    pal = ui_palette_get(c)
+    track = sw
+    if track < 1:
+        track = 1
+    tw = track * visible / total
+    if tw < 24:
+        tw = 24
+    if tw > track:
+        tw = track
+    ui_fill_rect(c, sx, y + h - sbw, sw, sbw, pal.groove)
+    tx = sx
+    if maxs > 0:
+        tx = sx + (track - tw) * scroll / maxs
+    tface = pal.widget
+    hot_sb = ui_mouse_in(c, x, y + h - sbw, w, sbw) and not off
+    if st_get(c, 0) == id:
+        tface = pal.widget_down
+    elif hot_sb:
+        tface = pal.widget_hover
+    round_fill(c, tx, y + h - sbw + 2, tw, sbw - 4, tface, pal.border)
+    if hot_sb and c.dn and not c.dn_prev and st_get(c, 0) == 0:
+        st_set(c, 0, id)
+    if st_get(c, 0) == id and c.dn:
+        denom = track - tw
+        if denom < 1:
+            denom = 1
+        scroll = (c.mx - sx - tw / 2) * maxs / denom
+        if scroll > maxs:
+            scroll = maxs
+        if scroll < 0:
+            scroll = 0
+    if st_get(c, 0) == id and c.dn_prev and not c.dn:
+        st_set(c, 0, 0)
+    return scroll
+
+# Begin a horizontal clipped viewport: returns the NEW scroll offset; draw
+# your content at (x - scroll_x, y) INSIDE the region. ui_scroll_end_h MUST
+# close it (it pops the clip stack). content_w is the full content width.
+def ui_scroll_begin_h(c: UI, x: int, y: int, w: int, h: int, scroll_x: int, content_w: int) -> int:
+    maxs = content_w - w
+    if maxs < 0:
+        maxs = 0
+    has_sb = content_w > w
+    sbw = 12
+    if not has_sb:
+        sbw = 0
+    off = ui_disabled(c)
+    # scrollbar input + draw happen BEFORE the content clip below, or the
+    # bar would clip itself away (the clip excludes the scrollbar row)
+    if has_sb:
+        scroll_x = sb_widget_h(c, x, y, w, h, sbw, x, w, content_w, w, scroll_x, maxs, off)
+    ui_clip_push(c, x, y, x + w, y + h - sbw)
+    return scroll_x
+
+def ui_scroll_end_h(c: UI):
+    ui_clip_pop(c)
+
+# ---- fonts ----
+
+# Switch the widget layer's body font to the backend's MONOSPACE face
+# (Consolas on Windows, the fontconfig "Monospace" alias on Linux). Every
+# widget drawn after the call measures and renders with it. Returns the
+# updated context (write-back idiom); a no-op when the backend could not
+# open the face (c.font_mono stays 0).
+def ui_font_mono(c: UI) -> UI:
+    if c.font_mono != 0:
+        c.font = c.font_mono
+    return c
+
+# Restore the sans body font the backend opened at init (handle parked in
+# st 826). Returns the updated context.
+def ui_font_sans(c: UI) -> UI:
+    f = st_get(c, 826)
+    if f != 0:
+        c.font = f
+    return c
+
 # ---- tooltip (hover the rect for ~0.55s; drawn on top in ui_present) ----
 
 def ui_tooltip(c: UI, x: int, y: int, w: int, h: int, text: string):
@@ -1740,7 +1831,7 @@ def ui_table(c: UI, x: int, y: int, w: int, h: int, m: TableModel, sel_row: int,
 def ui_init(title: string, w: int, h: int) -> UI:
     c = ui_new()
     if not plat_supported():
-        print("aoxn ui: no backend for this platform (import * from \"stdlib/ui_win\")")
+        print("aoxn ui: no backend for this platform (import stdlib/ui_win on Windows, stdlib/ui_x11 on Linux)")
         return c
     c = ui_state_init(c)
     return plat_init(c, title, w, h)

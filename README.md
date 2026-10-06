@@ -49,7 +49,7 @@ def main() -> int:
 
 ### Install (one file, Windows)
 
-Download **`Aoxn-0.45.0-Setup.exe`** from the
+Download **`Aoxn-0.46.0-Setup.exe`** from the
 [releases page](https://github.com/AlonechatWorkspace/Aoxn-language/releases)
 and double-click it. That single executable carries the compiler, the
 standard library, the UI toolkit and the examples — nothing else to download,
@@ -82,12 +82,17 @@ aoxn doctor          # verify any install, any time
 aoxn doctor --json   # same report, for scripts and agents
 ```
 
-Aoxn targets **Windows** — one platform, one installer, one CI job, one UI
-backend (Win32/GDI). The single external prerequisite is **clang** (the
-compiler lowers to C and hands it over); the installer provisions LLVM through
-`winget` when it is missing, and linking uses the MSVC Build Tools, which
-clang finds automatically. Full guide — scripted installs, `-Prefix`,
-uninstall, troubleshooting: [`docs/install.md`](docs/install.md).
+Aoxn's first-class platform is **Windows** — the installer, the release
+packaging and the Win32/GDI UI backend live there. **Linux is supported too
+(v0.46.0)**: the compiler, the whole test suite and an Xlib/Xft UI backend
+run on it — build from source with `cargo build` after `apt install clang
+libx11-dev libxft-dev libfontconfig1-dev`. The single external prerequisite
+on either platform is **clang** (the compiler lowers to C and hands it
+over); on Windows the installer provisions LLVM through `winget` when it is
+missing and linking uses the MSVC Build Tools, which clang finds
+automatically. Full guide — scripted installs, `-Prefix`, uninstall,
+troubleshooting: [`docs/install.md`](docs/install.md); the platform story:
+[`docs/platform-support.md`](docs/platform-support.md).
 
 With an install in place the standard library resolves **by name** from any
 directory — no path back into the toolchain:
@@ -216,7 +221,8 @@ numeric libraries were waiting for), `time` (QPC monotonic + FILETIME wall
 clock), `datetime` (Hinnant civil-date math, hand-parsed `strftime` subset),
 `calendar`, `pathlib`, `base64` (encode **and** decode, std + URL-safe),
 `hashlib` (SHA-256/SHA-1/MD5, one-shot + incremental, pure Aoxn bitwise),
-`hmac`, `os` (Win32 filesystem core, all-wide UTF-16, env, cwd, listdir),
+`hmac`, `os` (filesystem core: all-wide UTF-16 on Windows, plain libc on Linux —
+env, cwd, listdir),
 `glob` (Python's dotfile rule, sorted output), `json` (the DOM promoted out
 of `net/` + file I/O), `bisect`, `heapq`. None of them touches
 `stdlib/stdlib.ax`, so the self-host fixed point is untouched. Reference —
@@ -312,24 +318,29 @@ boxes, text fields, list boxes, floating combo boxes, tabs, group boxes,
 scroll areas, tooltips), disabled groups, floating overlays and 16-role
 light/dark themes. Widgets are plain functions called every frame and the
 application owns all state, which is what fits a language without callbacks
-(yet). v0.45.0 is a performance and correctness pass over the machinery:
-O(n) text positioning, an O(1) `tree_has_child`, the caret-measure cache,
-one shared scrollbar and a popup-overflow clamp — same widget set, same
-APIs.
+(yet). v0.45.0 was a performance and correctness pass over the machinery;
+**v0.46.0 adds horizontal scroll areas** (`ui_scroll_begin_h` /
+`ui_scroll_end_h`, a bottom scrollbar that nests with the vertical one)
+**and a monospace face** (`ui_font_mono(c)` / `ui_font_sans(c)` — Consolas
+on Windows, the fontconfig `Monospace` alias on Linux).
 
-**The toolkit is three files** — a portable core (`ui.ax`), a
-platform-neutral widget layer (`ui_draw.ax`) and the Win32/GDI backend
-(`ui_win.ax`) — and a program picks it up with one import:
+**The toolkit is three portable files plus one backend per platform** — a
+portable core (`ui.ax`), a platform-neutral widget layer (`ui_draw.ax`),
+and ONE of `ui_win.ax` (Win32/GDI) or `ui_x11.ax` (Xlib + Xft, v0.46.0) —
+and a program picks it up with one import:
 
 ```Aoxn
-import * from "stdlib/ui_win"
+import * from "stdlib/ui_win"     # Windows: Win32 + GDI (-l user32 -l gdi32)
+import * from "stdlib/ui_x11"     # Linux: Xlib + Xft  (-l X11 -l Xft)
 ```
 
-Widgets never name a Win32 symbol: they call `plat_*` primitives that the
-backend supplies, so the widget layer stays testable headlessly. Aoxn is a
-Windows-only language (v0.30.0), so `ui_win.ax` is the only backend that
-ships; the X11 backend and its per-OS selection table went with the other
-platforms.
+Widgets never name a platform symbol: they call `plat_*` primitives that
+the backend supplies, and the contract tests pin BOTH backends to the same
+primitive set, so the widget layer stays testable headlessly and the widget
+set is identical everywhere. The X11 backend was removed in v0.30.0 and
+rewritten against the v3 contract in v0.46.0 — Xft text, an off-screen
+pixmap for double buffering, the X11 selection protocol for the clipboard,
+and a per-frame `XQueryKeymap` sweep so held keys read continuously down.
 
 ```Aoxn
 import * from "stdlib/ui_win"
@@ -354,6 +365,10 @@ def main() -> int:
 ```powershell
 cargo run -- run examples\ui_gallery.ax -l user32 -l gdi32   # full widget gallery
 cargo run -- run examples\ui_demo.ax -l user32 -l gdi32      # getting started
+```
+
+```bash
+aoxn run examples/ui_probe_x11.ax -l X11 -l Xft   # Linux smoke probe (also run under Xvfb in CI)
 ```
 
 Details: [`docs/ui.md`](docs/ui.md) · gallery: `examples/ui_gallery.ax` ·
@@ -421,8 +436,9 @@ whichever layer failed first into one string, and
 data a caller can switch on.
 
 Link with `-l winhttp` (the one Windows transport that brings TLS without a
-TLS stack); `an_client_at` / `oa_client_at` point either SDK at a gateway,
-a proxy or a loopback mock.
+TLS stack); the HTTP entry points report a clean "no transport on this
+platform" error on Linux rather than failing to link. `an_client_at` /
+`oa_client_at` point either SDK at a gateway, a proxy or a loopback mock.
 
 ```powershell
 cargo run -- run examples\openai_chat.ax -l winhttp      # live demo (needs a key)
@@ -544,7 +560,8 @@ program. It also compiles the real stdlib and the full `examples/` suite. See
 | `src/ts/` | the TypeScript front end (TS-M1 W1 complete: S2b type layer + S3 modules) |
 | `stdlib/stdlib.ax` | the standard-library core, written in Aoxn itself |
 | `stdlib/{math,time,datetime,calendar,pathlib,base64,hashlib,hmac,os,glob,json,bisect,heapq}.ax` | the v0.44.0 module batch — `docs/stdlib.md` is its reference |
-| `stdlib/ui.ax`, `stdlib/ui_draw.ax`, `stdlib/ui_win.ax` | the UI toolkit v3: portable core + platform-neutral widget layer (20+ widgets) + the Win32/GDI backend |
+| `stdlib/ui.ax`, `stdlib/ui_draw.ax` | the UI toolkit v3: portable core + platform-neutral widget layer (20+ widgets) |
+| `stdlib/ui_win.ax`, `stdlib/ui_x11.ax` | the two `plat_*` backends: Win32/GDI (Windows) and Xlib/Xft (Linux, v0.46.0) |
 | `stdlib/net/` | the shared API-client layer (v0.41.0, moved out of `stdlib/openai/`): codecs, JSON DOM + builder, WinHTTP transport, SSE — used by both SDKs |
 | `stdlib/openai/` | the OpenAI SDK (v0.40.1): headers, client, resources, accessors, `OaStream` — `docs/openai-sdk.md` |
 | `stdlib/anthropic/` | the Anthropic SDK (v0.41.0): content blocks, tools/schemas, client, `AnStream` + `AnAcc` — `docs/anthropic-sdk.md` |
@@ -565,34 +582,35 @@ program. It also compiles the real stdlib and the full `examples/` suite. See
 
 ## Testing & CI
 
-`cargo test` runs the end-to-end suite — 282 tests in the compiler workspace
-(pipeline 154, compiler unit tests 21, TypeScript front end 34, UI 9, install
-layout 6, CSS assets 21, CSS assets v0.36 18, symbol export 8, OpenAI SDK 2,
-Anthropic SDK 2, and one driver test per v0.44.0 stdlib module group:
-hashlib 1, datetime 1, math 1, pathlib 1, containers 1, os+glob 1,
-json file-IO 1)
-plus the `aoxn-pkg`
-crate's 94 via `bash run_pkg_tests.sh`, 376 in
-
-total — where every
-pipeline test compiles
-`.ax` to an executable, runs it and asserts stdout + exit code. The suite includes the
-self-hosting fixed point: the stage-1 and stage-2 compilers must emit
-byte-identical C and object files for the same program (the object comparison
-masks the COFF TimeDateStamp that clang stamps into every Windows object).
-The two SDK suites run the REAL WinHTTP path against a mock API server
-written in Aoxn on a loopback port, so message creation, SSE streaming,
-tool-call reassembly, pagination, `Retry-After` and the error bodies are all
-covered with no network and no credentials.
+`cargo test` runs the end-to-end suite — **283 tests** in the compiler
+workspace (pipeline 154, compiler unit tests 18, installer stub 3, TypeScript
+front end 34, UI 10, install layout 6, CSS assets 21, CSS assets v0.36 18,
+symbol export 8, OpenAI SDK 2, Anthropic SDK 2, and one driver test per
+v0.44.0 stdlib module group: hashlib, datetime, math, pathlib, containers,
+os+glob, json file-IO) plus the `aoxn-pkg` crate's 94 via
+`bash run_pkg_tests.sh` — **377 in total** — where every pipeline test
+compiles `.ax` to an executable, runs it and asserts stdout + exit code. The
+suite includes the self-hosting fixed point: the stage-1 and stage-2
+compilers must emit byte-identical C and object files for the same program
+(the object comparison masks the COFF TimeDateStamp that clang stamps into
+every Windows object). The two SDK suites run the REAL WinHTTP path against
+a mock API server written in Aoxn on a loopback port, so message creation,
+SSE streaming, tool-call reassembly, pagination, `Retry-After` and the error
+bodies are all covered with no network and no credentials.
 The IDE carries its own suites next to these: 36 Rust tests for the command
 layer (`pnpm test:rust` in `ide/`) and 62 node:test cases for the frontend
 (`pnpm test`), which do not run in a plain `cargo test` because
 `ide/src-tauri` is deliberately excluded from the root workspace.
-CI runs the whole suite on windows-latest on every push — Aoxn is a
-Windows-only language (v0.30.0) — and the same job then packages the
-single-file installer, installs it into a scratch prefix and runs
-`aoxn doctor` plus a stdlib program, so a broken install fails the build and
-not the next release. Release tags publish `Aoxn-<version>-Setup.exe` (see
+
+CI runs **two jobs** on every push. `windows-latest` runs the whole suite,
+then packages the single-file installer, installs it into a scratch prefix
+and runs `aoxn doctor` plus a stdlib program, so a broken install fails the
+build and not the next release. `ubuntu-latest` (v0.46.0) runs the same
+suite on Linux — proving the compiler, the dual-platform stdlib and the
+fixed point on a second host — and then builds
+`examples/ui_probe_x11.ax` with `-l X11 -l Xft` and drives it for 30 real
+frames under Xvfb, the link-and-run check for the X11 UI backend. Release
+tags publish `Aoxn-<version>-Setup.exe` (see
 [`.github/workflows/release.yml`](.github/workflows/release.yml)).
 
 ## Package management
@@ -709,176 +727,70 @@ Full reference, including limits: [`docs/css-assets.md`](docs/css-assets.md).
 
 ## Status
 
-**v0.45.0** · **Windows only** · 376 tests green
-(pipeline 154 + lib 21 + assets 21 + assets_v36 18 + symbols 8 + TS 34 + UI 9 +
-OpenAI SDK 2 + Anthropic SDK 2 + install 6 + stdlib module drivers 7 +
-aoxn-pkg 94; the IDE adds 36 Rust + 62 frontend tests of its own) ·
-**the UI toolkit gets a performance and correctness pass** (v0.45.0) —
-scrolling a combobox/menu popup past 32 items used to hand `as_string` a
-garbage pointer (the overlay item slots end at 32, but the popup record kept
-the unclamped count; both widgets now clamp and `overlay_item_str` answers
-`""` out of range); text click/drag positioning is O(n) instead of O(n²) —
-one measure per codepoint accumulated, where the old code re-measured
-`s[0..j)` per codepoint and the multi-line editor carried two inline copies
-of that loop; `tree_has_child` is O(1) against a per-node child count the
-`TreeModel` block carries (4 slots per node, maintained on re-parent — big
-trees used to render O(n²)); the caret x-offset cache the docs have promised
-since v2 exists again (st 532..535, so an idle focused field measures
-nothing per frame); an open menu is keyboard-navigable (Up/Down wrap, Enter
-picks, Esc closes) and modal for input, consuming the navigation keys and
-the WM_CHAR queue so widgets behind it do not fire; the five copies of the
-vertical scrollbar are one `sb_widget`, and `ui_fini` lost its
-`for i in range(0, 1)` wrapper ·
-**os_getenv stops truncating long values** (v0.44.1) — the v0.44.0
-implementation read environment variables into a fixed 2048-character buffer
-and treated the Win32 "buffer too small" answer as failure, so any longer
-value came back `""`; the GitHub Actions runners' `PATH` is longer than that,
-which is exactly how the stdlib os+glob test caught it in CI. The two-call
-Win32 pattern (NULL buffer → required size → allocate → read) replaces it,
-pinned by a 3000-character round-trip driver check ·
-**the standard library starts** (v0.44.0) — the first thirteen modules of the
-stdlib roadmap land as independent files imported by name (`math` `time`
+**v0.46.0** · **Windows first-class + Linux supported** · 377 tests green
+(283 in the compiler workspace + 94 in `aoxn-pkg`; the IDE adds 36 Rust +
+62 frontend tests of its own) ·
+
+**Linux is a supported platform again, and the UI toolkit gains a second
+backend through the same `plat_*` contract** (v0.46.0) — v0.30.0 had cut the
+platform list to Windows alone; v0.46.0 brings Linux back for the compiler
+(ELF objects, `-lm` linked, no `/STACK` flag), the whole test suite (a new
+`ubuntu-latest` CI job) and a **rewritten `stdlib/ui_x11.ax`**: Xlib for the
+window and input, Xft for antialiased UTF-8 text, an off-screen Pixmap for
+double buffering, the X11 selection protocol for the clipboard, a per-frame
+`XQueryKeymap` sweep so held keys read continuously down instead of
+flickering between autorepeat pairs, and the close request travelling
+through shared-block slot 824 (Aoxn passes `UI` by value, so `plat_close`
+cannot set a field the app loop would see). `target_os()` now folds the OS
+the compiler was BUILT on — `"windows"` or `"linux"` — and the self-hosted
+compiler needs no platform check of its own: its builtin emitter calls
+`target_os()`, a value burned in by whatever compiler built it, so every
+stage of the fixed-point chain on one machine folds the same host OS and the
+fixed point stays byte-identical by construction. The stdlib branches rather
+than forks: `os.ax` serves Linux through plain libc (mkdir/stat/opendir/
+readdir/getenv/setenv, the glibc struct offsets documented in the header)
+while the `W` Win32 calls keep serving Windows — an unreferenced `extern
+def` emits no symbol reference, so each platform links only its own side;
+`exe_path()` answers through `/proc/self/exe` on Linux. What stays
+Windows-only does so honestly: the HTTP transport rides WinHTTP and the
+entry points return a clean "no transport on this platform" error on Linux
+rather than failing to link, and the single-file installer remains a Windows
+artifact ·
+
+**the UI toolkit gains horizontal scroll areas and a monospace face**
+(v0.46.0) — `ui_scroll_begin_h(c, x, y, w, h, scroll_x, content_w)` +
+`ui_scroll_end_h(c)` add the bottom-scrollbar twin of the vertical scroll
+area (drag to scroll; the clip stack intersects, so the two nest —
+begin+begin_h+draw+end+end_h leaves exactly the content region), and
+`ui_font_mono(c)` / `ui_font_sans(c)` point the widget layer's body font at
+Consolas (Windows) or the fontconfig `Monospace` alias (Linux) and back —
+both faces opened by the backend at init and parked on `UI.font_mono` ·
+
+**the previous milestone** (v0.45.0) was a performance and correctness pass
+over the UI machinery: a popup-overflow clamp for combobox/menu lists past
+32 items, O(n) text positioning (one measure per codepoint accumulated),
+an O(1) `tree_has_child` on a per-node child count, the caret x-offset
+cache (st 532..535), keyboard-navigable modal menus, and one shared
+`sb_widget`; v0.44.1 fixed `os_getenv` truncating values longer than 2048
+characters; v0.44.0 landed the first thirteen stdlib modules (`math` `time`
 `datetime` `calendar` `pathlib` `base64` `hashlib` `hmac` `os` `glob` `json`
-`bisect` `heapq`; `docs/stdlib.md` is the reference), none of them touching
-`stdlib/stdlib.ax` so the self-host fixed point is untouched. `math` ships the
-NaN/Inf toolkit the numeric libraries were blocked on (`fdiv`, `NaN()`/`Inf()`,
-`is_nan`/`is_inf` — with capitalised spellings that dodge UCRT link
-collisions); `hashlib` implements SHA-256/SHA-1/MD5 in pure Aoxn bitwise
-arithmetic with the mask-before-left-shift rule and an 80-word schedule
-scratch; `os` walks the Win32 filesystem all-wide with the zero-extended
-INVALID sentinel; `json` is promoted from `net/` with a file-I/O pair;
-`bisect`/`heapq` bring the f64 slot-view discipline that unblocks P2's
-containers ·
-**modules stop being a global** (v0.43.0) — the gap analysis had ranked "no
-namespaces" first for a year: every `import` merged into one namespace, a
-duplicate top-level name was a hard error, and every stdlib module hand-prefixed
-all fifty-odd of its functions because it had no choice. A module can now be
-**bound as a namespace and reached through it** — `import util`, then
-`util.f(...)`, `util.Point(x=1, y=2)`, `x: util.Point` — so two modules may both
-define `f` and the hand-written prefix (`ui_`, `net_`, `oa_`) becomes optional
-rather than mandatory. The **Python spellings** all work
-(`from util import *`, `from util import a, b`, `from util import a as b`,
-`import util as u`), a specifier may be bare and dotted (`stdlib.net.json`) or
-quoted, a bare one finds the `util.ax` beside the importing file, and
-`import "path"` — removed in W1-S3 — is back. A **named import now really
-filters**: `from util import a` imports `a` and nothing else, where before the
-list was parsed and ignored. The generated C of a program that compiled before
-is byte-identical — a name is only prefixed when two modules contend for it,
-and such a program never compiled — so `codegen_c.rs` needed no change and the
-self-host fixed point holds ·
-**the everyday gaps close** (v0.42.0) — radix integer literals
-(`0x1F` / `0b101`; before, `0x10` lexed as `0` + the identifier `x10` and the
-error pointed at nothing), the two missing string escapes (`\r` — the byte the
-HTTP/SSE layers had been writing by hand — and `\0` for byte buffers),
-**`assert(cond[, message])`** with the source line baked into the report,
-**`exit(code)`**, and **command-line arguments via `argc()` / `arg(i)`** — the
-oldest item on the language-gaps list, closed without touching `main`'s shape
-(`def main(argc: int)` is now a compile error that names the builtins instead
-of an `internal` clang failure). The toolchain learns `--clang-arg`/`-g`
-(forwarded to every clang invocation and part of the cache key),
-`--cc-warnings` (drop the hard-coded `-w`), a **`cc` diagnostic stage** for
-C-compiler failures, and a **warning tier**: `Diag` carries a severity and a
-stable code, `W001` reports assigned-but-never-read locals, and `--json`
-returns `{"ok":…,"errors":[…],"warnings":[…]}` on success too. The generated C
-of a program using none of this is byte-identical, so the self-host fixed
-point holds without a `selfhost/codegen.ax` mirror ·
-**the Anthropic SDK lands in the stdlib, and the transport becomes shared**
-(v0.41.0) — `stdlib/anthropic/` (blocks / tools / client, ~1.7k lines of
-plain Aoxn) covers the Messages API including **tool use** end to end:
-content blocks (text, image, document, thinking, tool_use, tool_result, the
-server-tool pair), a JSON-Schema builder instead of hand-escaped schemas,
-token counting, models, files (with a multipart upload), message batches and
-the named SSE stream — whose `AnAcc` reassembles a message, including a tool
-call whose arguments arrive only as JSON text fragments. The four modules
-that shipped inside `stdlib/openai/` moved to `stdlib/net/` (prefix `oa_` →
-`net_`) so both SDKs ride ONE transport; the OpenAI SDK's public surface is
-unchanged and its suite still passes. The JSON DOM gained a builder
-(`jb_*` + `j_parse_into`) so nested request bodies are assembled, not
-hand-escaped. Four latent bugs fell out along the way: `Retry-After` was
-parsed and then ignored by the OpenAI SDK, `net_url_split` silently
-discarded query strings (so pagination could not work), the JSON accessors
-read 40 bytes before the slab when handed `-1`, and a fragment spliced into
-a built DOM kept using the pre-`realloc` slab pointer (heap corruption). No
-language change was needed for any of it ·
-**the OpenAI SDK lands in the stdlib** (v0.40.1) — `stdlib/openai/` in plain
-Aoxn gives the language a real API client: chat completions, responses,
-embeddings, models and moderations, blocking or streamed token-by-token,
-with the reference Python SDK's defaults and env variable names; tested
-offline end-to-end against a mock OpenAI server written in Aoxn itself ·
-**the language grows its fourth data axis** (v0.40.0) — **function pointers**
-(a bare function name in value position is its address, `fn(int) -> int`
-annotations, indirect calls, `as` casts between `int` and fn-ptr for COM
-vtable slots and Win32 callbacks), **`None` + `T | None` nullability** (the
-only union form; `is None` / `is not None` narrow per branch in checker and
-codegen alike; print and operators reject a nullable until narrowed), real
-**`raise` / `try` / `except`** (the v0.39.0 "no exceptions" decision reversed
-by user instruction — `raise <string>` unwinds to the nearest handler or out
-of the function; the `Err`-value channel stays for failures a caller
-inspects), and **`dict[V]`** — string-keyed maps with insertion-order
-iteration whose missing keys raise. The dict is a **heap handle** (the
-`TableModel` / `FileTable` shape): the first spelling passed the 4-word
-struct by value and was unsound twice over — a callee's growth was invisible
-to the caller, and the stale `len` then walked off the reallocated buffer
-(correct at `-O0`, a segfault at `-O1`+; reproduced with clang on the bare
-generated C). Copies now share the dict, so set/del through any of them are
-seen by all ·
-**the self-hosting heap corruption is root-caused and fixed (v0.39.2)** — the
-struct
-cycle detector threaded its DFS path as a `Vec` by value, pushed onto it and
-recurred; the callee's `realloc` freed the buffer the caller still held, and
-the next sibling branch walked freed memory. It was hidden by an 8-slot
-initial capacity that made the first eight pushes of any path free. The fix
-is write-back (`struct Cycle{hit, path}`), and `vec_push` delegates its
-growth again ·
-**the IDE editor caught up with the language** — the bitwise/shift operators
-and the `err_*` / `out_*` / `vec_*` stdlib vocabulary now highlight in the
-IDE, and the installer fixes that landed between releases have their entry ·
-**two things a language needs before it can hold real data** — a way to report
-failure, and a way to hold "however many" of something. A failing call returns
-an `Err{code, message}` by value; because Aoxn returns one value and structs
-copy on return, the payload comes back through a heap out-slot the caller owns.
-And `[T; N]` being compile-time fixed, the stdlib now ships `Vec` with real
-capacity management, strings as first-class elements, and `VecVec` — a vector
-of vectors, the shape a document format needs. Neither required touching the
-compiler. Plus the six operators Aoxn was missing — `&`, `|`, `^`, `~`, `<<`,
-`>>` — int-only, like `%`, with C's precedence (in which `==` binds *tighter*
-than `&`, so write `(a & b) == c`); they exist for the crypto/TLS/HTTP2 work:
-**the CSS pipeline is finished**: `--emit-assets <dir>` writes fingerprinted CSS
-and every `url()` target beside the executable (with `url()` rewritten to the
-emitted name), `styles.title` gives typed class access, `exe_dir()` /
-`asset_path()` let a relocatable program find its own assets, CSS-in-Aoxn
-builds inline styles, and `--tailwind` generates a documented utility subset —
-plus a fix for a TS import form that never worked
-([`docs/css-assets.md`](docs/css-assets.md)) ·
-**the IDE drives the package manager**: a Packages sidebar view over
-`aoxn.json` / `aox_modules/` with the whitelisted `aoxn pkg` verbs (Init,
-Add, Install, Update, Outdated, Tree, Audit, Why, Remove) and an `aoxn
-doctor` self-check on the status bar ·
-**package manager measured against pip/pnpm**: devDependencies with
-`install --prod`, `overrides`, curated registries (a trust index and an
-advisory database in one repository), `aoxn list`/`freeze`, parallel
-downloads, and enforced minimum compiler versions ·
-**the Aoxn IDE** (`ide/`): a Tauri 2 + Next.js + Monaco workbench with an
-explorer (real new file/folder), per-tab undo, diagnostics as editor markers,
-auto-check on save, and Check/Build/Run driving the real `aoxn` —
-`aoxn check` type-checks with diagnostics only ·
-**one-file install**: `Aoxn-<version>-Setup.exe` carries the compiler,
-stdlib, UI toolkit and examples. Its window follows the Python installer — a
-mark, a headline, one large **Install Now** button, then a progress stage and
-a done page — and **nothing touches your disk until you click it**. It
-downloads nothing: it unpacks, adds `aoxn` to PATH, and self-checks with
-`aoxn doctor` (`-InstallClang` opts into fetching LLVM) ·
-self-hosting fixed point (byte-identical generated
-C + object files) · **UI toolkit v3 in the stdlib** (Qt-grade: layout
-managers, text input, focus chain, 20+ widgets, floating overlays —
-`examples/ui_gallery.ax`) · no LLVM dependency: the C-emitting backend is the
-only backend (clang compiles it) · TS-M1 W1 complete (S2b type layer + S3
-modules; the bare `import "path"` form is gone — `import * from "path"`) ·
-v0.29.7: Python surface-syntax parity, batch 1 (`+= -= *= /= %=`, `//`, unary
-`+`, chained comparison - all parse-time desugarings, in both the Rust and the
-self-hosted compiler) · package manager W2: manifest entry resolution
-(`main` / `exports` / `types`), a read-only HTTP registry backend, and the npm
-bridge (`aoxn npm-import`).
+`bisect` `heapq`, imported by name, none touching `stdlib/stdlib.ax` so the
+fixed point held); v0.43.0 made modules nameable namespaces
+(`import util` + `util.f(...)`, the Python spellings included); v0.42.0
+closed the everyday gaps (radix literals, `\r`/`\0`, `assert`/`exit`,
+`argc()`/`arg(i)`, the `cc` stage, the warning tier); v0.41.0/v0.40.1
+brought the Anthropic and OpenAI SDKs over one shared WinHTTP transport;
+v0.40.0 added function pointers, `None`/`T | None`, `raise`/`try`/`except`
+and `dict[V]`. The full history lives in
+[`CHANGELOG.md`](CHANGELOG.md) ·
+
+standing facts: self-hosting fixed point (byte-identical generated C +
+object files) · UI toolkit v3 in the stdlib (Qt-grade: layout managers,
+text input, focus chain, 20+ widgets, floating overlays —
+`examples/ui_gallery.ax`) · no LLVM dependency: the C-emitting backend is
+the only backend (clang compiles it) · TS-M1 W1 complete · package manager
+beta (PubGrub, curated registries, npm bridge) · one-file installer
+(`Aoxn-<version>-Setup.exe`) that downloads nothing by default.
 
 See [`docs/install.md`](docs/install.md) to install,
 [`docs/spec.md`](docs/spec.md) for the complete language specification and
@@ -914,7 +826,7 @@ Apache-2.0 — see [`LICENSE`](LICENSE).
 ### 一个 exe 装全部（Windows）
 
 从 [releases 页面](https://github.com/AlonechatWorkspace/Aoxn-language/releases)
-下载 **`Aoxn-0.45.0-Setup.exe`**，双击即可。**这一个 exe 里就带着编译器、标准库、
+下载 **`Aoxn-0.46.0-Setup.exe`**，双击即可。**这一个 exe 里就带着编译器、标准库、
 UI 工具箱和示例程序**——不用再下载别的，也不用自己解压：
 
 ```console
@@ -941,11 +853,14 @@ aoxn doctor          # 随时自检
 aoxn doctor --json   # 同样的信息，JSON 输出
 ```
 
-Aoxn **只支持 Windows**：一个平台、一个安装包、一条 CI、一个 UI 后端
-（Win32/GDI）。唯一的外部依赖是 **clang**（Aoxn 生成 C 后交给它编译链接），
-安装程序会在缺失时用 `winget` 装 LLVM；Windows 链接还需要 MSVC Build Tools，
-clang 会自动探测。静默安装（脚本 / CI，无需窗口）、自定义目录、卸载与排错见
-[`docs/install.md`](docs/install.md)。
+Aoxn 的**第一梯队平台是 Windows**——安装器、发布打包与 Win32/GDI UI 后端都
+在那里。**Linux 同样受支持（v0.46.0）**：编译器、完整测试套件与 Xlib/Xft UI
+后端都能跑——`apt install clang libx11-dev libxft-dev libfontconfig1-dev`
+之后 `cargo build` 从源码构建即可。两个平台上唯一的外部依赖都是 **clang**
+（Aoxn 生成 C 后交给它编译链接）；Windows 上安装器会在缺失时用 `winget` 装
+LLVM，链接还需要 MSVC Build Tools，clang 会自动探测。静默安装（脚本 / CI，
+无需窗口）、自定义目录、卸载与排错见 [`docs/install.md`](docs/install.md)；
+平台全景见 [`docs/platform-support.md`](docs/platform-support.md)。
 
 
 装好后任何目录都能按名字引用标准库，不需要写工具链里的路径：
@@ -1029,8 +944,8 @@ def main() -> int:
 工具箱）、`time`（QPC 单调钟 + FILETIME 墙上钟）、`datetime`（Hinnant 民用
 历数学、手写 `strftime` 子集）、`calendar`、`pathlib`、`base64`（编码**和**
 解码、标准 + URL-safe 两套字母表）、`hashlib`（SHA-256/SHA-1/MD5，一次性 +
-增量，纯 Aoxn 位运算）、`hmac`、`os`（Win32 文件系统核心，全宽字符、环境变量、
-工作目录、listdir）、`glob`（Python 的 dotfile 规则、排序输出）、`json`
+增量，纯 Aoxn 位运算）、`hmac`、`os`（文件系统核心：Windows 全宽字符、Linux 直走 libc——
+环境变量、工作目录、listdir）、`glob`（Python 的 dotfile 规则、排序输出）、`json`
 （DOM 自 `net/` 提升 + 文件 I/O）、`bisect`、`heapq`。没有一个碰
 `stdlib/stdlib.ax`，自举固定点不动。逐模块 API、与 Python 的差异以及各种坑
 （UCRT 链接符号冲突、零扩展哨兵值）：[`docs/stdlib.md`](docs/stdlib.md)。
@@ -1117,24 +1032,33 @@ Esc 关闭）、**树/表格模型视图**（堆 `TreeModel`/`TableModel`）、�
 文本框、列表框、浮层下拉框、标签页、分组框、滚动区、工具提示）、禁用态、
 浮层覆盖与 16 色亮/暗主题。控件是每帧调用的普通函数，状态由应用自己
 持有——这正是"暂无回调"的语言所能承载的形态（用法示例见上方英文区）。
-v0.45.0 是对内部机制的一次性能与正确性整备：O(n) 文本定位、O(1) 的
-`tree_has_child`、光标测量缓存、共享滚动条与浮层溢出钳制——控件集合与
-API 面保持不变。
+v0.45.0 是对内部机制的一次性能与正确性整备；**v0.46.0 新增横向滚动区域**
+（`ui_scroll_begin_h` / `ui_scroll_end_h`，底部滚动条，与竖向可嵌套）
+**与等宽字体**（`ui_font_mono(c)` / `ui_font_sans(c)`——Windows 上是
+Consolas，Linux 上是 fontconfig 的 `Monospace` 别名）。
 
-**工具箱由三个文件组成**：可移植内核（`ui.ax`）、与平台无关的控件层
-（`ui_draw.ax`）、以及 Win32/GDI 后端（`ui_win.ax`）。一行 import 即可引入：
+**工具箱由三个可移植文件加每平台一个后端组成**：可移植内核（`ui.ax`）、与
+平台无关的控件层（`ui_draw.ax`），以及 `ui_win.ax`（Win32/GDI）或
+`ui_x11.ax`（Xlib + Xft，v0.46.0）二选一。一行 import 即可引入：
 
 ```Aoxn
-import * from "stdlib/ui_win"
+import * from "stdlib/ui_win"     # Windows: Win32 + GDI（-l user32 -l gdi32）
+import * from "stdlib/ui_x11"     # Linux: Xlib + Xft（-l X11 -l Xft）
 ```
 
-控件层从不出现任何 Win32 符号：它只调用后端提供的 `plat_*` 原语，因此这一层
-可以无窗口地测试。Aoxn 只支持 Windows（v0.30.0），所以发布的只有 `ui_win.ax`
-这一个后端；X11 后端与那张按系统选后端的表格已随其它平台一起移除。
+控件层从不出现任何平台符号：它只调用后端提供的 `plat_*` 原语，契约测试把
+**两个后端**钉在同一套原语集上，因此这一层可以无窗口地测试，控件集合在
+两个平台上完全一致。X11 后端在 v0.30.0 被移除、v0.46.0 按 v3 契约重写——
+Xft 文本、离屏 Pixmap 双缓冲、X11 selection 协议剪贴板，以及每帧一次的
+`XQueryKeymap` 扫描（按住的键不再在自动重复的 release+press 对之间闪烁）。
 
 ```powershell
 cargo run -- run examples\ui_gallery.ax -l user32 -l gdi32   # 全控件画廊
 cargo run -- run examples\ui_demo.ax -l user32 -l gdi32      # 入门示例
+```
+
+```bash
+aoxn run examples/ui_probe_x11.ax -l X11 -l Xft   # Linux 冒烟探针（CI 里还会在 Xvfb 下跑）
 ```
 
 
@@ -1199,7 +1123,8 @@ def main() -> int:
 那一层渲染成一个字符串，`an_status_class(status)` 则把参考实现的异常体系
 变成调用者可 switch 的数据。
 
-链接时加 `-l winhttp`（唯一自带 TLS 的传输）；`an_client_at` /
+链接时加 `-l winhttp`（唯一自带 TLS 的传输）；HTTP 入口在 Linux 上会返回
+干净的「本平台暂无传输层」错误而不是链接失败。`an_client_at` /
 `oa_client_at` 可把任一 SDK 指向网关、代理或环回 mock。
 
 ```powershell
@@ -1297,26 +1222,28 @@ Web 服务同样能打：[`web/`](web/README.md) 套件用 Aoxn 写了 HTTP/1.1 
 
 ## 测试与 CI
 
-`cargo test` 跑端到端测试套件——编译器工作区 282 个（pipeline 154、编译器单元
-测试 21、TypeScript 前端 34、UI 9、安装布局 6、CSS 资产 21、CSS 资产 v0.36 18、
-符号导出 8、OpenAI SDK 2、Anthropic SDK 2，以及 v0.44.0 标准库模块组各一个
-驱动测试：hashlib 1、datetime 1、math 1、pathlib 1、containers 1、os+glob 1、
-json 文件 I/O 1），另有 `aoxn-pkg` crate 的
-94 个经
-`bash run_pkg_tests.sh` 运行，合计 376 个——每个 pipeline 测试都是 .ax → 可执行
+`cargo test` 跑端到端测试套件——编译器工作区 **283 个**（pipeline 154、编译器
+单元测试 18、安装器 stub 3、TypeScript 前端 34、UI 10、安装布局 6、CSS 资产
+21、CSS 资产 v0.36 18、符号导出 8、OpenAI SDK 2、Anthropic SDK 2，以及
+v0.44.0 标准库模块组各一个驱动测试：hashlib、datetime、math、pathlib、
+containers、os+glob、json 文件 I/O），另有 `aoxn-pkg` crate 的 94 个经
+`bash run_pkg_tests.sh` 运行——**合计 377 个**——每个 pipeline 测试都是
+.ax → 可执行文件 → 运行 → 断言 stdout 与退出码。其中含自举固定点：
+stage-1 与 stage-2 编译器对同一程序必须产出逐字节一致的 C 文本与目标文件
+（目标文件比较会屏蔽 clang 写入每个 Windows 目标文件的 COFF 时间戳）。
+两套 SDK 测试都会把**真实的 WinHTTP 路径**打到一台用 Aoxn 写成、跑在环回
+端口上的 mock API 服务器上，因此消息创建、SSE 流式、工具调用重组、分页、
+`Retry-After` 与各类错误响应都无需联网、无需凭据即被覆盖。IDE 自带两套
+独立测试：命令层的 36 个 Rust 测试（`ide/` 下 `pnpm test:rust`）与前端的
+62 个 node:test 用例（`pnpm test`）；由于 `ide/src-tauri` 有意排除在根
+工作区之外，它们不会在 `cargo test` 里运行。
 
-文件 → 运行 → 断言 stdout 与退出码。
-其中含自举固定点：stage-1 与 stage-2 编译器对同一程序必须产出逐字节一致的
-C 文本与目标文件（目标文件比较会屏蔽 clang 写入每个 Windows 目标文件的
-COFF 时间戳）。两套 SDK 测试都会把**真实的 WinHTTP 路径**打到一台用 Aoxn 写成、
-跑在环回端口上的 mock API 服务器上，因此消息创建、SSE 流式、工具调用重组、
-分页、`Retry-After` 与各类错误响应都无需联网、无需凭据即被覆盖。IDE 自带两套
-独立测试：命令层的 36 个 Rust 测试（`ide/` 下
-`pnpm test:rust`）与前端的 62 个 node:test 用例（`pnpm test`）；由于
-`ide/src-tauri` 有意排除在根工作区之外，它们不会在 `cargo test` 里运行。
-Aoxn 只支持 Windows（v0.30.0），每次 push 在 windows-latest
-跑全套件；同一个任务随后打出单文件安装器、安装到临时目录并跑 `aoxn doctor`
-与一个标准库程序——安装坏了会在构建时失败，而不是等到发版。打 tag 还会发布
+CI 每次 push 跑**两个任务**。`windows-latest` 跑全套件，然后打出单文件
+安装器、安装到临时目录并跑 `aoxn doctor` 与一个标准库程序——安装坏了会在
+构建时失败，而不是等到发版。`ubuntu-latest`（v0.46.0）在 Linux 上跑同一套
+件——证明编译器、双平台标准库与自举固定点在第二台宿主上同样成立——随后用
+`-l X11 -l Xft` 构建 `examples/ui_probe_x11.ax` 并在 Xvfb 下驱动 30 个真实
+帧，作为 X11 UI 后端的链接与运行检查。打 tag 发布
 `Aoxn-<version>-Setup.exe`（见
 [`.github/workflows/release.yml`](.github/workflows/release.yml)）。
 
@@ -1423,136 +1350,54 @@ print(asset_path(styles_fingerprint()))   # …\assets\82b4fb25….css
 
 ## 现状
 
-**v0.45.0** · **只支持 Windows** · 376 测试全绿
-（pipeline 154 + lib 21 + assets 21 + assets_v36 18 + symbols 8 + TS 34 + UI 9 +
-OpenAI SDK 2 + Anthropic SDK 2 + 安装布局 6 + 标准库模块驱动 7 + aoxn-pkg 94；
-IDE 另有 36 个 Rust + 62 个前端测试）·
-**UI 工具箱性能与正确性整备**（v0.45.0）——下拉框/菜单浮层滚动超过 32 项时会
-把垃圾指针递给 `as_string`（浮层条目槽位只有 32 个，浮层记录里却存着未钳制的
-数量；现在两侧都钳制，`overlay_item_str` 越界一律返回空串）；文本点击/拖拽
-定位从 O(n²) 降为 O(n)（逐码点测量累加，旧实现每个码点都重测 `s[0..j)`，
-多行编辑器里还内联了两份同样的循环）；`tree_has_child` 凭模型块里每节点一槽
-的子节点计数变 O(1)（每节点 4 槽，re-parent 时同步维护——大树此前渲染
-O(n²)）；文档自 v2 起承诺的光标 x 偏移缓存重新存在（st 532..535，空闲聚焦的
-输入框每帧零测量）；打开的菜单支持键盘导航（↑/↓ 循环、Enter 选中、Esc 关闭）
-且对输入模态——吞掉本帧的方向键/Enter/Esc 与 WM_CHAR，后面的控件不会同帧
-误触发；五份竖向滚动条合并为一个 `sb_widget`，`ui_fini` 去掉了
-`for i in range(0, 1)` 包裹 ·
-**os_getenv 不再截断长值**（v0.44.1）——v0.44.0 的实现把环境变量读进固定
-2048 字符的缓冲，把 Win32「缓冲太小」的回答当失败处理，更长的值一律返回
-空串；GitHub Actions 的 `PATH` 正好超过这个长度，标准库 os+glob 测试就是在
-CI 上这么抓到它的。现改为两调用式 Win32 惯例（NULL 缓冲取所需长度 → 分配 →
-再读），并由一个 3000 字符往返的驱动检查钉住 ·
-**标准库开张**（v0.44.0）——stdlib 路线图的前十三个模块以独立文件、按名字导入
-落地（`math` `time` `datetime` `calendar` `pathlib` `base64` `hashlib` `hmac`
-`os` `glob` `json` `bisect` `heapq`；`docs/stdlib.md` 是参考文档），没有一个碰
-`stdlib/stdlib.ax`，自举固定点不动。`math` 带来数值库被卡住的 NaN/Inf 工具箱
-（`fdiv`、`NaN()`/`Inf()`、`is_nan`/`is_inf`——大写拼写躲开 UCRT 链接符号
-冲突）；`hashlib` 用纯 Aoxn 位运算实现 SHA-256/SHA-1/MD5（先掩码再左移的规则、
-80 词的调度暂存）；`os` 全宽字符走 Win32 文件系统（零扩展的 INVALID 哨兵）；
-`json` 自 `net/` 提升并补上文件 I/O；`bisect`/`heapq` 带来解锁 P2 容器的
-f64 槽位视图纪律 ·
-**模块不再是全局的**（v0.43.0）——缺口清单把「没有命名空间」排第一排了整整一年：
-所有 `import` 合并进一个命名空间，重名是硬错误，于是每个 stdlib 模块都得给
-五十多个函数挨个手写前缀（`ui_` / `net_` / `oa_`），别无选择。现在模块可以
-**作为命名空间绑定并通过它访问**——`import util` 之后 `util.f(...)`、
-`util.Point(x=1, y=2)`、`x: util.Point` 都成立——两个模块可以各自定义 `f`，
-手写前缀从此是**可选**而非必须。**Python 写法全部可用**
-（`from util import *`、`from util import a, b`、`from util import a as b`、
-`import util as u`）；模块说明符可以写成裸的点号形式（`stdlib.net.json`）
-或加引号，裸写法还会先找导入文件同目录的 `util.ax`；W1-S3 删掉的
-`import "path"` 也回来了。**具名导入现在真的只导入列出的名字**——此前那份列表
-被解析后直接忽略。既有程序生成的 C 逐字节不变：只有两个模块争抢同一个名字时
-才加前缀，而那种程序在 v0.43.0 之前根本编译不过——所以 `codegen_c.rs` 一行没改，
-自举固定点照样成立 ·
-**日常缺口闭合**（v0.42.0）——进制整数字面量（`0x1F` / `0b101`；此前 `0x10`
-会被切成 `0` 加标识符 `x10`，报错指向一个不存在的东西）、缺的两个字符串转义
-（`\r`——各 HTTP/SSE 层一直在手写的那个字节——和给字节缓冲用的 `\0`）、
-**`assert(cond[, message])`**（报告里带源行号）、**`exit(code)`**，以及**经
-`argc()` / `arg(i)` 读取命令行参数**——语言缺口清单上最老的一条，且没有动
-`main` 的形状（`def main(argc: int)` 现在是编译错误并指名这两个内建，而不是
-在 clang 里炸成 `internal`）。工具链新增 `--clang-arg`/`-g`（透传给每一次
-clang 调用并计入缓存键）、`--cc-warnings`（去掉写死的 `-w`）、C 编译失败的
-**`cc` 诊断阶段**，以及**警告层**：`Diag` 带 severity 与稳定错误码，`W001`
-报「赋值后从未读取」的局部变量，`--json` 在成功时也返回
-`{"ok":…,"errors":[…],"warnings":[…]}`。不用新特性的程序，生成的 C 逐字节
-不变，因此自举固定点无需 `selfhost/codegen.ax` 镜像即成立 ·
-**Anthropic SDK 进驻标准库，传输层同时被共享**（v0.41.0）——
-`stdlib/anthropic/`（blocks / tools / client，约 1.7k 行纯 Aoxn）覆盖 Messages
-API 且**工具调用**完整闭环：内容块（text、image、document、thinking、
-tool_use、tool_result 以及服务端工具那一对）、用 JSON Schema 构建器代替手写
-转义 schema、token 计数、models、files（含 multipart 上传）、消息批处理，以及
-带名字的 SSE 流——其中的 `AnAcc` 能把整条流重组回一条 message，包括参数只以
-JSON 文本片段抵达的工具调用。原本寄居在 `stdlib/openai/` 下的四个模块被移到
-`stdlib/net/`（前缀 `oa_` → `net_`），两套 SDK 共用同一层传输；OpenAI SDK 的
-对外接口一字未改，其测试仍然全绿。JSON DOM 新增构建器（`jb_*` +
-`j_parse_into`），嵌套请求体改为组装而非手写转义。过程中还掉出四个潜伏缺陷：
-OpenAI SDK 解析了 `Retry-After` 却从不使用；`net_url_split` 会悄悄丢掉查询串
-（分页因此根本无法工作）；JSON 访问器拿到 `-1` 时会读到 slab 之前 40 字节；
-拼进已构建 DOM 的片段仍沿用 realloc 之前的 slab 指针（堆破坏）。这一切都不需要
-动语言本身 ·
-**OpenAI SDK 进驻标准库**（v0.40.1）——`stdlib/openai/` 的纯 Aoxn 模块
-给语言带来真正的 API 客户端：
-chat completions、responses、embeddings、models、moderations，阻塞或逐 token
-流式，默认值与环境变量名与参考 Python SDK 一致；离线端到端测试由一个用 Aoxn
-写成的 mock OpenAI 服务器完成 ·
-**语言长出第四条数据轴**（v0.40.0）——**函数指针**（值位置的裸函数名就是它的
-地址，`fn(int) -> int` 标注、间接调用、`as` 在 `int` 与函数指针之间转换——
-COM vtable 槽位与 Win32 回调的逃生门）、**`None` + `T | None` 可空**（唯一的
-union 形式；`is None` / `is not None` 在 checker 与 codegen 两侧都按分支收窄；
-收窄之前 print 与运算符都拒绝可空值）、真正的 **`raise` / `try` / `except`**
-（v0.39.0「无异常」的决策被用户指令推翻——`raise <string>` 退到最近的
-handler 或退出函数；`Err` 值通道保留给调用方要**检视**的失败），以及
-**`dict[V]`**——字符串键字典，按插入序迭代，缺失键直接 raise。字典是**堆
-句柄**（`TableModel` / `FileTable` 同款形状）：最初按值传 4 词结构体的写法
-有两重不健全——被调方的增长对调用方不可见，过期的 `len` 又会走出被
-realloc 过的缓冲（`-O0` 正确、`-O1` 起段错误；用 clang 直接编同一份生成 C
-复现过）。现在拷贝共享同一个字典，set/del 透过任一副本都彼此可见 ·
-**自举堆损坏已查明根因并修复（v0.39.2）**——struct 环检测器把 DFS 路径按值传递、push
-之后递归，被调方的 `realloc` 释放了调用方仍持有的缓冲，下一个兄弟分支就读
-到了已释放内存；它之所以潜伏，是因为内联增长一次性预留 8 槽、路径前 8 次
-push 都不触发 realloc。修复方式是写回（`struct Cycle{hit, path}`），
-`vec_push` 也重新把增长委托回 `vec_reserve` ·
-**IDE 编辑器追上了语言**——位运算/移位操作符与 `err_*` / `out_*` / `vec_*`
-标准库词汇现在在 IDE 里正确着色，两次版本之间落地的安装器修复也有了归属的
-版本条目 ·
-**一个语言在能装下真实数据之前必须先有的两样东西**——报告失败的方式，以及装
-「不定多少个」东西的方式。失败的调用按值返回一个 `Err{code, message}`；因为
-Aoxn 只有一个返回值且 struct 返回时拷贝，载荷要通过调用方自己持有的堆
-out-slot 回来。而 `[T; N]` 是编译期定长的，所以 stdlib 现在提供带真正容量管理
-的 `Vec`、作为一等元素的字符串，以及 `VecVec`（向量的向量，正是文档格式需要
-的形状）。两者都没碰编译器。另外还补上了 Aoxn 一直缺的六个运算符——`&`、`|`、`^`、`~`、`<<`、`>>`，
-只接受 int（和 `%` 一样），优先级与 C 一致（C 里 `==` 比 `&` **更紧**，
-所以要写 `(a & b) == c`）；它们是为密码学/TLS/HTTP2 那条线准备的：
-**CSS 管线收官**：`--emit-assets <dir>` 把指纹化的 CSS 与全部 `url()` 目标写到
-可执行文件旁（并把 `url()` 改写为产物名），`styles.title` 提供类型化的类名
-访问，`exe_dir()` / `asset_path()` 让可搬移的程序找到自己的资产，
-CSS-in-Aoxn 负责行内样式，`--tailwind` 生成有文档的工具类子集——另修复一个
-一直不可用的 TS import 形式（[`docs/css-assets.md`](docs/css-assets.md)）·
-**IDE 深度接入包管理**：Packages 侧栏视图（`aoxn.json` / `aox_modules/` +
-白名单化的 `aoxn pkg` 动词 Init/Add/Install/Update/Outdated/Tree/Audit/Why/
-Remove）与状态栏的 `aoxn doctor` 自检 ·
-**包管理对标 pip/pnpm**：devDependencies 配 `install --prod`、`overrides`、
-策展 registry（信任清单 + 公告库同仓）、`aoxn list`/`freeze`、并行下载、
-强制最低编译器版本 ·
-**Aoxn IDE**（`ide/`）：Tauri 2 + Next.js + Monaco 工作台——资源管理器
-（可新建文件/文件夹）、按标签页隔离的撤销、诊断即编辑器标记、保存自动检查、
-Check/Build/Run 驱动真实的 `aoxn`；`aoxn check` 只做检查只出诊断 ·
-**一个 exe 装全部**：`Aoxn-<version>-Setup.exe` 内含编译器、标准库、UI 工具箱
-与示例；窗口参照 Python 官方安装器——一个标识、一句标题、一个大的 **Install Now**
-按钮，之后是进度页与完成页——**点击之前磁盘上不会写入任何东西**。它**不下载任何
-东西**：只解包、配置 PATH，再用 `aoxn doctor` 自检（`-InstallClang` 可选拉取
-LLVM）·
-包管理对标 pip/pnpm：devDependencies、overrides、`list`/`freeze`、并行下载、
-带信任清单与公告库的策展 registry、强制最低编译器版本 · 自举固定点（生成的
-C + 目标文件逐字节一致）· **标准库内置 UI 工具箱 v3**（Qt 级：
-布局管理器、文本输入、焦点链、20 余控件、浮层覆盖——`examples/ui_gallery.ax`）·
-零 LLVM 依赖：C 发射后端是唯一后端（clang 编译生成物）· TS-M1 W1 收官
-（S2b 类型层 + S3 模块系统；旧 `import "path"` 已删除——用 `import * from "path"`）·
-v0.29.7：Python 表面语法对标第一批（`+= -= *= /= %=`、`//`、一元 `+`、
-链式比较——全部是解析期降级，Rust 侧与自举编译器同时实现）·
-包管理器 W2：manifest 入口解析（`main` / `exports` / `types`）、只读 HTTP
-registry 后端、npm 桥接（`aoxn npm-import`）。
+**v0.46.0** · **Windows 第一梯队 + Linux 受支持** · 377 测试全绿
+（编译器工作区 283 + `aoxn-pkg` 94；IDE 另有 36 个 Rust + 62 个前端测试）·
+
+**Linux 重新成为受支持平台，UI 工具箱经同一套 `plat_*` 契约获得第二个
+后端**（v0.46.0）——v0.30.0 曾把平台清单砍到只剩 Windows；v0.46.0 把
+Linux 带回编译器（ELF 目标文件、自动链 `-lm`、不再传 `/STACK` 标志）、
+整套测试（新增 `ubuntu-latest` CI 任务）与**重写的 `stdlib/ui_x11.ax`**：
+Xlib 负责窗口与输入、Xft 负责反锯齿 UTF-8 文本、离屏 Pixmap 双缓冲、
+X11 selection 协议剪贴板、每帧一次 `XQueryKeymap` 扫描（按住的键不再在
+自动重复的 release+press 对之间闪烁），关闭请求经共享块 824 槽传递
+（Aoxn 按值传 `UI`，`plat_close` 无法把字段写回应用循环）。`target_os()`
+现在折叠的是**编译器构建时**的宿主 OS——`"windows"` 或 `"linux"`——而
+自举编译器不需要自己的平台检测：它的内建发射器直接调用 `target_os()`，
+这个值由构建它的编译器烧定，因此同一台机器上固定点链条的每一级折叠的是
+同一个宿主 OS，固定点按构造逐字节成立。标准库**分支而非分叉**：`os.ax`
+在 Linux 上走纯 libc（mkdir/stat/opendir/readdir/getenv/setenv，glibc
+结构体偏移量在文件头注明），`W` 系列 Win32 调用继续服务 Windows——
+未被引用的 `extern def` 不产生符号引用，所以每个平台只链接自己那一侧；
+Linux 上 `exe_path()` 经 `/proc/self/exe` 回答。保持 Windows-only 的部分
+以诚实的方式守着：HTTP 传输层骑在 WinHTTP 上，Linux 上入口返回干净的
+「本平台暂无传输层」错误而不是链接失败；单文件安装器仍是 Windows 工件 ·
+
+**UI 工具箱新增横向滚动区域与等宽字体**（v0.46.0）——
+`ui_scroll_begin_h(c, x, y, w, h, scroll_x, content_w)` +
+`ui_scroll_end_h(c)` 是竖向滚动区的底部滚动条孪生版（拖拽滚动；裁剪栈
+取交集，两者可嵌套——begin+begin_h+绘制+end+end_h 恰好留下内容区）；
+`ui_font_mono(c)` / `ui_font_sans(c)` 把控件层的正文字体指向 Consolas
+（Windows）或 fontconfig 的 `Monospace` 别名（Linux）再切回来——两张字体
+都由后端在 init 时打开并停在 `UI.font_mono` 上 ·
+
+**上一个里程碑**（v0.45.0）是对 UI 机制的性能与正确性整备：浮层列表超过
+32 项的溢出钳制、O(n) 文本定位、凭每节点子计数做到 O(1) 的
+`tree_has_child`、光标 x 偏移缓存（st 532..535）、可键盘导航的模态菜单、
+合并为一个的 `sb_widget`；v0.44.1 修复 `os_getenv` 截断超过 2048 字符的
+值；v0.44.0 落地标准库前十三个模块（按名字导入，没有一个碰
+`stdlib/stdlib.ax`，固定点不动）；v0.43.0 让模块成为可点名的命名空间；
+v0.42.0 关闭日常缺口（进制字面量、`\r`/`\0`、`assert`/`exit`、
+`argc()`/`arg(i)`、`cc` 阶段、警告层）；v0.41.0/v0.40.1 在共享的 WinHTTP
+传输上落地 Anthropic 与 OpenAI 两套 SDK；v0.40.0 加入函数指针、
+`None`/`T | None`、`raise`/`try`/`except` 与 `dict[V]`。完整历史见
+[`CHANGELOG.md`](CHANGELOG.md) ·
+
+长期事实：自举固定点（生成的 C + 目标文件逐字节一致）· 标准库内置
+UI 工具箱 v3（Qt 级：布局管理器、文本输入、焦点链、20 余控件、浮层覆盖
+——`examples/ui_gallery.ax`）· 零 LLVM 依赖：C 发射后端是唯一后端
+（clang 编译生成物）· TS-M1 W1 收官 · 包管理器 beta（PubGrub、策展
+registry、npm 桥接）· 单文件安装器（`Aoxn-<version>-Setup.exe`，默认
+不下载任何东西）。
 
 安装步骤见 [`docs/install.md`](docs/install.md)，完整语言规范见
 [`docs/spec.md`](docs/spec.md)，发布历史见

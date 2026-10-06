@@ -704,26 +704,18 @@ for k in d:                 # walks KEYS, in insertion order
 
 ## Platform query
 
-- `target_os() -> string` 鈥?compile-time platform query, folded to a
+- `target_os() -> string` - compile-time platform query, folded to a
   module-internal string constant by the compiler (it is **not** a runtime
   syscall). Both compilers (Rust and self-hosted) resolve it the same way, so
-  the value is stable within a build and identical between compilers. Aoxn
-  targets Windows, so on a supported build it is always `"windows"` (an
-  unsupported host folds to `"other"` rather than lying). The builtin stays
-  because it is part of the language: source that branches on it keeps
-  working, and the self-hosting fixed point depends on both compilers folding
-  it identically.
-
-The stdlib builds on these: `struct Vec` (growable 8-byte slots:
-`vec_new`/`vec_push`/`vec_get`/`vec_set`/`vec_free` - write-back style,
-`v = vec_push(v, x)`), byte buffers, `read_file`/`write_file`, and
-`system(cmd)` for process spawning. The UI toolkit is an immediate-mode GUI
-in three files (see `docs/ui.md`): `stdlib/ui.ax` (portable core) +
-`stdlib/ui_draw.ax` (the platform-neutral widget layer) + the Win32/GDI
-backend `stdlib/ui_win.ax`. A program reaches every widget through one import
-(`import * from "stdlib/ui_win"`, linked with `-l user32 -l gdi32`); the
-widget layer names no platform symbol at all.
-
+  the value is stable within a build and identical between compilers on the
+  same machine: each compiler folds the OS it was BUILT on. A Windows build
+  folds `"windows"`; a Linux build folds `"linux"` (v0.46.0); any other host
+  folds `"other"` rather than lying. The self-hosted compiler needs no mirror
+  of the platform check: `selfhost/codegen.ax`'s builtin emitter calls
+  `target_os()` itself, whose value was burned in by whatever compiler built
+  it - so every stage of the fixed-point chain folds the same host OS, and
+  the fixed point (stage 1 and stage 2 built and run on the same machine)
+  stays byte-identical by construction.
 ## Tooling contract (AI-native)
 
 - `Aoxn build file.ax [-o out] [--O0|--O1|--O2|--O3]` — native executable
@@ -785,13 +777,16 @@ Diagnostics stages: `lex`, `parse`, `type`, `internal`, `link`, `io`, `asset`,
 
 | Platform | Status | Toolchain |
 |----------|--------|-----------|
-| Windows x86_64 | the only supported target | MSVC Build Tools + clang (winget LLVM provides it) |
+| Windows x86_64 | first-class target | MSVC Build Tools + clang (winget LLVM provides it) |
+| Linux x86_64 | supported since v0.46.0 | clang (distro packages); the X11 UI backend additionally links libX11/libXft |
 
-Aoxn is a Windows-only language as of v0.30.0: one platform, one installer
-(`Aoxn-<version>-Setup.exe`), one CI job, one UI backend. macOS and Linux
-support, with the X11 UI backend and the POSIX web server modules, was
-removed rather than left to drift — see `docs/platform-support.md` for what
-went and what a port would need.
+Windows carries the installer and the release packaging. Linux runs the
+compiler, the whole test suite (its own CI job) and the `stdlib/ui_x11.ax`
+UI backend; `target_os()` folds `"windows"` on a Windows build and
+`"linux"` on a Linux build (see the Platform query section above).
+macOS support, with a native UI backend, remains out of reach for a
+language whose `extern def` cannot pass structs by value — see
+`docs/platform-support.md` for the whole story.
 
 Since v0.29.0 the compiler has no LLVM dependency: codegen emits ISO C and
 clang compiles it (`AOXN_CLANG`, `PATH`, or the toolchain's own

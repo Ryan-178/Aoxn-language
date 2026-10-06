@@ -1,21 +1,37 @@
-# Aoxn standard library — os (v0.44.0, docs/stdlib-todo.md #1).
+# Aoxn standard library — os (v0.44.0, docs/stdlib-todo.md #1; v0.46.0 dual platform).
 #
-# The Win32 core: directories, file operations, environment, working
-# directory, and directory listing (the traversal primitive stdlib/glob.ax
-# builds on). EVERY path crosses a `W` API, so every path is converted
+# Directories, file operations, environment, working directory, and directory
+# listing (the traversal primitive stdlib/glob.ax builds on).
+#
+# Windows: EVERY path crosses a `W` API, so every path is converted
 # UTF-8 -> UTF-16LE on the way in and back on the way out — non-ASCII paths
 # must work, which rules out the narrow CRT calls the self-hosted loader
 # still uses (its known limitation, AGENTS.md).
+#
+# Linux: the same surface over plain libc (mkdir/rmdir/unlink/rename/stat/
+# getenv/setenv/...). Paths are UTF-8 bytes natively, so no conversion; the
+# extern declarations below are only PROTOTYPES — a platform never links the
+# other side's symbols because every call site branches on target_os() and
+# unreferenced externs produce no symbol reference in the emitted C.
 #
 # The UTF-16 helpers are deliberately DUPLICATED from stdlib/net/codec.ax
 # (renamed os_*): codec did the same to stdlib/ui.ax, and a filesystem
 # module should not make programs pull the network layer. Keep the copies
 # in sync if you ever touch them.
 #
-# kernel32 is linked through the CRT: no -l flag. BOOL returns are normalised
-# to bool; GetFileAttributesW returns a DWORD, which arrives ZERO-EXTENDED in
-# i64, so the INVALID sentinel is compared as 4294967295 (not -1) — the same
-# zero-extension trap the web sockets module hit.
+# kernel32 is linked through the CRT on Windows: no -l flag. Linux links
+# libc by default; the compiler adds -lm (nothing else needed here).
+# BOOL returns are normalised to bool; GetFileAttributesW returns a DWORD,
+# which arrives ZERO-EXTENDED in i64, so the INVALID sentinel is compared
+# as 4294967295 (not -1) — the same zero-extension trap the web sockets
+# module hit.
+#
+# Linux struct offsets (x86-64 glibc, decimal, verified against the ABI):
+#   struct stat: st_mode is 4 bytes at offset 24 (st_dev 0..8, st_ino 8..16,
+#     st_nlink 16..24). S_IFMT 61440, S_IFDIR 16384, S_IFREG 32768,
+#     S_IFLNK 40960.
+#   struct dirent: d_name at offset 19 (d_ino 0..8, d_off 8..16,
+#     d_reclen 16..18, d_type 18).
 #
 # Plain Aoxn only (no dict/None/fn-ptr/raise): self-host compilable.
 
@@ -38,6 +54,24 @@ extern def FindNextFileW(h: int, data: int) -> int
 extern def FindClose(h: int) -> int
 extern def GetLastError() -> int
 
+# ---- POSIX externs (libc; prototypes only — see the header) ----
+
+# mode 0755 passed as decimal 493 (repo discipline: no octal literals)
+extern def mkdir(path: string, mode: int) -> int
+extern def rmdir(path: string) -> int
+extern def unlink(path: string) -> int
+extern def rename(src: string, dst: string) -> int
+extern def stat(path: string, buf: int) -> int
+extern def lstat(path: string, buf: int) -> int
+extern def getenv(name: string) -> int
+extern def setenv(name: string, value: string, overwrite: int) -> int
+extern def unsetenv(name: string) -> int
+extern def getcwd(buf: int, size: int) -> int
+extern def chdir(path: string) -> int
+extern def opendir(path: string) -> int
+extern def readdir(dir: int) -> int
+extern def closedir(dir: int) -> int
+
 def OS_ENVVAR_NOT_FOUND() -> int:
     return 203       # ERROR_ENVVAR_NOT_FOUND
 
@@ -57,6 +91,26 @@ def OS_FIND_DATA() -> int:
 
 def OS_FD_NAME() -> int:
     return 44         # offset of cFileName (WCHAR[260]) in FIND_DATA
+
+# Linux-only decimal constants
+
+def OS_LINUX_STAT_SIZE() -> int:
+    return 144        # sizeof(struct stat) x86-64, generous buffer
+
+def OS_LINUX_ST_MODE() -> int:
+    return 24         # offsetof(struct stat, st_mode)
+
+def OS_LINUX_S_IFMT() -> int:
+    return 61440      # S_IFMT
+
+def OS_LINUX_S_IFDIR() -> int:
+    return 16384      # S_IFDIR
+
+def OS_LINUX_S_IFLNK() -> int:
+    return 40960      # S_IFLNK
+
+def OS_LINUX_DIRENT_NAME() -> int:
+    return 19         # offsetof(struct dirent, d_name) x86-64 glibc
 
 # ---- UTF-8 <-> UTF-16LE (kept in sync with stdlib/net/codec.ax) ----
 
@@ -147,56 +201,117 @@ def os_from_wide(p: int) -> string:
     store_u8(out, m, 0)
     return as_string(out)
 
+# ---- attributes: the shared semantic layer ----
+#
+# os_attributes maps BOTH platforms onto the Win32 bit vocabulary the
+# toolkit already speaks: 16 = directory, 1024 = symlink, 0 = regular file,
+# OS_ATTR_INVALID() = does not exist. os_isdir / os_isfile / os_islink are
+# then identical on both sides. (Linux stat() has no archive/hidden bits;
+# the consumers — glob, pathlib, recursion guards — only test these three.)
+
+# raw attribute word, or OS_ATTR_INVALID when the path does not exist
+def os_attributes(path: string) -> int:
+    if target_os() == "windows":
+        w = os_to_wide(path)
+        a = GetFileAttributesW(w)
+        free(w)
+        return a
+    buf = malloc(OS_LINUX_STAT_SIZE())
+    st = lstat(path, buf)
+    a = OS_ATTR_INVALID()
+    if st == 0:
+        # st_mode (4 bytes at offset 24) is the LOW half of the loaded i64
+        # (little-endian; the high half is st_uid) — mask the S_IFMT bits.
+        # & is fine here: bitwise ops exist since v0.38.0.
+        mode = load_i64(buf + OS_LINUX_ST_MODE()) % 4294967296
+        a = 0
+        ft = mode & 61440
+        if ft == OS_LINUX_S_IFDIR():
+            a = OS_ATTR_DIRECTORY()
+        if ft == OS_LINUX_S_IFLNK():
+            a = OS_ATTR_REPARSE()
+    free(buf)
+    return a
+
 # ---- directories ----
 
 def os_mkdir(path: string) -> bool:
-    w = os_to_wide(path)
-    ok = CreateDirectoryW(w, 0)
-    free(w)
-    return ok != 0
+    if target_os() == "windows":
+        w = os_to_wide(path)
+        ok = CreateDirectoryW(w, 0)
+        free(w)
+        return ok != 0
+    return mkdir(path, 493) == 0    # 0755
 
 def os_rmdir(path: string) -> bool:
-    w = os_to_wide(path)
-    ok = RemoveDirectoryW(w)
-    free(w)
-    return ok != 0
+    if target_os() == "windows":
+        w = os_to_wide(path)
+        ok = RemoveDirectoryW(w)
+        free(w)
+        return ok != 0
+    return rmdir(path) == 0
 
 # ---- files ----
 
 def os_remove(path: string) -> bool:
-    w = os_to_wide(path)
-    ok = DeleteFileW(w)
-    free(w)
-    return ok != 0
+    if target_os() == "windows":
+        w = os_to_wide(path)
+        ok = DeleteFileW(w)
+        free(w)
+        return ok != 0
+    return unlink(path) == 0
 
 # fail_if_exists mirrors the Win32 default (false = overwrite silently)
 def os_copy(src: string, dst: string, fail_if_exists: bool) -> bool:
-    s = os_to_wide(src)
-    d = os_to_wide(dst)
-    flag = 0
-    if fail_if_exists:
-        flag = 1
-    ok = CopyFileW(s, d, flag)
-    free(s)
-    free(d)
-    return ok != 0
+    if target_os() == "windows":
+        s = os_to_wide(src)
+        d = os_to_wide(dst)
+        flag = 0
+        if fail_if_exists:
+            flag = 1
+        ok = CopyFileW(s, d, flag) != 0
+        free(s)
+        free(d)
+        return ok
+    # libc has no copy: stream it through the stdio externs stdlib.ax
+    # already declares. CopyFileW granularity, not speed, is the contract.
+    if fail_if_exists and os_exists(dst):
+        return False
+    fin = fopen(src, "rb")
+    if fin == 0:
+        return False
+    fout = fopen(dst, "wb")
+    if fout == 0:
+        fclose(fin)
+        return False
+    buf = malloc(65536)
+    ok = True
+    more = True
+    while more:
+        n = fread(buf, 1, 65536, fin)
+        if n > 0:
+            if fwrite(buf, 1, n, fout) != n:
+                ok = False
+                more = False
+        if n < 65536:
+            more = False
+    free(buf)
+    fclose(fin)
+    if fclose(fout) != 0:
+        ok = False
+    return ok
 
 def os_rename(src: string, dst: string) -> bool:
-    s = os_to_wide(src)
-    d = os_to_wide(dst)
-    ok = MoveFileW(s, d)
-    free(s)
-    free(d)
-    return ok != 0
+    if target_os() == "windows":
+        s = os_to_wide(src)
+        d = os_to_wide(dst)
+        ok = MoveFileW(s, d)
+        free(s)
+        free(d)
+        return ok != 0
+    return rename(src, dst) == 0
 
-# ---- attributes ----
-
-# raw attribute DWORD, or OS_ATTR_INVALID when the path does not exist
-def os_attributes(path: string) -> int:
-    w = os_to_wide(path)
-    a = GetFileAttributesW(w)
-    free(w)
-    return a
+# ---- exists / kind (shared: built on os_attributes) ----
 
 def os_exists(path: string) -> bool:
     return os_attributes(path) != OS_ATTR_INVALID()
@@ -220,70 +335,96 @@ def os_islink(path: string) -> bool:
 
 # ---- environment ----
 
-# the two-call Win32 pattern: call with a NULL buffer to learn the required
-# size, then allocate and call again. The fixed 2048-char buffer this used to
-# have silently returned "" for any value longer than that — and the CI
-# runners' PATH is, in fact, longer than that (the v0.44.1 fix).
+# Windows: the two-call GetEnvironmentVariableW pattern — call with a NULL
+# buffer to learn the required size, then allocate and call again. The fixed
+# 2048-char buffer this used to have silently returned "" for any value
+# longer than that — and the CI runners' PATH is, in fact, longer than that
+# (the v0.44.1 fix).
+# Linux: getenv() returns a pointer into the environment; an unset name
+# returns NULL (0), which we must check BEFORE as_string touches it.
 def os_getenv(name: string) -> string:
-    w = os_to_wide(name)
-    # with a NULL buffer the return value INCLUDES the terminating NUL
-    n = GetEnvironmentVariableW(w, 0, 0)
-    s = ""
-    if n > 0:
-        buf = malloc(n * 2)
-        m = GetEnvironmentVariableW(w, buf, n)
-        if m > 0 and m < n:
-            # the API wrote m chars + the NUL; os_from_wide reads to the NUL
-            s = os_from_wide(buf)
-        free(buf)
-    free(w)
-    return s
+    if target_os() == "windows":
+        w = os_to_wide(name)
+        # with a NULL buffer the return value INCLUDES the terminating NUL
+        n = GetEnvironmentVariableW(w, 0, 0)
+        s = ""
+        if n > 0:
+            buf = malloc(n * 2)
+            m = GetEnvironmentVariableW(w, buf, n)
+            if m > 0 and m < n:
+                # the API wrote m chars + the NUL; os_from_wide reads to the NUL
+                s = os_from_wide(buf)
+            free(buf)
+        free(w)
+        return s
+    p = getenv(name)
+    if p == 0:
+        return ""
+    return as_string(p)
 
 # a variable that exists with an empty value is NOT the same as one that is
-# unset — GetEnvironmentVariableW returns 0 for both, so the distinction
-# comes from GetLastError (ERROR_ENVVAR_NOT_FOUND == 203)
+# unset — GetEnvironmentVariableW returns 0 for both (the distinction comes
+# from GetLastError / ERROR_ENVVAR_NOT_FOUND == 203), and on Linux getenv
+# returns NULL for unset but a valid "" pointer for set-and-empty.
 def os_has_env(name: string) -> bool:
-    w = os_to_wide(name)
-    buf = malloc(4)
-    GetEnvironmentVariableW(w, buf, 2)
-    err = GetLastError()
-    free(w)
-    free(buf)
-    return err != OS_ENVVAR_NOT_FOUND()
+    if target_os() == "windows":
+        w = os_to_wide(name)
+        buf = malloc(4)
+        GetEnvironmentVariableW(w, buf, 2)
+        err = GetLastError()
+        free(w)
+        free(buf)
+        return err != OS_ENVVAR_NOT_FOUND()
+    return getenv(name) != 0
 
 def os_setenv(name: string, value: string) -> bool:
-    w = os_to_wide(name)
-    v = os_to_wide(value)
-    ok = SetEnvironmentVariableW(w, v)
-    free(w)
-    free(v)
-    return ok != 0
+    if target_os() == "windows":
+        w = os_to_wide(name)
+        v = os_to_wide(value)
+        ok = SetEnvironmentVariableW(w, v)
+        free(w)
+        free(v)
+        return ok != 0
+    return setenv(name, value, 1) == 0
 
 # deletion is SetEnvironmentVariableW with a NULL value — setting the EMPTY
 # string would create an empty variable, not remove it
 def os_unsetenv(name: string) -> bool:
-    w = os_to_wide(name)
-    ok = SetEnvironmentVariableW(w, 0)
-    free(w)
-    return ok != 0
+    if target_os() == "windows":
+        w = os_to_wide(name)
+        ok = SetEnvironmentVariableW(w, 0)
+        free(w)
+        return ok != 0
+    return unsetenv(name) == 0
 
 # ---- working directory ----
 
 def os_cwd() -> string:
-    n = GetCurrentDirectoryW(0, 0)
-    if n <= 0:
+    if target_os() == "windows":
+        n = GetCurrentDirectoryW(0, 0)
+        if n <= 0:
+            return ""
+        buf = malloc(n * 2 + 2)
+        GetCurrentDirectoryW(n, buf)
+        s = os_from_wide(buf)
+        free(buf)
+        return s
+    buf = malloc(4096)
+    p = getcwd(buf, 4096)
+    if p == 0:
+        free(buf)
         return ""
-    buf = malloc(n * 2 + 2)
-    GetCurrentDirectoryW(n, buf)
-    s = os_from_wide(buf)
+    out = as_string(p)
     free(buf)
-    return s
+    return out
 
 def os_chdir(path: string) -> bool:
-    w = os_to_wide(path)
-    ok = SetCurrentDirectoryW(w)
-    free(w)
-    return ok != 0
+    if target_os() == "windows":
+        w = os_to_wide(path)
+        ok = SetCurrentDirectoryW(w)
+        free(w)
+        return ok != 0
+    return chdir(path) == 0
 
 # ---- directory listing ----
 
@@ -292,21 +433,36 @@ def os_chdir(path: string) -> bool:
 # Caller frees nothing (name strings leak by the language's design).
 def os_listdir(path: string) -> Vec:
     out = vec_new()
-    pattern = path + "\\*"
-    w = os_to_wide(pattern)
-    data = malloc(OS_FIND_DATA())
-    h = FindFirstFileW(w, data)
-    if h == -1:
+    if target_os() == "windows":
+        pattern = path + "\\*"
+        w = os_to_wide(pattern)
+        data = malloc(OS_FIND_DATA())
+        h = FindFirstFileW(w, data)
+        if h == -1:
+            free(w)
+            free(data)
+            return out
+        more = True
+        while more:
+            name = os_from_wide(data + OS_FD_NAME())
+            if name != "." and name != "..":
+                out = vec_push_str(out, name)
+            more = FindNextFileW(h, data) != 0
+        FindClose(h)
         free(w)
         free(data)
         return out
+    d = opendir(path)
+    if d == 0:
+        return out
     more = True
     while more:
-        name = os_from_wide(data + OS_FD_NAME())
-        if name != "." and name != "..":
-            out = vec_push_str(out, name)
-        more = FindNextFileW(h, data) != 0
-    FindClose(h)
-    free(w)
-    free(data)
+        e = readdir(d)
+        if e == 0:
+            more = False
+        else:
+            name = as_string(e + OS_LINUX_DIRENT_NAME())
+            if name != "." and name != "..":
+                out = vec_push_str(out, name)
+    closedir(d)
     return out

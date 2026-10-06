@@ -247,6 +247,8 @@ def plat_init(c: UI, title: string, w: int, h: int) -> UI:
     c.old_bmp = SelectObject(c.mem_dc, c.bmp)
     c.font = make_font(-16, 400)
     c.font_big = make_font(-26, 700)
+    c.font_mono = make_font_mono(-16)
+    st_set(c, 826, c.font)
     SetBkMode(c.mem_dc, 1)
     SetTextAlign(c.mem_dc, 0)
     GetClientRect(hwnd, c.rect)
@@ -261,6 +263,15 @@ def plat_init(c: UI, title: string, w: int, h: int) -> UI:
 def make_font(px: int, weight: int) -> int:
     face = ui_utf16("Segoe UI")
     f = CreateFontW(px, 0, 0, 0, weight, 0, 0, 0, 1, 0, 0, 5, 0, as_string(face))
+    free(face)
+    return f
+
+# the monospace twin of make_font: same metrics conventions, face Consolas
+# (present on every supported Windows; falls back per-glyph through GDI's
+# font linking when a codepoint is missing)
+def make_font_mono(px: int) -> int:
+    face = ui_utf16("Consolas")
+    f = CreateFontW(px, 0, 0, 0, 400, 0, 0, 0, 1, 0, 0, 5, 0, as_string(face))
     free(face)
     return f
 
@@ -354,6 +365,8 @@ def plat_fini(c: UI):
         DeleteObject(c.font)
     if c.font_big != 0:
         DeleteObject(c.font_big)
+    if c.font_mono != 0:
+        DeleteObject(c.font_mono)
     if st_get(c, 820) != 0:
         free(st_get(c, 820))
 

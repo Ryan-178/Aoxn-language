@@ -5,10 +5,12 @@ blocks, `def`, `elif`, `#` comments). Programs lower to ISO C
 (`src/codegen_c.rs`) and clang compiles/links them to native code — measured
 at parity with `clang -O3`. **v0.29.0 (2026-10-01): the LLVM dependency is
 gone**; the C-emitting backend is the only backend (history:
-`docs/llvm-independence-report.md`, `CHANGELOG.md`). **v0.30.0: Windows is
-the only supported platform** — one installer, one CI job, one UI backend;
-macOS/Linux support (the X11 UI backend, the POSIX web socket/server
-modules, the POSIX link flags) was removed, not deprecated. This repo IS the
+`docs/llvm-independence-report.md`, `CHANGELOG.md`). **v0.30.0: Windows
+was made the only supported platform** — **v0.46.0 brought Linux back**
+(the compiler, the whole suite and a rewritten X11 UI backend run on
+ubuntu-latest; the installer and the WinHTTP transport stay Windows-only —
+`docs/platform-support.md` is the authority). macOS stays unsupported. This
+repo IS the
 compiler (Rust workspace: root `aoxn` crate + `crates/aoxn-pkg`).
 Language sources use the `.ax` extension. Language rules live in
 `docs/spec.md` (Windows-only: `docs/platform-support.md`) — keep it in sync with `src/parser.rs` + `src/typecheck.rs`
@@ -346,12 +348,16 @@ crates/aoxn-pkg       package manager crate (its own dependency set; see above)
   byte-identical C AND byte-identical objects for the same program (the
   fixed point); the only tolerated object difference is the COFF timestamp
   the test masks.
-- `target_os()` is a compile-time builtin folding `"windows"` on a supported
-  build (`"other"` elsewhere) — **both** compilers must fold the same value
-  (`platform::target_os_name()` Rust-side, `target_os()` inside
-  `selfhost/codegen.ax`) or the fixed point breaks. It stays a builtin even
-  though Windows is the only target: it is part of the language, and source
-  that branches on it must keep compiling.
+- `target_os()` is a compile-time builtin folding the OS the compiler was
+  BUILT on: `"windows"` on a Windows build, `"linux"` on a Linux build
+  (v0.46.0), `"other"` elsewhere. **Both** compilers must fold the same
+  value or the fixed point breaks — and they do BY CONSTRUCTION:
+  `selfhost/codegen.ax`'s builtin emitter calls `target_os()` itself, a
+  value burned in by whatever compiler built it, so every stage on one
+  machine folds the same host OS. Do NOT give the selfhost side its own
+  platform check — the chain is the check. It stays a builtin because it
+  is part of the language, and source that branches on it must keep
+  compiling.
 - Reserved-word collisions in emitted C identifiers are handled by the
   keyword table in codegen_c.rs; C runtime use is limited to the small
   builtin name list (`malloc`, `memcpy`, `strlen`, `snprintf`, …).
@@ -484,25 +490,27 @@ crates/aoxn-pkg       package manager crate (its own dependency set; see above)
 
 ## UI toolkit (stdlib/ui.ax + ui_draw.ax + a backend) — v3 widget set, 3 OS
 
-- **THREE FILES**: `ui.ax` (portable core) + `ui_draw.ax` (the
-  platform-NEUTRAL widget layer) + the Win32/GDI backend `ui_win.ax`.
-  A program pulls the toolkit in with ONE import line; widget names are the
-  same everywhere. `ui_draw.ax` declares no platform externs and never
-  tests `target_os()`. (The X11 backend was removed in v0.30.0.)
+- **FOUR FILES**: `ui.ax` (portable core) + `ui_draw.ax` (the
+  platform-NEUTRAL widget layer) + ONE backend per platform: `ui_win.ax`
+  (Win32/GDI) and `ui_x11.ax` (Xlib/Xft, Linux, v0.46.0). A program pulls
+  the toolkit in with ONE import line; widget names are the same
+  everywhere. `ui_draw.ax` declares no platform externs and never tests
+  `target_os()`.
 - **`plat_*` primitive contract** (see the `ui_draw.ax` header): the widget
   layer only ever calls `plat_fill_rect` / `plat_text` / `plat_measure` /
   `plat_clip_push` / `plat_pump` / `plat_init` / … and each backend
   supplies them. THREE tests pin this (`tests/ui.rs`): the widget layer
-  must name no Win32/Xlib symbol; both backends must implement the SAME
-  `plat_*` set; every `plat_*` called must exist in both. Adding a widget
-  that reaches for a platform symbol fails the test run, not one OS.
-- **No second windowing backend.** `extern def` can only pass
+  must name no Win32/Xlib symbol; BOTH backends must implement the SAME
+  `plat_*` set (the check covers `ui_x11.ax` since v0.46.0); every
+  `plat_*` called must exist in both. Adding a widget that reaches for a
+  platform symbol fails the test run, not one OS.
+- **No third windowing backend.** `extern def` can only pass
   int/f64/string/bool, so a backend whose window/draw API takes structs by
   value (AppKit's `NSRect`/`CGRect`, for one) is not expressible, and there
   is no C shim escape hatch — the compiler only emits its own C text
   (`src/codegen_c.rs`) and shells out to clang. Do NOT add a native backend
-  for another windowing system; if a future version gains struct-typed
-  externs, revisit then.
+  for another windowing system (Cocoa is the standing example); if a future
+  version gains struct-typed externs, revisit then.
 - Qt-flavored **immediate mode** (no callbacks possible: the language has no
   function pointers/closures). Widgets are per-frame functions; app state
   travels via the write-back idiom (struct in / struct out). Reference:
@@ -539,10 +547,12 @@ crates/aoxn-pkg       package manager crate (its own dependency set; see above)
   bitwise ops in the language.
 - The shared heap block (`st`, 1024 i64 slots) layout is documented in the
   `ui.ax` header comment — extend it there when adding state. Slots
-  820/821 = the clip-rect stack, 822/823 = the clipboard buffer,
-  532..535 = the caret x-offset cache (owner id / caret / length / width;
-  the old "532 = close request" note was stale — close detection has been
-  the `IsWindow` poll since v2).
+  820/821 = the clip-rect stack, 822/823 = the clipboard buffer (X11's
+  selection-owner state; Windows keeps the bytes in GlobalAlloc),
+  824 = the X11 close request consumed by `plat_pump` (Windows needs no
+  flag — close detection is the `IsWindow` poll),
+  826 = the sans font handle parked for `ui_font_sans`,
+  532..535 = the caret x-offset cache (owner id / caret / length / width).
 - **GDI `DC_PEN`/`DC_BRUSH` traps (Windows)**: `GetStockObject(20)` is out
   of range and fails silently. Keep the decimal-constant discipline in the
   UI sources: no hex literals there (bitwise/shift operators exist since
@@ -1042,10 +1052,12 @@ crates/aoxn-pkg       package manager crate (its own dependency set; see above)
   `docs/ts-m1-spec.md` / `docs/web-platform-plan.md` — TS platform decisions
 - `AGENTS.md` — this file: agent/contributor working agreement (published
   since v0.29.3)
-- Repo: github.com/AlonechatWorkspace/Aoxn-language · Apache-2.0 · CI: one
-  job, `windows-latest` (winget clang). It runs the suite, then packages the
+- Repo: github.com/AlonechatWorkspace/Aoxn-language · Apache-2.0 · CI: two
+  jobs. `windows-latest` (winget clang) runs the suite, packages the
   single-file installer, installs it into a scratch prefix and runs
-  `aoxn doctor` — a broken installer fails the build.
-- **Windows only (v0.30.0).** Do NOT reintroduce macOS/Linux claims, CI jobs
-  or the X11 backend. The wiki is frozen and still describes the old
-  multi-platform matrix; `docs/platform-support.md` is the current answer.
+  `aoxn doctor` — a broken installer fails the build. `ubuntu-latest`
+  (v0.46.0) runs the whole suite plus the X11 probe under Xvfb
+  (`apt install clang libx11-dev libxft-dev libfontconfig1-dev xvfb`).
+- **Windows first-class, Linux supported (v0.46.0).** Do NOT add macOS
+  claims or a Cocoa backend. The wiki is frozen and still describes older
+  behavior; `docs/platform-support.md` is the current answer.

@@ -16,8 +16,8 @@ minors do not.
 
 | Version | Supported |
 |---|---|
-| `0.45.x` (current) | ✅ yes |
-| `0.44.x` and earlier | ❌ no — please reproduce on `main` or the latest release |
+| `0.46.x` (current) | ✅ yes |
+| `0.45.x` and earlier | ❌ no — please reproduce on `main` or the latest release |
 | `main` (development) | ✅ yes, fixes land here first |
 
 Fix versions are always noted in [`CHANGELOG.md`](CHANGELOG.md). If you need a
@@ -33,8 +33,8 @@ A useful report contains:
 1. **Version** — `aoxn version` (or the `version` field in `Cargo.toml`), the
    commit/tag if you build from source, and `aoxn doctor` if the issue is
    install-specific (it prints the resolved install root, stdlib and clang).
-2. **Platform** — Windows version and architecture, plus the clang version
-   from `aoxn doctor`; see
+2. **Platform** — Windows or Linux version and architecture (macOS is not a
+   supported target), plus the clang version from `aoxn doctor`; see
    [`docs/platform-support.md`](docs/platform-support.md).
 3. **Reproduction** — the smallest `.ax` source you can manage, the exact
    command you ran, and observed versus expected behavior. If the problem is in
@@ -217,13 +217,16 @@ the information needed to protect users even if the reporter disagrees.
   server. The SDK test suites feed hostile fixtures offline precisely so
   these paths stay provable; the SDKs never run inside the compiler
   process and add no compiler-side surface.
-- **The v0.44.0 stdlib parsers over hostile files and directories**
-  (`stdlib/os.ax`, `stdlib/glob.ax`, `stdlib/base64.ax`, `stdlib/json.ax`
-  file I/O) — the same standing as the SDK parsers, one ring out: they
-  consume bytes the *filesystem and directory entries* control (file
-  contents, names returned by `FindFirstFileW`), still inside the user's
-  process. `os`'s UTF-8 ↔ UTF-16 converters are hand-written index
-  arithmetic over malloc'd buffers; `glob`'s matcher is a backtracking
+- **The stdlib parsers over hostile files and directories**
+  (`stdlib/os.ax` — v0.44.0 on Windows, dual-platform since v0.46.0, where
+  the same hand-written converters and directory walk serve the libc path
+  with `opendir`/`readdir` — plus `stdlib/glob.ax`, `stdlib/base64.ax`,
+  `stdlib/json.ax` file I/O) — the same standing as the SDK parsers, one
+  ring out: they consume bytes the *filesystem and directory entries*
+  control (file contents, names returned by `FindFirstFileW`/`readdir`),
+  still inside the user's process. `os`'s UTF-8 ↔ UTF-16 converters are
+  hand-written index arithmetic over malloc'd buffers; `glob`'s matcher is
+  a backtracking
   recursion over pattern/name lengths and its walk joins attacker-named
   directory entries into paths; `b64_decode` sizes its output buffer from
   the input length and stores at `n`-derived offsets. A malformed filename,
@@ -291,15 +294,15 @@ though a bug report about the *documentation* is welcome.
   program author's responsibility. (The UI toolkit's raw FFI and raw-memory
   helpers are unsafe by design, like everything above.)
 - **The window server as an untrusted input source.** The Win32/GDI backend
-  (`ui_win.ax`) speaks to whatever window owns the process, so a hostile (or
-  merely compromised) window manager is in the same position as a hostile
-  terminal — it can feed the toolkit crafted messages. This is inherent to
-  speaking a windowing protocol and is not a sandbox boundary the toolkit
-  claims. (The X11 backend that had the same property was removed in
-  v0.30.0 along with the non-Windows platforms.) Defects in *how* the
-  backend parses that input (buffer overruns from a crafted message,
-  out-of-bounds writes into the scratch blocks) ARE in scope and should be
-  reported.
+  (`ui_win.ax`) speaks to whatever window owns the process, and the X11
+  backend (`ui_x11.ax`, back since v0.46.0) speaks to whatever server
+  `DISPLAY` names — so a hostile (or merely compromised) window manager or
+  X server is in the same position as a hostile terminal: it can feed the
+  toolkit crafted messages. This is inherent to speaking a windowing
+  protocol and is not a sandbox boundary the toolkit claims. Defects in
+  *how* either backend parses that input (buffer overruns from a crafted
+  message, out-of-bounds writes into the scratch blocks, the X11 event
+  offsets) ARE in scope and should be reported.
 - **A curated registry's trust index making unchecked claims.** The trust
   index says *who reviewed a package's source*, not what the source does. A
   registry listing a malicious package as `audited`, or a reviewer vouching
@@ -355,8 +358,8 @@ Aoxn 处于 pre-1.0 阶段：只有最新的版本线接收安全修复，旧的
 
 | 版本 | 支持情况 |
 |---|---|
-| `0.45.x`（当前） | ✅ 支持 |
-| `0.44.x` 及更早 | ❌ 不支持——请在 `main` 或最新发布上复现 |
+| `0.46.x`（当前） | ✅ 支持 |
+| `0.45.x` 及更早 | ❌ 不支持——请在 `main` 或最新发布上复现 |
 | `main`（开发线） | ✅ 支持，修复最先落在这里 |
 
 修复版本永远记在 [`CHANGELOG.md`](CHANGELOG.md)。如需把修复反向移植到旧
@@ -372,7 +375,8 @@ tag，请在报告里说明，我们再商量。
 1. **版本** —— `aoxn version`（或 `Cargo.toml` 的 `version` 字段），从源码
    构建的请附 commit/tag；若问题与安装有关，请一并附上 `aoxn doctor` 的输出
    （它会打印解析到的安装根目录、stdlib 与 clang）。
-2. **平台** —— Windows 版本与架构，外加 `aoxn doctor` 打印的 clang 版本；见
+2. **平台** —— Windows 或 Linux 版本与架构（macOS 不是受支持的目标平台），
+   外加 `aoxn doctor` 打印的 clang 版本；见
    [`docs/platform-support.md`](docs/platform-support.md)。
 3. **复现** —— 尽可能小的 `.ax` 源码、确切命令、实测行为与预期行为。若问题
    出在生成代码里，请附生成的 C（`aoxn c file.ax` 或 `AOXN_DUMP_C=1`），并说明
@@ -504,10 +508,12 @@ tag，请在报告里说明，我们再商量。
    `jb_push_raw` 把解析出的片段拼进已有的 slab，因此 realloc 之前的旧指针绝不可再用；
    响应头查找扫描的块，其长度来自服务器。SDK 测试套件离线投喂敌意 fixture，正是为了
    让这些路径保持可证明；SDK 从不在编译器进程内运行，也不新增编译器侧攻击面。
-- **v0.44.0 标准库中解析敌意文件与目录的解析器**（`stdlib/os.ax`、
-   `stdlib/glob.ax`、`stdlib/base64.ax`、`stdlib/json.ax` 文件 I/O）—— 与 SDK
+- **标准库中解析敌意文件与目录的解析器**（`stdlib/os.ax`——v0.44.0 在
+   Windows 落地，v0.46.0 起双平台、同一套手写转换器与目录遍历以
+   `opendir`/`readdir` 服务 libc 路径——以及 `stdlib/glob.ax`、
+   `stdlib/base64.ax`、`stdlib/json.ax` 文件 I/O）—— 与 SDK
    解析器同一待遇，只是往外挪了一环：它们消费的是**文件系统与目录项**控制的
-   字节（文件内容、`FindFirstFileW` 返回的名字），同样运行在用户进程内。
+   字节（文件内容、`FindFirstFileW`/`readdir` 返回的名字），同样运行在用户进程内。
    `os` 的 UTF-8 ↔ UTF-16 转换是对 malloc 缓冲的手写索引运算；`glob` 的匹配器
    是按模式/名字长度回溯的递归，其遍历会把攻击者命名的目录项拼进路径；
    `b64_decode` 按输入长度给输出缓冲定容、按 `n` 推导写偏移。一个畸形文件名、
@@ -556,11 +562,12 @@ tag，请在报告里说明，我们再商量。
   译产物的行为由程序作者负责。（UI 工具箱的原始 FFI 与原始内存辅助同理，
   与上述一切一样设计上不安全。）
 - **把窗口服务器当作不可信输入源。** Win32/GDI 后端（`ui_win.ax`）会与拥有
-  该进程的窗口对话，因此恶意的（或已被攻破的）窗口管理器与恶意终端处于同一
-  位置：它可以向工具箱投喂构造的消息。这是「使用窗口协议」本身固有的性质，
-  并非工具箱声称的沙箱边界。（具有同样性质的 X11 后端已随非 Windows 平台在
-  v0.30.0 一并移除。）但后端*解析*这些输入时的缺陷（构造消息导致的缓冲区溢
-  写、越界写进暂存块）**属于范围内**，请报告。
+  该进程的窗口对话；X11 后端（`ui_x11.ax`，v0.46.0 起回归）则与 `DISPLAY`
+  指向的任何服务器对话——因此恶意的（或已被攻破的）窗口管理器或 X 服务器与
+  恶意终端处于同一位置：它可以向工具箱投喂构造的消息。这是「使用窗口协议」
+  本身固有的性质，并非工具箱声称的沙箱边界。但后端*解析*这些输入时的缺陷
+  （构造消息导致的缓冲区溢写、越界写进暂存块、X11 事件结构偏移量）**属于
+  范围内**，请报告。
 - **策展 registry 的信任清单做出未经核实的声明。** 信任清单说明的是*谁评审过
   某个包的源码*，而不是源码做了什么。一个把恶意包标成 `audited` 的 registry，
   或评审者为自己没读过的代码背书，属于策展失职而非 Aoxn 的漏洞。安装

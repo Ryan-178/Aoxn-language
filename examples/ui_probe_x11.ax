@@ -1,0 +1,35 @@
+import * from "stdlib/ui_x11"
+
+# Aoxn UI - X11 backend smoke probe (Linux).
+#
+# Used by CI (.github/workflows/ci.yml) on Linux under Xvfb: it opens a real
+# window on a virtual X server, draws a few widgets for 30 frames, closes
+# itself and reports. It is the check that the X11 backend LINKS (the
+# clang-free unit tests stop at C emission and never resolve a symbol) and
+# that its event loop honours ui_close (slot 824 -> plat_pump).
+#
+#   xvfb-run -a aoxn run examples/ui_probe_x11.ax -l X11 -l Xft
+#
+# Prints "ui-x11-ok frames=N" on success. Exits 0 without a display so the
+# step can tell "no server" apart from "backend is broken".
+
+def main() -> int:
+    c = ui_init("aoxn x11 probe", 320, 200)
+    if not c.open:
+        print("ui-x11: no display")
+        return 0
+    n = 0
+    while c.open:
+        c = ui_frame(c)
+        if not c.open:
+            break
+        n = n + 1
+        if ui_button(c, 12, 40, 100, 30, "noop"):
+            print("ui-x11-click")
+        ui_label(c, 12, 12, "x11 backend ok")
+        ui_present(c)
+        if n >= 30:
+            ui_close(c)
+    ui_fini(c)
+    print("ui-x11-ok frames=" + str(n))
+    return 0

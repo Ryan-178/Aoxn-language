@@ -2,18 +2,20 @@
 
 An immediate-mode GUI standard library for Aoxn, Qt-flavored. Written 100%
 in Aoxn on top of raw FFI — no external crates, no C sources, no resource
-files. Status: **v0.30.0 — Windows** — layout managers,
+files. Status: **v0.46.0 — Windows + Linux** — layout managers,
 text selection + multi-line editing with clipboard, a focus chain, menu
 bar, tree/table model+view, signal-slot events, 20+ widgets, floating
-overlays and 16-role themes.
+overlays, 16-role themes, horizontal scroll areas and a monospace face.
 
-The toolkit is **three files**: a portable core (`ui.ax`), a
-platform-neutral widget layer (`ui_draw.ax`) and the Win32/GDI backend
-(`ui_win.ax`). Aoxn is a Windows-only language (v0.30.0), so that backend is
-the only one that ships.
+The toolkit is **three portable files plus one backend per platform**: the
+portable core (`ui.ax`), the platform-neutral widget layer (`ui_draw.ax`),
+and ONE of the two backends (`ui_win.ax` for Windows, `ui_x11.ax` for
+Linux). Both backends implement the same `plat_*` primitive set, so the
+widget set is identical everywhere.
 
 ```aoxn
 import * from "stdlib/ui_win"           # Windows: Win32 + GDI
+import * from "stdlib/ui_x11"           # Linux: Xlib + Xft (v0.46.0)
 
 def main() -> int:
     c = ui_init("Hello", 640, 480)
@@ -83,10 +85,12 @@ detection) and `GetClientRect` (resize). Closing the window destroys it;
 | `stdlib/ui.ax` | text encoding (UTF-8 → UTF-16LE with surrogates), `ui_rgb`, widget ids, `Palette`/`UI`/`TextSize`/`Rect`/`TextEdit`/`ListPick` types, light/dark palettes, heap-state accessors, per-frame bump arena (`utf16f`/`itoa10`), **layout engine**, **focus chain**, disabled mode, **text-editing primitives**, WM_CHAR queue, overlay slots | yes — no platform externs, so the tests exercise it without a window |
 | `stdlib/ui_draw.ax` | **every widget**, the drawing-primitive wrappers, and the portable `ui_init`/`ui_frame`/`ui_present`/`ui_fini` shell. Calls a `plat_*` primitive contract; declares **no** platform externs and never tests `target_os()` | yes — one widget set, no Win32 symbols |
 | `stdlib/ui_win.ax` | Windows backend: Win32/GDI externs + the `plat_*` implementations | Windows only |
+| `stdlib/ui_x11.ax` | Linux backend: Xlib/Xft externs + the same `plat_*` set (v0.46.0; off-screen Pixmap double buffering, selection-protocol clipboard, `XQueryKeymap` key sweep) | Linux only |
 
 A backend imports `ui_draw.ax` (which imports `ui.ax`) and merges all three
 into one flat namespace, so a program reaches every widget through **one
-import line**. Backends must be linked explicitly: `-l user32 -l gdi32`.
+import line**. Backends must be linked explicitly: `-l user32 -l gdi32` on
+Windows, `-l X11 -l Xft` on Linux.
 
 ### The `plat_*` primitive contract
 
@@ -102,10 +106,10 @@ and each backend supplies its own:
 `plat_clip_pop`
 
 `tests/ui.rs` pins this contract three ways: the widget layer must not
-mention a single Win32 or Xlib symbol, both backends must implement the
-same primitive set, and every primitive the widget layer calls must exist
-in both. A widget that reaches for a platform symbol fails the test run —
-not one user's OS.
+mention a single Win32 or Xlib symbol, both backends (`ui_win.ax` AND
+`ui_x11.ax`) must implement the same primitive set, and every primitive
+the widget layer calls must exist in both. A widget that reaches for a
+platform symbol fails the test run — not one user's OS.
 
 ## Layout managers (Qt's QV/QH/QGridLayout counterpart)
 
@@ -195,6 +199,9 @@ v2 (v0.29.2):
 | `ui_tabs` | `(c, x, y, w, labels: [string; N], n, cur) -> int` | tab strip (accent top bar on the active tab); the caller draws the page content below |
 | `ui_groupbox` | `(c, x, y, w, h, title)` | thin frame with the title punched through the top line |
 | `ui_scroll_begin` | `(c, x, y, w, h, scroll_y, content_h) -> int` | clipped viewport; returns the new scroll offset (wheel + scrollbar). Draw content at `y - scroll` |
+| `ui_scroll_begin_h` | `(c, x, y, w, h, scroll_x, content_w) -> int` | horizontal twin (v0.46.0): bottom scrollbar (drag), clip excludes the bar row. Draw at `x - scroll_x`. Nests with the vertical variant; close with `ui_scroll_end_h` |
+| `ui_font_mono` | `(c) -> UI` | point the body font at the backend's monospace face (v0.46.0). Every widget drawn after this measures/renders monospace |
+| `ui_font_sans` | `(c) -> UI` | restore the sans face the backend opened at init |
 | `ui_scroll_end` | `(c)` | **required** — pops the GDI clip stack |
 | `ui_tooltip` | `(c, x, y, w, h, text)` | shows `text` near the cursor after hovering the rect ~0.55 s (drawn on top by `ui_present`) |
 
@@ -362,10 +369,12 @@ events (overflow drops). `ui_slot_of(signal)` reports the current binding.
   uses `CS_OWNDC` and a `NULL` background brush, so nothing erases the
   window except us — no flicker. `ui_present` draws overlays, then one
   `BitBlt(SRCCOPY)`.
-- **Fonts**: `CreateFontW`, Segoe UI 16px regular + 26px bold,
-  `CLEARTYPE_QUALITY`, `SetBkMode(TRANSPARENT)`, `SetTextAlign(TA_TOP)`.
-  Text is measured with `GetTextExtentPoint32W` (button centering, caret
-  placement).
+- **Fonts**: Segoe UI 16px regular + 26px bold via `CreateFontW` on
+  Windows (Xft `Sans-12`/`Sans-20` on Linux); monospace is `ui_font_mono`
+  — Consolas on Windows, the fontconfig `Monospace` alias on Linux (both
+  faces are opened by the backend at init and parked on `UI.font_mono`).
+  `SetBkMode(TRANSPARENT)`, `SetTextAlign(TA_TOP)`; text is measured with
+  `GetTextExtentPoint32W` (Windows) / `XftTextExtentsUtf8` (Linux).
 - **Stock pens**: `DC_PEN = 19`, `DC_BRUSH = 18`, `NULL_BRUSH = 5`,
   `NULL_PEN = 8`. **Do not "fix" 19 to 20** — `GetStockObject(20)` is out
   of range, `SelectObject` fails silently, and every outline disappears
@@ -411,12 +420,17 @@ headless tests can too.
 | OS | Backend file | Link flags | Status |
 |---|---|---|---|
 | Windows (Win32 + GDI) | `stdlib/ui_win.ax` | `-l user32 -l gdi32` | complete, tested (`tests/ui.rs` + CI) |
+| Linux (Xlib + Xft) | `stdlib/ui_x11.ax` | `-l X11 -l Xft` | complete, tested (`tests/ui.rs` + Xvfb probe in CI, v0.46.0) |
 
-The X11 backend (`ui_x11.ax`, which served Linux and macOS through XQuartz)
-was removed with the other platforms in v0.30.0. Nothing about the toolkit is
-X11-specific: the widget layer only ever calls `plat_*` primitives, so a
-second backend would slot in beside `ui_win.ax` without touching a widget —
-see `docs/platform-support.md`.
+The X11 backend was removed with the other platforms in v0.30.0 and came
+back in v0.46.0, rewritten against the v3 contract. Nothing about the
+toolkit is platform-specific: the widget layer only ever calls `plat_*`
+primitives, and the contract tests keep both backends honest. The close
+request travels through shared-block slot 824 on X11 (Windows destroys the
+window and polls `IsWindow`); slot 826 parks the sans font handle for
+`ui_font_sans`. See `docs/platform-support.md` for the platform story.
+macOS remains unreachable: the Cocoa surface needs struct-by-value externs
+the language cannot express.
 
 ## Tests
 
@@ -440,18 +454,20 @@ see `docs/platform-support.md`.
 - `ui_window_v3_widgets_smoke` (Windows): multi-line editor, menu bar +
   menu, tree, table and a signal-slot dispatch loop in a real window for
   ~60 frames; same skip/timeout protocol.
-- `ui_win_backend_emits_c`: the backend typechecks and emits C. This
-  needs **no clang and no display**, because `compile_paths_to_c` stops
-  after codegen — so it is the check that also runs on a headless box.
+- `ui_win_backend_emits_c` / `ui_x11_backend_emits_c`: the backend
+  typechecks and emits C. This needs **no clang and no display**, because
+  `compile_paths_to_c` stops after codegen — so it is the check that also
+  runs on a headless box.
 - `ui_draw_layer_is_platform_neutral`: asserts `ui_draw.ax` mentions no
   Win32 symbol and never calls `target_os()`.
 - `ui_draw_calls_only_implemented_primitives`: every `plat_*` the widget
-  layer calls is defined by `ui_win.ax` (a missing one would otherwise
-  only show up as a link error).
+  layer calls is defined by BOTH `ui_win.ax` and `ui_x11.ax` (a missing
+  one would otherwise only show up as a link error).
 
-Link-time coverage lives in CI rather than the unit tests: the workflow
-builds the gallery against `-l user32 -l gdi32` and runs it (open a real
-window, draw frames, close itself).
+Link-time coverage lives in CI rather than the unit tests: the Windows
+job builds the gallery against `-l user32 -l gdi32`; the Linux job
+(v0.46.0) links and runs `examples/ui_probe_x11.ax` for 30 real frames
+under Xvfb against `-l X11 -l Xft`.
 
 ## Known limits (v3) / roadmap
 

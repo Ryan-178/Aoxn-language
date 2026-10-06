@@ -400,7 +400,12 @@ fn ui_window_v2_widgets_smoke() {
         sc = ui_scroll_begin(c, 230, 10, 200, 150, 0, 600)
         ui_label(c, 240, 12 - sc, "x")
         ui_scroll_end(c)
-        ui_tooltip(c, 230, 200, 80, 24, "tip")
+        c = ui_font_mono(c)
+        sc2 = ui_scroll_begin_h(c, 230, 180, 180, 70, 0, 360)
+        ui_label(c, 240 - sc2, 182, "0123456789 wide content")
+        ui_scroll_end_h(c)
+        c = ui_font_sans(c)
+        ui_tooltip(c, 230, 260, 80, 24, "tip")
         ui_present(c)
         if n >= 60:
             ui_close(c)
@@ -747,6 +752,28 @@ fn ui_win_backend_emits_c() {
     assert!(c.contains("BitBlt"), "GDI blit missing");
 }
 
+/// The X11 backend must typecheck and emit C with no X11 library present —
+/// the externs are prototypes, so this runs on every platform (Linux CI
+/// runs it too, before the Xvfb probe exercises the real link).
+#[test]
+fn ui_x11_backend_emits_c() {
+    let c = emit_c_with_backend(
+        "ui_x11.ax",
+        r#"def main() -> int:
+    c = ui_init("t", 200, 100)
+    while c.open:
+        c = ui_frame(c)
+        ui_button(c, 10, 10, 80, 24, "ok")
+        ui_present(c)
+    ui_fini(c)
+    return 0
+"#,
+    );
+    assert!(c.contains("XOpenDisplay"), "X11 windowing missing");
+    assert!(c.contains("XftDrawStringUtf8"), "Xft text missing");
+    assert!(c.contains("XQueryKeymap"), "keymap sweep missing");
+}
+
 /// The whole point of ui_draw.ax: one widget layer over one backend. The
 /// Win32 vocabulary must not appear in it — if it does, a widget has grown a
 /// platform dependency and the split stops meaning anything.
@@ -784,8 +811,10 @@ fn ui_draw_layer_is_platform_neutral() {
     );
 }
 
-/// Every primitive the widget layer CALLS must exist in the backend — a
-/// missing one only shows up as a link error at build time.
+/// Every primitive the widget layer CALLS must exist in BOTH backends — a
+/// missing one only shows up as a link error at build time (v0.46.0: the
+/// check covers the X11 backend too, so a new plat_* can no longer land
+/// in ui_win.ax only).
 #[test]
 fn ui_draw_calls_only_implemented_primitives() {
     let draw = std::fs::read_to_string(
@@ -811,17 +840,19 @@ fn ui_draw_calls_only_implemented_primitives() {
     }
     called.sort();
     called.dedup();
-    let backend = std::fs::read_to_string(
-        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("stdlib")
-            .join("ui_win.ax"),
-    )
-    .unwrap();
     assert!(!called.is_empty(), "no plat_* calls found in ui_draw.ax");
-    for f in &called {
-        assert!(
-            backend.contains(&format!("def {f}(")),
-            "ui_draw.ax calls {f}() but ui_win.ax does not define it"
-        );
+    for backend in ["ui_win.ax", "ui_x11.ax"] {
+        let src = std::fs::read_to_string(
+            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("stdlib")
+                .join(backend),
+        )
+        .unwrap();
+        for f in &called {
+            assert!(
+                src.contains(&format!("def {f}(")),
+                "ui_draw.ax calls {f}() but {backend} does not define it"
+            );
+        }
     }
 }

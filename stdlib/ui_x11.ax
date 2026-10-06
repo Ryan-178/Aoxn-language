@@ -1,0 +1,912 @@
+# Aoxn UI — X11 backend (Linux), Qt-flavored immediate mode.
+#
+# Import this INSTEAD of ui_draw.ax to get the full widget set in one flat
+# namespace; ui_draw.ax (the portable widget layer) comes in transitively:
+#   Linux:  aoxn run app.ax -l X11 -l Xft
+#
+# Why X11 and not a native toolkit: Aoxn's `extern def` can only pass
+# int / f64 / string / bool. GTK/Qt take structs and callbacks; X11 is a
+# pure-C API whose arguments are all scalars or pointers, which is exactly
+# what the language can express. Xft (libXft) draws the text — antialiased,
+# UTF-8 native, fontconfig-resolved — because the X11 core fonts cannot
+# render CJK and are absent on most modern setups.
+#
+# Backend notes (mirrors ui_win.ax, so both behave alike):
+#   - No callbacks anywhere: events are drained inside plat_pump and
+#     everything else is POLLED per frame or derived from the event
+#     stream (MotionNotify for the mouse, ButtonPress/Release for the
+#     buttons, XGetWindowAttributes for the size). The event mask asks for
+#     StructureNotify so resizes are seen, and WM_DELETE_WINDOW so the WM's
+#     close button arrives as a ClientMessage we can honor.
+#   - Keys are EDGE-DETECTED against a per-frame snapshot, exactly like the
+#     Windows backend's GetAsyncKeyState loop. Two inputs feed it:
+#       * KeyPress events set 4+vk immediately (this catches a click-short
+#         press/release that both land inside one frame gap — X11 has no
+#         "pressed since last call" latch bit);
+#       * one XQueryKeymap sweep at the end of plat_pump re-asserts every
+#         key the server still reports DOWN, so held keys (Shift/Ctrl with
+#         autorepeat gaps between the release+press pairs) read as
+#         continuously down instead of flickering at half the frames.
+#     key_snapshot_rotate (ui_frame) zeroes the snapshot each frame, so
+#     released keys drop out on their own; KeyRelease events are ignored.
+#   - Drawing goes to an off-screen Pixmap (double buffered) that
+#     plat_present copies to the window with one XCopyArea, so the window
+#     never flickers and nothing repaints unless we ask.
+#   - XEvent on x64 is 192 bytes and the fields we read sit at fixed
+#     offsets, all documented where used.
+#   - No hex literals — every X11 constant is DECIMAL and event/button
+#     masks are summed by hand; struct offsets are byte math.
+#   - COLORS: the widget layer speaks COLORREF (0x00BBGGRR) from ui_rgb;
+#     X wants 0xRRGGBB, so xcolor() swaps the halves once.
+#   - CLOSE REQUEST: Aoxn passes UI BY VALUE, so plat_close cannot set a
+#     field the app's loop would see. The Windows backend gets away with
+#     DestroyWindow + IsWindow(); X11 has no equivalent, so the request
+#     travels through the shared heap block at slot 824 and plat_pump
+#     picks it up on the next frame (slot layout: stdlib/ui.ax header —
+#     824 is the first slot both backends leave free; the old slot 532 is
+#     the caret x-offset cache since v0.45.0).
+#
+# Widget state lives where the language can express it: with the caller
+# (checkbox/slider values are taken and returned) or in the shared heap
+# block (ui.ax documents the slot layout) — never in callbacks.
+
+import * from "./ui_draw.ax"
+# ---- Xlib + Xft ABI (link with -l X11 -l Xft) ----
+
+extern def XOpenDisplay(name: string) -> int
+extern def XCloseDisplay(d: int) -> int
+extern def XDefaultScreen(d: int) -> int
+extern def XRootWindow(d: int, scr: int) -> int
+extern def XDefaultVisual(d: int, scr: int) -> int
+extern def XDefaultDepth(d: int, scr: int) -> int
+extern def XDefaultColormap(d: int, scr: int) -> int
+extern def XCreateWindow(d: int, parent: int, x: int, y: int, w: int, h: int, bw: int, depth: int, cls: int, va: int, vm: int, attrs: int) -> int
+extern def XStoreName(d: int, w: int, name: string) -> int
+extern def XSelectInput(d: int, w: int, mask: int) -> int
+extern def XMapWindow(d: int, w: int) -> int
+extern def XUnmapWindow(d: int, w: int) -> int
+extern def XDestroyWindow(d: int, w: int) -> int
+extern def XNextEvent(d: int, ev: int) -> int
+extern def XPending(d: int) -> int
+extern def XFlush(d: int) -> int
+extern def XSync(d: int, discard: int) -> int
+extern def XCreatePixmap(d: int, draw: int, w: int, h: int, depth: int) -> int
+extern def XFreePixmap(d: int, pm: int) -> int
+extern def XCreateGC(d: int, draw: int, vm: int, g: int) -> int
+extern def XFreeGC(d: int, gc: int) -> int
+extern def XSetForeground(d: int, gc: int, color: int) -> int
+extern def XFillRectangle(d: int, draw: int, gc: int, x: int, y: int, w: int, h: int) -> int
+extern def XDrawRectangle(d: int, draw: int, gc: int, x: int, y: int, w: int, h: int) -> int
+extern def XFillArc(d: int, draw: int, gc: int, x: int, y: int, w: int, h: int, a1: int, a2: int) -> int
+extern def XDrawArc(d: int, draw: int, gc: int, x: int, y: int, w: int, h: int, a1: int, a2: int) -> int
+extern def XDrawLine(d: int, draw: int, gc: int, x1: int, y1: int, x2: int, y2: int) -> int
+extern def XCopyArea(d: int, src: int, dst: int, gc: int, x: int, y: int, w: int, h: int, dx: int, dy: int) -> int
+extern def XSetClipRectangles(d: int, gc: int, x: int, y: int, rects: int, n: int, order: int) -> int
+extern def XLookupString(ev: int, buf: int, n: int, ks: int, status: int) -> int
+extern def XLookupKeysym(ev: int, index: int) -> int
+# deprecated in favor of Xkb but present in every libX11 and a pure table
+# lookup (no server round trip) — used to map the keymap sweep to VKs
+extern def XKeycodeToKeysym(d: int, kc: int, index: int) -> int
+# fills 32 bytes: bit (kc%8) of byte (kc/8) is 1 while keycode kc is DOWN
+extern def XQueryKeymap(d: int, keys_return: int) -> int
+extern def XGetWindowAttributes(d: int, w: int, attrs: int) -> int
+extern def XSetWMProtocols(d: int, w: int, atoms: int, count: int) -> int
+extern def XInternAtom(d: int, name: string, only: int) -> int
+extern def XChangeProperty(d: int, w: int, prop: int, typ: int, fmt: int, mode: int, n: int, data: int) -> int
+# 12 arguments: the real signature is (display, w, property, req_type,
+# long_offset, long_length, delete, actual_type_return, actual_format_return,
+# nitems_return, bytes_after_return, prop_return) — the last FOUR are
+# out-params that Xlib writes THROUGH the caller's pointers. Declaring one
+# too few silently shifts every out-param by a slot, so the count matters.
+extern def XGetWindowProperty(d: int, w: int, prop: int, typ: int, long_off: int, long_len: int, del: int, actual_type: int, actual_fmt: int, nitems: int, rem: int, data: int) -> int
+extern def XDeleteProperty(d: int, w: int, prop: int) -> int
+extern def XFree(p: int) -> int
+extern def XGetSelectionOwner(d: int, sel: int) -> int
+extern def XConvertSelection(d: int, sel: int, target: int, prop: int, w: int, t: int) -> int
+extern def XSetSelectionOwner(d: int, sel: int, w: int, t: int) -> int
+extern def XSendEvent(d: int, w: int, prop: int, mask: int, ev: int) -> int
+extern def XPutBackEvent(d: int, ev: int) -> int
+# sleep for the idle frame cap (timespec { i64 sec, i64 nsec } at 0 / 8)
+extern def nanosleep(req: int, rem: int) -> int
+# Xft (antialiased UTF-8 text; needs -l Xft)
+extern def XftFontOpenName(d: int, scr: int, name: string) -> int
+extern def XftFontClose(d: int, font: int) -> int
+extern def XftDrawCreate(d: int, draw: int, visual: int, cmap: int) -> int
+extern def XftDrawDestroy(xd: int) -> int
+# XftDrawStringUtf8 takes the XftColor as its SECOND argument (this is the
+# released libXft signature; the color was present from Xft 1.1 onwards and
+# there is NO GC-foreground API to set the text color instead).
+extern def XftDrawStringUtf8(xd: int, color: int, font: int, x: int, y: int, s: string, n: int)
+# XftColor is { unsigned long pixel; XRenderColor color; } = 16 bytes; the
+# XRenderColor half is four 16-bit channels at +8. XftColorAllocValue fills
+# BOTH halves, which matters: the RENDER path reads color->color, the core
+# path reads color->pixel.
+# XftInit initializes fontconfig. It is REQUIRED before any other Xft call
+# (XftFontOpenName / XftDrawCreate / XftColorAllocValue all reach into
+# FcConfigGetCurrent, which is NULL until this runs). It is idempotent.
+extern def XftInit(name: string) -> int
+extern def XftColorAllocValue(d: int, visual: int, cmap: int, xrc: int, out: int) -> int
+extern def XftColorFree(d: int, visual: int, cmap: int, color: int) -> int
+# XftTextExtentsUtf8 returns void in C; it fills the XGlyphInfo at `ink`
+# (never NULL — it is dereferenced unconditionally)
+extern def XftTextExtentsUtf8(d: int, font: int, s: string, n: int, ink: int)
+# monotonic milliseconds for the tooltip hover timer. clock_gettime lives
+# in librt on older glibc and in libc since 2.17; the executable is linked
+# with -lm by the compiler and glibc>=2.17 carries the symbol in libc
+# itself. CLOCK_MONOTONIC = 1.
+extern def clock_gettime(clk: int, ts: int) -> int
+
+# ---- backend identity ----
+# A DISPLAY-less headless box still supports the backend: plat_init fails
+# to open a window and the app loop sees c.open == False, the same
+# contract Windows has with no desktop.
+
+def plat_supported() -> bool:
+    return target_os() == "linux"
+
+def plat_now_ms() -> int:
+    ts = malloc(16)
+    clock_gettime(1, ts)
+    sec = i64_at(ts)
+    nsec = i64_at(ts + 8)
+    free(ts)
+    return sec * 1000 + nsec / 1000000
+
+# Is there a live window AND a live off-screen surface to draw on? The font
+# matters too: XftFontOpenName returns NULL when fontconfig cannot resolve a
+# match (a bare Xvfb container with no fonts installed is the common case),
+# and every measure/draw call dereferences it.
+def plat_canvas_ok(c: UI) -> bool:
+    if not c.open:
+        return False
+    if c.win_dc == 0 or c.bmp == 0 or c.mem_dc == 0 or c.old_bmp == 0:
+        return False
+    return c.font != 0
+
+# read a little-endian i64. A struct timeval's seconds field is a small
+# positive number (seconds since boot / epoch), so only the low 7 bytes
+# can be non-zero and the sign branch is unnecessary.
+def i64_at(p: int) -> int:
+    return load_u8(p, 0) + load_u8(p, 1) * 256 + load_u8(p, 2) * 65536 + load_u8(p, 3) * 16777216 + load_u8(p, 4) * 4294967296 + load_u8(p, 5) * 1099511627776 + load_u8(p, 6) * 281474976710656
+
+# ---- scratch buffers ----
+# c.msg = XEvent (192B), c.pt = pointer/button scratch, c.rect = extents.
+# Allocated once in plat_init; ui_fini frees them.
+
+def alloc_scratch(c: UI) -> UI:
+    c.msg = malloc(192)
+    fill_zero(c.msg, 192)
+    # c.pt is the general scratch. Layout (bytes):
+    #   0..8      WM_DELETE_WINDOW atom
+    #   8..16     keycode of the last KeyPress (autorepeat bookkeeping)
+    #   16..80    XLookupString text buffer
+    #   64..96    XRectangle for the clip stack
+    #   96..128   XQueryKeymap keymap (32 bytes)
+    #   128..136  XSetWindowAttributes background_pixel
+    #   200..392  SelectionNotify reply event (192B)
+    #   400..416  timespec for the idle cap
+    c.pt = malloc(448)
+    c.rect = malloc(64)
+    return c
+
+# ---- small helpers ----
+
+# COLORREF (0x00BBGGRR) -> X11 pixel (0xRRGGBB)
+def xcolor(c: int) -> int:
+    b = c % 256
+    g = (c / 256) % 256
+    r = (c / 65536) % 256
+    return r * 65536 + g * 256 + b
+
+# Copy bytes [from, to) of s into the frame arena, NUL-terminated, and
+# return the pointer. Xft takes (ptr, len) so the terminator is only
+# insurance. Falls back to malloc when the frame arena is full, exactly
+# like utf16f_sub does for the Windows path.
+def utf8f_sub(c: UI, s: string, from: int, to: int) -> int:
+    need = to - from + 1
+    off = st_get(c, 2)
+    if st_get(c, 1) == 0 or off + need > st_get(c, 3):
+        p = malloc(need)
+        src = as_ptr(s) + from
+        j = 0
+        while j < need - 1:
+            store_u8(p + j, 0, load_u8(src, 0))
+            src = src + 1
+            j = j + 1
+        store_u8(p + need - 1, 0, 0)
+        return p
+    p = st_get(c, 1) + off
+    src = as_ptr(s) + from
+    j = 0
+    while j < need - 1:
+        store_u8(p + j, 0, load_u8(src, 0))
+        src = src + 1
+        j = j + 1
+    store_u8(p + need - 1, 0, 0)
+    st_set(c, 2, off + need)
+    return p
+
+# ---- Xft color ----
+# The widget layer hands us COLORREF (0x00BBGGRR); xcolor() turns it into
+# 0xRRGGBB. To draw colored text we must hand Xft a real XftColor, and the
+# only correct way to build one is XftColorAllocValue — it fills BOTH
+# halves (the RENDER path reads color->color, the core path color->pixel),
+# so hand-rolling the struct would break one of the two paths.
+#
+# 16-bit channels: an 8-bit value v scales to v*257 (0..255 -> 0..65535).
+# alpha MUST stay 0xffff: anything else makes Xft pick a blending PictOp and
+# the antialiased text turns into a slow path.
+#
+# c.rect is 64 bytes and holds the 16-byte XftColor (st scratch).
+def xft_color(c: UI, color: int) -> int:
+    px = xcolor(color)
+    r = (px / 65536) % 256
+    g = (px / 256) % 256
+    b = px % 256
+    # XRenderColor = four little-endian u16 at scratch[0..8]
+    xrc = c.rect
+    store_u8(xrc + 0, 0, r * 257 % 256)
+    store_u8(xrc + 1, 0, r * 257 / 256)
+    store_u8(xrc + 2, 0, g * 257 % 256)
+    store_u8(xrc + 3, 0, g * 257 / 256)
+    store_u8(xrc + 4, 0, b * 257 % 256)
+    store_u8(xrc + 5, 0, b * 257 / 256)
+    store_u8(xrc + 6, 0, 255)
+    store_u8(xrc + 7, 0, 255)
+    out = c.rect + 16
+    d = c.win_dc
+    scr = XDefaultScreen(d)
+    XftColorAllocValue(d, XDefaultVisual(d, scr), XDefaultColormap(d, scr), xrc, out)
+    return out
+
+# ---- drawing primitives ----
+
+def plat_fill_rect(c: UI, x: int, y: int, w: int, h: int, color: int):
+    XSetForeground(c.win_dc, c.mem_dc, xcolor(color))
+    XFillRectangle(c.win_dc, c.bmp, c.mem_dc, x, y, w, h)
+
+def plat_frame_rect(c: UI, x: int, y: int, w: int, h: int, color: int):
+    XSetForeground(c.win_dc, c.mem_dc, xcolor(color))
+    XDrawRectangle(c.win_dc, c.bmp, c.mem_dc, x, y, w - 1, h - 1)
+
+# X11 core has no RoundRect. Fill the box, then inset the frame by one
+# pixel on the shorter axis so the corner reads as a soft edge; at the
+# 20-30px control sizes the toolkit uses this is indistinguishable from a
+# true round rect, and it never guesses a background color.
+def plat_round_fill(c: UI, x: int, y: int, w: int, h: int, fill: int, border: int):
+    XSetForeground(c.win_dc, c.mem_dc, xcolor(fill))
+    XFillRectangle(c.win_dc, c.bmp, c.mem_dc, x, y, w, h)
+    XSetForeground(c.win_dc, c.mem_dc, xcolor(border))
+    XDrawRectangle(c.win_dc, c.bmp, c.mem_dc, x + 1, y + 1, w - 3, h - 3)
+
+# filled ellipse with a ring (radio button body). XDrawArc angles are
+# DEGREES * 65536: 0..360*65536 = 23592960 is a full circle.
+def plat_ellipse(c: UI, x: int, y: int, w: int, h: int, fill: int, border: int):
+    XSetForeground(c.win_dc, c.mem_dc, xcolor(border))
+    XDrawArc(c.win_dc, c.bmp, c.mem_dc, x, y, w, h, 0, 23592960)
+    XSetForeground(c.win_dc, c.mem_dc, xcolor(fill))
+    XFillArc(c.win_dc, c.bmp, c.mem_dc, x + 1, y + 1, w - 2, h - 2, 0, 23592960)
+
+def plat_ellipse_fill(c: UI, x: int, y: int, w: int, h: int, fill: int):
+    XSetForeground(c.win_dc, c.mem_dc, xcolor(fill))
+    XFillArc(c.win_dc, c.bmp, c.mem_dc, x, y, w, h, 0, 23592960)
+
+def plat_line(c: UI, x1: int, y1: int, x2: int, y2: int, color: int):
+    XSetForeground(c.win_dc, c.mem_dc, xcolor(color))
+    XDrawLine(c.win_dc, c.bmp, c.mem_dc, x1, y1, x2, y2)
+
+def plat_text(c: UI, x: int, y: int, s: string, color: int):
+    plat_text_sub(c, x, y, s, 0, len(s), color)
+
+def plat_text_big(c: UI, x: int, y: int, s: string, color: int):
+    if len(s) == 0 or c.font_big == 0 or c.old_bmp == 0:
+        return
+    p = utf8f_sub(c, s, 0, len(s))
+    XftDrawStringUtf8(c.old_bmp, xft_color(c, color), c.font_big, x, y, as_string(p), len(s))
+
+def plat_text_sub(c: UI, x: int, y: int, s: string, f: int, t: int, color: int):
+    if t <= f or c.font == 0 or c.old_bmp == 0:
+        return
+    p = utf8f_sub(c, s, f, t)
+    XftDrawStringUtf8(c.old_bmp, xft_color(c, color), c.font, x, y, as_string(p), t - f)
+
+def plat_measure(c: UI, s: string) -> TextSize:
+    return plat_measure_sub(c, s, 0, len(s))
+
+# XftTextExtentsUtf8 fills an XGlyphInfo through its last argument. The
+# struct is libXrender's, and the horizontal ADVANCE is `xOff` at byte
+# offset 8 — NOT offset 0, which is the ink `width`:
+#
+#   offset  0  unsigned short width   (ink width)
+#   offset  2  unsigned short height  (ink height)
+#   offset  4  short          x       (ink origin)
+#   offset  6  short          y       (ink origin)
+#   offset  8  short          xOff    <- horizontal advance
+#   offset 10  short          yOff    <- vertical advance
+#
+# Every field is 16-bit, so the advance must be read as two bytes and
+# sign-extended by hand (a left-truncated run can make it negative).
+# `extents` is dereferenced unconditionally — passing 0 there crashes.
+def plat_measure_sub(c: UI, s: string, f: int, t: int) -> TextSize:
+    if t <= f or c.font == 0:
+        return TextSize(w=0, h=16)
+    p = utf8f_sub(c, s, f, t)
+    fill_zero(c.rect, 16)
+    XftTextExtentsUtf8(c.win_dc, c.font, as_string(p), t - f, c.rect)
+    w = load_u8(c.rect, 8) + load_u8(c.rect, 9) * 256
+    if w >= 32768:
+        w = w - 65536
+    h = load_u8(c.rect, 10) + load_u8(c.rect, 11) * 256
+    if h >= 32768:
+        h = h - 65536
+    if h < 1:
+        h = 16
+    return TextSize(w=w, h=h)
+
+# X11's clip is a rectangle set rather than a saved-state stack, so keep
+# the pushed rects in the shared heap block (slots 820/821, the same ones
+# the Windows backend uses) and re-apply the top one on every change.
+# An empty stack means "no clipping".
+def plat_clip_push(c: UI, l: int, t: int, r: int, b: int):
+    if st_get(c, 820) == 0:
+        st_set(c, 820, malloc(960))
+    depth = st_get(c, 821)
+    if depth < 30:
+        p = st_get(c, 820) + depth * 32
+        store_i64(p, l)
+        store_i64(p + 8, t)
+        store_i64(p + 16, r)
+        store_i64(p + 24, b)
+        st_set(c, 821, depth + 1)
+    clip_apply(c)
+
+def plat_clip_pop(c: UI):
+    depth = st_get(c, 821)
+    if depth > 0:
+        st_set(c, 821, depth - 1)
+    clip_apply(c)
+
+# XRectangle is {x, y, w, h} as four ints; an empty rect disables clipping.
+def clip_apply(c: UI):
+    depth = st_get(c, 821)
+    q = c.pt + 64
+    if depth == 0:
+        # nrects = 0 (with a NULL rect list) is how the X protocol says
+        # "no clipping". Returning without calling XSetClipRectangles
+        # would leave the GC clipped to the LAST pushed rect, so the
+        # background fill in ui_frame would be clipped forever after the
+        # first scroll area.
+        XSetClipRectangles(c.win_dc, c.mem_dc, 0, 0, 0, 0, 0)
+        return
+    p = st_get(c, 820) + (depth - 1) * 32
+    l = load_i64(p)
+    t = load_i64(p + 8)
+    r = load_i64(p + 16)
+    b = load_i64(p + 24)
+    store_i64(q, l)
+    store_i64(q + 8, t)
+    if r - l < 1 or b - t < 1:
+        store_i64(q + 16, 0)
+        store_i64(q + 24, 0)
+    else:
+        store_i64(q + 16, r - l)
+        store_i64(q + 24, b - t)
+    XSetClipRectangles(c.win_dc, c.mem_dc, 0, 0, q, 1, 0)
+
+# ---- fonts ----
+
+# Xft/fontconfig resolves "Sans-N" through the fontconfig aliases, so this
+# is the same face every distro maps to its default UI font. The px is the
+# PIXEL size (unlike the Windows backend's negative height = em size);
+# weight is ignored — fontconfig picks the regular face and Xft
+# synthesizes nothing (the toolkit uses one weight anyway).
+def make_font(d: int, px: int, weight: int) -> int:
+    return XftFontOpenName(d, XDefaultScreen(d), "Sans-" + str(px))
+
+# "Monospace" is fontconfig's monospace alias (DejaVu Sans Mono on most
+# distros); same pixel-size convention as make_font above. The Windows
+# backend's twin resolves "Consolas" through CreateFontW.
+def make_font_mono(d: int, px: int) -> int:
+    return XftFontOpenName(d, XDefaultScreen(d), "Monospace-" + str(px))
+
+# ---- window / canvas lifecycle ----
+
+def plat_init(c: UI, title: string, w: int, h: int) -> UI:
+    # fontconfig first: XftFontOpenName and friends dereference the global
+    # FcConfig, which XftInit creates. Calling it before the display is even
+    # opened is fine (idempotent) and keeps it out of the failure paths.
+    XftInit("")
+    d = XOpenDisplay("")
+    if d == 0:
+        print("ui_x11: cannot open DISPLAY (is X running? is DISPLAY set?)")
+        return c
+    c = alloc_scratch(c)
+    c.win_dc = d
+    scr = XDefaultScreen(d)
+    root = XRootWindow(d, scr)
+    depth = XDefaultDepth(d, scr)
+    # CWBackPixel = 2: paint the window in the palette background so the
+    # very first paint (before any ui_frame) is not a black flash
+    # XSetWindowAttributes on x64: background_pixmap 0, background_pixel 8,
+    # border_pixmap 16, border_pixel 24, ... CWBackPixel = 2 selects
+    # background_pixel, so the value goes at offset 8 (writing offset 0
+    # would set background_pixmap and leave the pixel uninitialised).
+    attrs = c.pt + 128
+    store_i64(attrs, 0)
+    store_i64(attrs + 8, xcolor(ui_rgb(240, 240, 240)))
+    # InputOutput = 1, CopyFromParent = 0, CWBackPixel = 2
+    win = XCreateWindow(d, root, 0, 0, w, h, 0, depth, 1, 0, 2, attrs)
+    if win == 0:
+        XCloseDisplay(d)
+        c.win_dc = 0
+        return c
+    c.hwnd = win
+    XStoreName(d, win, title)
+    # KeyPress 1 | KeyRelease 2 | ButtonPress 4 | ButtonRelease 8 |
+    # PointerMotion 64 | StructureNotify 131072
+    XSelectInput(d, win, 1 + 2 + 4 + 8 + 64 + 131072)
+    # WM_DELETE_WINDOW so the WM's close button reaches us as a
+    # ClientMessage (event 33) instead of killing the connection
+    store_i64(c.pt, XInternAtom(d, "WM_DELETE_WINDOW", 0))
+    XSetWMProtocols(d, win, c.pt, 1)
+    XMapWindow(d, win)
+    XSync(d, 0)
+    c.open = True
+    c.bmp = XCreatePixmap(d, win, w, h, depth)
+    if c.bmp == 0:
+        print("ui_x11: XCreatePixmap failed (out of server resources?)")
+        XCloseDisplay(d)
+        c.win_dc = 0
+        c.open = False
+        return c
+    c.mem_dc = XCreateGC(d, c.bmp, 0, 0)
+    c.old_bmp = XftDrawCreate(d, c.bmp, XDefaultVisual(d, scr), XDefaultColormap(d, scr))
+    c.font = make_font(d, 12, 0)
+    c.font_big = make_font(d, 20, 0)
+    c.font_mono = make_font_mono(d, 12)
+    st_set(c, 826, c.font)
+    if c.font == 0:
+        # No fonts (a bare container often has none). Text is the only
+        # thing that needs a font, so keep the window up and let measure
+        # return 0-width rather than dying on a NULL XftFont.
+        print("ui_x11: no usable font (fontconfig found no match for Sans-12)")
+    c.w = w
+    c.h = h
+    pal = ui_palette_get(c)
+    plat_fill_rect(c, 0, 0, c.w, c.h, pal.bg)
+    plat_present(c)
+    return c
+
+def plat_canvas_resize(c: UI, nw: int, nh: int) -> UI:
+    d = c.win_dc
+    scr = XDefaultScreen(d)
+    # same teardown order as plat_fini: the XftDraw wraps the pixmap and the
+    # GC, so it goes first
+    if c.old_bmp != 0:
+        XftDrawDestroy(c.old_bmp)
+        c.old_bmp = 0
+    if c.mem_dc != 0:
+        XFreeGC(d, c.mem_dc)
+        c.mem_dc = 0
+    if c.bmp != 0:
+        XFreePixmap(d, c.bmp)
+        c.bmp = 0
+    nb = XCreatePixmap(d, c.hwnd, nw, nh, XDefaultDepth(d, scr))
+    if nb == 0:
+        # keep the old size: a failed resize must not leave the app drawing
+        # into a freed surface
+        return c
+    c.bmp = nb
+    c.old_bmp = XftDrawCreate(d, c.bmp, XDefaultVisual(d, scr), XDefaultColormap(d, scr))
+    c.mem_dc = XCreateGC(d, c.bmp, 0, 0)
+    return c
+
+def plat_present(c: UI):
+    XCopyArea(c.win_dc, c.bmp, c.hwnd, c.mem_dc, 0, 0, c.w, c.h, 0, 0)
+    XFlush(c.win_dc)
+
+# ---- selection ownership ----
+# We own CLIPBOARD, which means another process can ASK us for the data at
+# any time — that request arrives as SelectionRequest (event 31) and must be
+# answered with XChangeProperty before the requester times out. Without this
+# a Ctrl+C followed by Ctrl+V inside the SAME app always pastes nothing.
+#
+# XSelectionRequestEvent (LP64): type 0 | requestor 32 | selection 40 |
+# target 48 | property 56 | time 64.
+def serve_selection_request(c: UI):
+    d = c.win_dc
+    requestor = load_i64(c.msg + 32)
+    target = load_i64(c.msg + 48)
+    prop = load_i64(c.msg + 56)
+    utf8 = x_atom(c, "UTF8_STRING")
+    if prop == 0:
+        # obsolete requestor: it wants the target back as the property
+        prop = target
+    n = st_get(c, 823)
+    buf = st_get(c, 822)
+    if target == utf8 and buf != 0:
+        XChangeProperty(d, requestor, prop, 31, 8, 0, n, buf)
+    else:
+        # refuse: property None = 0 tells the requester we cannot help
+        XChangeProperty(d, requestor, prop, 0, 0, 0, 0, 0)
+    reply = c.pt + 200
+    copy_event(d, c.msg, reply)
+    store_u8(reply + 0, 0, 31)
+    # SelectionNotify: type 0, requestor 32, selection 40, target 48,
+    # property 56, time 64
+    store_i64(reply + 32, requestor)
+    store_i64(reply + 40, load_i64(c.msg + 40))
+    store_i64(reply + 48, target)
+    store_i64(reply + 56, prop)
+    store_i64(reply + 64, load_i64(c.msg + 64))
+    # empty = 0, no mask = 0 -> deliver straight to the requestor
+    XSendEvent(d, requestor, 0, 0, reply)
+    XFlush(d)
+
+# copy the 192-byte event we are standing on into a scratch buffer
+def copy_event(d: int, src: int, dst: int):
+    j = 0
+    while j < 192:
+        store_u8(dst + j, 0, load_u8(src, j))
+        j = j + 1
+
+# ---- input ----
+
+# X11 keysym -> the portable VK alphabet the widget layer speaks. Only the
+# keys a widget actually asks about are mapped; anything else returns 0
+# and is dropped. The keysym constants are the standard XK_* values.
+def vk_of_keysym(ks: int) -> int:
+    if ks == 65288:
+        return vk_back()
+    if ks == 65289:
+        return vk_tab()
+    if ks == 65293 or ks == 65421:
+        return vk_return()
+    if ks == 65505 or ks == 65506:
+        return vk_shift()
+    if ks == 65507 or ks == 65508:
+        return vk_ctrl()
+    if ks == 65307:
+        return vk_esc()
+    if ks == 32:
+        return vk_space()
+    if ks == 65360:
+        return vk_home()
+    if ks == 65361:
+        return vk_left()
+    if ks == 65362:
+        return vk_up()
+    if ks == 65363:
+        return vk_right()
+    if ks == 65364:
+        return vk_down()
+    if ks == 65367:
+        return vk_end()
+    if ks == 65535:
+        return vk_delete()
+    # ASCII letters are their own VK codes (A=65 .. Z=90); X11 reports
+    # the lowercase keysym when shift is down on some layouts
+    if ks >= 97 and ks <= 122:
+        return ks - 32
+    if ks >= 65 and ks <= 90:
+        return ks
+    if ks >= 48 and ks <= 57:
+        return ks
+    return 0
+
+# bit k (0..7) of a keymap byte, by division (no shifts — decimal discipline)
+def km_bit(byte: int, k: int) -> int:
+    p = 1
+    i = 0
+    while i < k:
+        p = p * 2
+        i = i + 1
+    return (byte / p) % 2
+
+# Re-assert every key the server reports DOWN into the per-frame snapshot
+# (slots 4+vk). This is the X11 twin of the Windows backend's
+# GetAsyncKeyState loop: held keys read as continuously down regardless of
+# autorepeat gaps. Events have already set the short-press bits; this only
+# ever sets 1, never clears — key_snapshot_rotate (ui_frame) is the sole
+# clearer, exactly like the Windows path.
+def keymap_sweep(c: UI):
+    d = c.win_dc
+    km = c.pt + 96
+    XQueryKeymap(d, km)
+    kc = 8
+    while kc < 256:
+        if km_bit(load_u8(km, kc / 8), kc % 8) == 1:
+            vk = vk_of_keysym(XKeycodeToKeysym(d, kc, 0))
+            if vk >= 1 and vk <= 255:
+                st_set(c, 4 + vk, 1)
+        kc = kc + 1
+
+# Push the UTF-8 bytes at `p` onto the text queue as UNICODE CODEPOINTS.
+#
+# The queue is read back by ui_char_str (ui.ax), which treats every unit as
+# a codepoint and re-encodes it with cp_utf8 — exactly what Windows'
+# WM_CHAR delivers (UTF-16 units). Pushing X11's raw UTF-8 bytes instead
+# would re-encode each byte and turn "é" into "Ã©", so decode first.
+# Control characters (< 32) are dropped: they stay key events.
+def push_utf8_text(c: UI, p: int, n: int):
+    i = 0
+    while i < n:
+        b0 = load_u8(p, i)
+        if b0 < 128:
+            if b0 >= 32:
+                ui_char_push(c, b0)
+            i = i + 1
+        elif b0 < 224 and i + 1 < n:
+            ui_char_push(c, (b0 - 192) * 64 + load_u8(p, i + 1) - 128)
+            i = i + 2
+        elif b0 < 240 and i + 2 < n:
+            ui_char_push(c, (b0 - 224) * 4096 + (load_u8(p, i + 1) - 128) * 64 + load_u8(p, i + 2) - 128)
+            i = i + 3
+        elif i + 3 < n:
+            ui_char_push(c, (b0 - 240) * 262144 + (load_u8(p, i + 1) - 128) * 4096 + (load_u8(p, i + 2) - 128) * 64 + load_u8(p, i + 3) - 128)
+            i = i + 4
+        else:
+            i = i + 1
+
+# XEvent field offsets on x86-64 Linux (LP64), verified against libX11's
+# Xlib.h. The trap: `serial` is `unsigned long` = 8 BYTES here, so every
+# field after `type` sits 4 bytes later than a 32-bit reading would put it
+# (upstream even wraps these structs in -Wpadded for exactly this reason).
+#
+#   0  type (int, every event struct)
+#      serial 8 | send_event 16 | display 24 | window 32
+#   XKeyEvent:    root 40 | subwindow 48 | time 56 | x 64 | y 68
+#                x_root 72 | y_root 76 | state 80 | keycode 84
+#   XButtonEvent: ... state 80 | button 84
+#   XClientMessage: message_type 40 | format 48 | data 56
+#   XSelectionEvent: requestor 32 | selection 40 | target 48
+#                    property 56 | time 64
+#   sizeof(XEvent) = 192, sizeof(XWindowAttributes) = 144
+def plat_pump(c: UI) -> UI:
+    d = c.win_dc
+    c.dn_prev = c.dn
+    if d == 0 or c.hwnd == 0:
+        c.open = False
+        return c
+    # honour a plat_close() request (slot 824 — see the header note)
+    if st_get(c, 824) != 0:
+        c.open = False
+        return c
+    n = XPending(d)
+    if n == 0:
+        # idle cap: the Windows backend blocks on MsgWaitForMultipleObjects
+        # for c.cap_ms (~66 fps). X11 has no equivalent blocking call, so
+        # sleep for the same budget — otherwise an idle window spins a core.
+        ts = c.pt + 400
+        store_i64(ts, 0)
+        store_i64(ts + 8, c.cap_ms * 1000000)
+        nanosleep(ts, 0)
+        n = XPending(d)
+    i = 0
+    closed = False
+    while i < n:
+        XNextEvent(d, c.msg)
+        t = i32_at(c.msg)
+        if t == 2:
+            # KeyPress: XLookupString returns the composed UTF-8 bytes,
+            # which feed the text queue exactly like WM_CHAR did on
+            # Windows (control characters stay key events, not text)
+            ks = XLookupKeysym(c.msg, 0)
+            vk = vk_of_keysym(ks)
+            if vk != 0:
+                st_set(c, 4 + vk, 1)
+            buf = c.pt + 16
+            # XLookupString RETURNS the byte count; the 4th arg is an
+            # XComposeStatus that is only written during IME composition,
+            # so passing 0 keeps a stale buffer from being read as a length.
+            blen = XLookupString(c.msg, buf, 64, 0, 0)
+            push_utf8_text(c, buf, blen)
+        elif t == 6:
+            # MotionNotify: the pointer moved over the window.
+            # XMotionEvent (LP64): x 64, y 68 — window-relative, which is
+            # exactly what ui_mouse_in hit-tests against.
+            c.mx = i32_at(c.msg + 64)
+            c.my = i32_at(c.msg + 68)
+        elif t == 5:
+            # ButtonRelease (button at 84): track the held state; X11 has
+            # no "is button down" poll, so press/release pairs own it
+            btn = i32_at(c.msg + 84)
+            if btn == 1:
+                c.dn = False
+            elif btn == 2:
+                c.dn2 = False
+        elif t == 4:
+            # ButtonPress: buttons 4/5 are the vertical wheel (X11 has no
+            # wheel messages); WHEEL_DELTA = 120 per notch, like Windows
+            btn = i32_at(c.msg + 84)
+            if btn == 1:
+                c.dn = True
+            elif btn == 2:
+                c.dn2 = True
+            # X button 4 is wheel-UP and 5 is wheel-down; the widget layer
+            # scrolls with `scroll - wheel/120`, so up must be POSITIVE,
+            # matching WM_MOUSEWHEEL's sign on Windows.
+            if btn == 4:
+                st_set(c, 544, st_get(c, 544) + 120)
+            elif btn == 5:
+                st_set(c, 544, st_get(c, 544) - 120)
+        elif t == 31:
+            serve_selection_request(c)
+        elif t == 33:
+            # ClientMessage carrying WM_DELETE_WINDOW: the user closed us
+            if i32_at(c.msg + 40) == load_i64(c.pt):
+                closed = True
+        i = i + 1
+    if closed:
+        c.open = False
+        return c
+    # held keys: re-assert everything the server still reports down (see
+    # keymap_sweep) so Shift/Ctrl and autorepeated keys do not flicker
+    keymap_sweep(c)
+    # window size: follow the WM through XGetWindowAttributes.
+    # XWindowAttributes is 144 bytes on x64 and Xlib fills ALL of it, so it
+    # needs a 144-byte buffer — c.msg (192B) is free here, all events are
+    # already drained. The first six members are int: x 0, y 4, width 8,
+    # height 12, border_width 16, depth 20.
+    a = c.msg
+    XGetWindowAttributes(d, c.hwnd, a)
+    nw = i32_at(a + 8)
+    nh = i32_at(a + 12)
+    if nw > 0 and nh > 0:
+        if nw != c.w or nh != c.h:
+            c = ui_resize_canvas(c, nw, nh)
+    return c
+
+# Aoxn passes UI BY VALUE, so `c.open = False` here would only touch a
+# local copy and the app's `while c.open` loop would spin forever. X11 has
+# no DestroyWindow that makes a later query fail the way IsWindow() does
+# on Windows, so the close request travels through the shared heap block
+# (slot 824) and plat_pump picks it up on the next frame.
+def plat_close(c: UI):
+    if c.win_dc != 0 and c.hwnd != 0:
+        XUnmapWindow(c.win_dc, c.hwnd)
+        st_set(c, 824, 1)
+
+def plat_fini(c: UI):
+    d = c.win_dc
+    if d != 0:
+        # XftDraw wraps the pixmap, so it must be destroyed BEFORE the
+        # pixmap and the GC it draws through — freeing them first leaves
+        # the XftDraw pointing at freed server resources.
+        if c.old_bmp != 0:
+            XftDrawDestroy(c.old_bmp)
+        if c.mem_dc != 0:
+            XFreeGC(d, c.mem_dc)
+        if c.bmp != 0:
+            XFreePixmap(d, c.bmp)
+        if c.font != 0:
+            XftFontClose(d, c.font)
+        if c.font_big != 0:
+            XftFontClose(d, c.font_big)
+        if c.font_mono != 0:
+            XftFontClose(d, c.font_mono)
+        if c.hwnd != 0:
+            XDestroyWindow(d, c.hwnd)
+        XCloseDisplay(d)
+    if st_get(c, 820) != 0:
+        free(st_get(c, 820))
+    if st_get(c, 822) != 0:
+        free(st_get(c, 822))
+
+# X11 has no modal alert: a native dialog would need a nested event loop,
+# and the toolkit polls events in plat_pump. Printing keeps the output
+# where a headless run can see it.
+def plat_alert(text: string, caption: string):
+    print(caption + ": " + text)
+
+# ---- clipboard ----
+# X11 clipboards are selections: the owner keeps the bytes and the paste
+# side pulls them on request. We own CLIPBOARD and answer a UTF8_STRING
+# request, which is the interoperable minimum every other toolchain
+# honors. The bytes live in the shared block (slots 822/823) so the
+# selection owner can serve them on a later event-loop turn.
+#
+# SelectionNotify (event 31) fields: type 0 | requestor at 24 | selection
+# 32 | target 40 | property 48 | time 56.
+
+def x_atom(c: UI, name: string) -> int:
+    return XInternAtom(c.win_dc, name, 0)
+
+def plat_clip_set(c: UI, s: string):
+    d = c.win_dc
+    if d == 0 or c.hwnd == 0:
+        return
+    if st_get(c, 822) == 0:
+        st_set(c, 822, malloc(65536))
+    buf = st_get(c, 822)
+    n = len(s)
+    if n > 65535:
+        n = 65535
+    src = as_ptr(s)
+    j = 0
+    while j < n:
+        store_u8(buf + j, 0, load_u8(src, 0))
+        src = src + 1
+        j = j + 1
+    store_u8(buf + n, 0, 0)
+    st_set(c, 823, n)
+    XSetSelectionOwner(d, x_atom(c, "CLIPBOARD"), c.hwnd, 0)
+
+def plat_clip_get(c: UI) -> string:
+    d = c.win_dc
+    if d == 0 or c.hwnd == 0:
+        return ""
+    sel = x_atom(c, "CLIPBOARD")
+    if XGetSelectionOwner(d, sel) == 0:
+        return ""
+    prop = x_atom(c, "AOXN_CLIP")
+    XConvertSelection(d, sel, x_atom(c, "UTF8_STRING"), prop, c.hwnd, 0)
+    XFlush(d)
+    # The owner answers with SelectionNotify on a later server turn, so we
+    # pump the queue until it shows up. Anything else we dequeue MUST be put
+    # back (XPutBackEvent) — otherwise a Ctrl+V would swallow the very next
+    # event, including the WM_DELETE_WINDOW that closes the window, and the
+    # app would become unkillable by its close button.
+    tries = 0
+    while tries < 64:
+        tries = tries + 1
+        if XPending(d) == 0:
+            XSync(d, 0)
+            continue
+        XNextEvent(d, c.msg)
+        if i32_at(c.msg) == 31:
+            if i32_at(c.msg + 56) == prop:
+                return read_clip_prop(c, prop)
+        XPutBackEvent(d, c.msg)
+        # we are back where we started; stop rather than spin
+        return ""
+    return ""
+
+# read the UTF8_STRING property back off our own window.
+# XGetWindowProperty takes THREE out-parameters that Xlib writes through
+# the caller's pointers: nitems, bytes_after and — crucially — `data`,
+# which Xlib either points at memory we supplied or at memory it
+# allocated. Aoxn has no out-parameters, so the extern is declared with a
+# fixed 11 arguments and each out-slot is the ADDRESS of a scratch cell
+# (c.rect here). The data slot is read back with load_i64 after the call.
+#
+# `delete` = 1 releases the property after the read, so a Ctrl+V does not
+# leak server-side storage on every paste.
+def read_clip_prop(c: UI, prop: int) -> string:
+    d = c.win_dc
+    # c.rect holds the out-params: [0] actual_type, [8] actual_format,
+    # [16] nitems, [24] bytes_after, [32] prop_return (the DATA pointer).
+    # We pass the address of each; Xlib writes through them.
+    store_i64(c.rect, 0)
+    store_i64(c.rect + 8, 0)
+    store_i64(c.rect + 16, 0)
+    store_i64(c.rect + 24, 0)
+    store_i64(c.rect + 32, 0)
+    # fixed args: (dpy, w, property, req_type, long_offset, long_length,
+    # delete) — the four out-params follow.
+    XGetWindowProperty(d, c.hwnd, prop, 0, 0, 65536, 1,
+        c.rect, c.rect + 8, c.rect + 16, c.rect + 24, c.rect + 32)
+    n = i32_at(c.rect + 16)
+    p = load_i64(c.rect + 32)
+    if n <= 0 or p == 0:
+        return ""
+    if n > 65535:
+        n = 65535
+    out = utf8z_string(p, n)
+    # delete=1 makes Xlib hand us an Xmalloc'd block even for a small
+    # transfer, so the buffer is ours to release
+    XFree(p)
+    return out
+
+# bytes [0, n) at p as a fresh NUL-terminated Aoxn string
+def utf8z_string(p: int, n: int) -> string:
+    out = malloc(n + 1)
+    j = 0
+    while j < n:
+        b = load_u8(p, j)
+        if b == 0:
+            break
+        store_u8(out + j, 0, b)
+        j = j + 1
+    store_u8(out + j, 0, 0)
+    return as_string(out)

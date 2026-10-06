@@ -358,18 +358,28 @@ def write_file(path: string, content: string) -> bool:
 # ---- process location ----
 #
 # A compiled program cannot learn where it lives on its own: `main` takes no
-# arguments and Aoxn has no argv/cwd builtin. `GetModuleFileNameA` is how the
-# Windows loader answers that, and kernel32 is already linked through the CRT,
-# so this needs no compiler change and no `-l`.
+# arguments and Aoxn has no argv/cwd builtin. Windows answers through
+# `GetModuleFileNameA` (kernel32 is linked through the CRT, so this needs no
+# compiler change and no `-l`); Linux answers through `readlink` on
+# `/proc/self/exe` (extern declarations are prototypes — see os.ax).
 
 extern def GetModuleFileNameA(module: int, buf: int, size: int) -> int
 extern def GetModuleHandleA(name: int) -> int
+extern def readlink(path: string, buf: int, size: int) -> int
 
 # full path of the running executable, without a trailing separator
 def exe_path() -> string:
     buf = malloc(1024)
-    n = GetModuleFileNameA(GetModuleHandleA(0), buf, 1024)
+    if target_os() == "windows":
+        n = GetModuleFileNameA(GetModuleHandleA(0), buf, 1024)
+        if n <= 0:
+            free(buf)
+            return ""
+        store_u8(buf, n, 0)
+        return as_string(buf)
+    n = readlink("/proc/self/exe", buf, 1023)
     if n <= 0:
+        free(buf)
         return ""
     store_u8(buf, n, 0)
     return as_string(buf)
@@ -401,9 +411,13 @@ def exe_dir() -> string:
 
 # Filesystem location of an asset emitted beside the executable. The `name` is
 # what `styles_fingerprint()` returns; a server maps a request URL onto this
-# directory.
+# directory. The separator matches the platform's own convention (both sides
+# accept "/" through the C stdio layer, but Windows emits "\" for parity with
+# the paths the compiler itself prints).
 def asset_path(name: string) -> string:
-    return exe_dir() + "\\assets\\" + name
+    if target_os() == "windows":
+        return exe_dir() + "\\assets\\" + name
+    return exe_dir() + "/assets/" + name
 
 # run a shell command, returning the raw C `system()` value: a wait status on
 # POSIX, the process exit code on Windows. Most callers want `system_exit_code`

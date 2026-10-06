@@ -5,6 +5,84 @@ minor bumps while pre-1.0: each minor version is a language milestone.
 
 ## [Unreleased]
 
+## [0.46.0] - 2026-10-06
+
+Theme: **Linux is a supported platform again, and the UI toolkit gains a
+second backend through the same `plat_*` contract** — plus two toolkit
+capabilities that were on the todo list: horizontal scroll areas and a
+monospace font.
+
+### Platform: Linux (compiler + stdlib + suite)
+
+- **The compiler builds and runs on Linux** (v0.30.0 had cut the platform
+  list to Windows alone). `src/platform.rs` grows a per-OS answer again:
+  ELF objects (`.o`), executables without an extension, no `/STACK` link
+  flag (the main thread's stack is governed by RLIMIT_STACK), and `-lm`
+  added at link time because Linux keeps C math in a separate library.
+  `src/setup/` was already cfg-gated, so `aoxn-setup` builds there as a
+  stub that refuses to run — the installer stays a Windows artifact.
+- **`target_os()` folds the OS the compiler was BUILT on** — `"windows"`
+  on a Windows build, `"linux"` on a Linux build, `"other"` elsewhere. The
+  self-hosted compiler needs NO new mirror: `selfhost/codegen.ax` folds
+  the builtin by calling `target_os()` itself, a value burned in by
+  whatever compiler built it, so every stage of the fixed-point chain on
+  one machine folds the same host OS and the fixed point stays
+  byte-identical by construction (`docs/spec.md` §Platform query).
+- **The stdlib branches, it does not fork.** `os.ax` is now dual-platform
+  over one file: mkdir/rmdir/unlink/rename/stat/lstat/getenv/setenv/
+  unsetenv/getcwd/chdir/opendir/readdir (with the x86-64 glibc struct
+  offsets documented in the header) serve Linux while the `W` Win32 calls
+  keep serving Windows — an unreferenced `extern def` emits no symbol
+  reference, so each platform links only its own side.
+  `stdlib.ax`'s `exe_path()` answers through `/proc/self/exe` on Linux and
+  `asset_path()` uses the platform separator.
+- **`net/http` and the `openai` transport stay Windows-only, honestly.**
+  The transport rides WinHTTP and the language has no TLS stack to replace
+  it with; the entry points now return a clean "no transport on this
+  platform" runtime error on Linux instead of failing to link.
+- **CI gains a Linux job** (`ubuntu-latest`): the whole suite, plus
+  `examples/ui_probe_x11.ax` driven for 30 real frames under Xvfb — the
+  check that the X11 backend LINKS and its event loop honours close.
+
+### Platform: the X11 UI backend (rewritten)
+
+- **`stdlib/ui_x11.ax` is back, rewritten against the v3 widget layer**
+  (the v0.29-era file was removed in v0.30.0 and spoke the older
+  contract). Xlib for the window and input, Xft for antialiased UTF-8
+  text, an off-screen Pixmap for double buffering, the same
+  `plat_*` primitive set `ui_win.ax` implements — `tests/ui.rs` now pins
+  BOTH backends to that set, so a new primitive cannot land in one only.
+  Link with `-l X11 -l Xft`.
+- Keyboard state is swept with `XQueryKeymap` at the end of each pump
+  (plus KeyPress-event bits for click-short presses), so held keys read
+  continuously down instead of flickering at half the frame rate between
+  X11's release+press autorepeat pairs — the same observable behaviour as
+  the Windows backend's per-frame `GetAsyncKeyState` snapshot.
+- The clipboard is the X11 selection protocol done properly: we own
+  CLIPBOARD, answer `UTF8_STRING` requests, and honour
+  `SelectionRequest`/`SelectionNotify` with the out-param-packed
+  `XGetWindowProperty` call (12 arguments, four written through
+  pointers).
+- The close request travels through shared-block slot **824** (Aoxn
+  passes `UI` by value, so `plat_close` cannot set a field the app loop
+  would see; the old slot 532 is the v0.45 caret cache). Slots 826/827
+  are documented in `stdlib/ui.ax`'s header alongside it.
+
+### UI toolkit
+
+- **Horizontal scroll areas**: `ui_scroll_begin_h(c, x, y, w, h, scroll_x,
+  content_w) -> int` + `ui_scroll_end_h(c)` — a bottom scrollbar (drag to
+  scroll; wheel support is future work) and a clip that excludes the
+  scrollbar row. Nests with the vertical variant: the clip stack
+  intersects, so begin+begin_h+draw+end+end_h leaves exactly the content
+  region. (`docs/todo.md` item 5.)
+- **Monospace font support**: `ui_font_mono(c) -> UI` points the widget
+  layer's body font at a monospace face (Consolas on Windows, the
+  fontconfig `Monospace` alias on Linux); `ui_font_sans(c) -> UI`
+  restores the face the backend opened at init (parked in slot 826).
+  Both backends create the face at `plat_init` and free it at
+  `plat_fini`. (`docs/todo.md` item 5.)
+
 ## [0.45.0] - 2026-10-05
 
 Theme: **the UI toolkit gets a performance and correctness pass.** Same

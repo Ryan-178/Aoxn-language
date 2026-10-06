@@ -1,51 +1,79 @@
 # Platform support
 
-**Aoxn targets Windows x86_64. That is the whole platform list.**
+**Aoxn's first-class platform is Windows x86_64. Linux x86_64 is supported
+for the compiler, the standard library and the X11 UI backend as of
+v0.46.0.**
 
-Decided in v0.30.0 (2026-10-02): one platform, one installer, one CI job,
-one windowing backend. Anything that existed only to serve macOS or Linux was
-removed rather than left to rot.
+v0.30.0 cut the platform list down to Windows alone (one installer, one CI
+job, one windowing backend). v0.46.0 brings Linux back as a supported
+target — the compiler, the whole test suite and an X11 UI backend
+rewritten against the v3 `plat_*` contract all run on it — while Windows
+keeps everything that is Windows-specific: the installer, the release
+packaging and the Win32/GDI UI backend. macOS remains unsupported (the
+Cocoa surface needs struct-by-value externs the language cannot express;
+see `docs/ui.md`).
 
-## What ships
+## What ships where
 
-| | |
+| | Windows (first-class) | Linux (v0.46.0) |
+|---|---|---|
+| Compiler | `aoxn.exe` | `aoxn` (ELF objects, `-lm` linked automatically) |
+| Installer | `Aoxn-<version>-Setup.exe` | none — build from source |
+| Standard library | full, including `stdlib/net` (WinHTTP) | full **except** the `net/http` + `openai` transports (honest runtime error) |
+| UI backend | Win32/GDI (`stdlib/ui_win.ax`) | Xlib + Xft (`stdlib/ui_x11.ax`) |
+| UI link flags | `-l user32 -l gdi32` | `-l X11 -l Xft` |
+| CI | `windows-latest`, whole suite | `ubuntu-latest`, whole suite + Xvfb probe |
+| External tools | clang + MSVC Build Tools | clang (distro packages) |
+
+## The invariants that make both platforms one codebase
+
+- **`target_os()` folds the BUILD host's OS.** `"windows"` on a Windows
+  build, `"linux"` on a Linux build (v0.46.0), `"other"` elsewhere. The
+  self-hosted compiler has no platform check of its own:
+  `selfhost/codegen.ax` folds `target_os()` by calling the builtin, whose
+  value was burned in by the compiler that built it — so every stage of
+  the fixed-point chain agrees, and the fixed point (both stages built
+  and run on the same machine) stays byte-identical by construction.
+- **The stdlib branches, it does not fork.** `os.ax`, `stdlib.ax`
+  (`exe_path`/`asset_path`) and the UI backends select their platform
+  code with `if target_os() == "windows"` at runtime. Every extern for
+  both platforms is declared in both files; an unreferenced `extern def`
+  produces no symbol reference in the emitted C, so the Windows build
+  never links Xlib and the Linux build never links kernel32.
+- **`stack_link_flag()`/`default_link_libs()`** (`src/platform.rs`):
+  Windows links `-Wl,/STACK:8388608` and folds C math into the CRT;
+  Linux passes no stack flag (RLIMIT_STACK governs) and adds `-lm`.
+- **The installer stays Windows-only.** `src/setup/` is cfg-gated: on
+  Linux the `aoxn-setup` binary builds as a stub that refuses to run.
+  Linux users install from source (`cargo build`).
+
+## What v0.46.0 brought back
+
+| Restored | Notes |
 |---|---|
-| Compiler | `aoxn.exe` (MSVC host, `x86_64-pc-windows-msvc`) |
-| Installer | `Aoxn-<version>-Setup.exe` — one file, installs everything |
-| Standard library | `stdlib/stdlib.ax` + the UI toolkit (`ui.ax`, `ui_draw.ax`, `ui_win.ax`) |
-| UI backend | Win32/GDI — link `-l user32 -l gdi32` |
-| CI | `windows-latest`, on every push |
-| External tools | clang (LLVM) for the C backend; MSVC Build Tools for linking |
+| `stdlib/ui_x11.ax` | rewritten against the v3 `plat_*` contract: Xft text, selection-based clipboard, event-driven mouse, keymap-swept keyboard state, slot-824 close request |
+| `examples/ui_probe_x11.ax` | 30-frame smoke probe, run under Xvfb in CI |
+| The Linux CI job | whole suite + Xvfb probe (`apt install clang libx11-dev libxft-dev libfontconfig1-dev xvfb`) |
+| POSIX link behavior | `-lm` at link time; no `/STACK` flag; `.o`/no-extension artifacts |
 
-## What was removed in v0.30.0
+## Still Windows-only (deliberately)
 
-| Removed | Why |
-|---|---|
-| `stdlib/ui_x11.ax`, `examples/ui_probe_x11.ax` | the X11 backend existed for Linux + macOS (XQuartz) |
-| `web/server_posix.ax`, `web/sock_posix.ax` | POSIX sockets/server entry points |
-| `dist/install.sh`, the POSIX branch of `dist/package.sh` | one installer, Windows only |
-| Linux and macOS CI jobs; the cross-platform release matrix | one artifact to verify |
-| POSIX link flags (`-Wl,-rpath`, `-lm`) from `src/lib.rs` | Windows folds C math into the CRT |
+- **`net/http` + `openai` transports** — the HTTP layer rides WinHTTP
+  (TLS, proxies, redirects for free). There is no TLS stack in the
+  language to replace it on Linux; the entry points return a clean
+  "no transport on this platform" error instead of failing to link.
+- **The installer / `aoxn-setup`** — one artifact, Windows packaging.
+- **The web benchmark suite's server** (`web/`) — its sockets speak
+  ws2_32; a POSIX socket module is future work, not a port.
+- **macOS** — no Cocoa backend is expressible (struct-by-value externs);
+  nothing changed since the v0.30.0 removal.
 
-## What stays, and why
+## History
 
-- **`target_os()` is still a builtin.** User programs can fold it, so the
-  language keeps the feature; on a supported build it is always `"windows"`.
-  The self-hosted compiler (`selfhost/codegen.ax`) must fold it identically,
-  which the fixed-point test checks.
-- **`src/platform.rs` keeps its helpers** (`exe_ext`, `obj_ext`,
-  `stack_link_flag`, `target_os_name`). They now have exactly one answer each,
-  but call sites read as intent rather than as `cfg!` noise.
-- **`clang` is still external.** The compiler emits C and shells out; the
-  installer provisions it through winget and `aoxn doctor` verifies it.
-- **The wiki is frozen** (`wiki/`), so pages there still describe the old
-  multi-platform matrix. `docs/` is the living documentation.
-
-## Porting back
-
-Nothing structurally blocks it: there is no `winapi`/`os::windows` use in the
-compiler core, the C emitter is plain text, and the `plat_*` primitive
-contract means a second windowing backend would slot in beside `ui_win.ax`.
-What a port would need: the POSIX link flags, a socket backend for the web
-suite, a CI job, and an installer for that platform — roughly what v0.29.x
-had.
+- **v0.30.0 (2026-10-02)**: platform list cut to Windows alone; the
+  v0.29-era X11 backend, POSIX sockets, POSIX link flags and the
+  Linux/macOS CI jobs were removed rather than left to rot.
+- **v0.46.0 (2026-10-06)**: Linux returns as a supported target —
+  compiler + stdlib + suite green on ubuntu-latest, and the UI toolkit
+  gains a second backend through the same `plat_*` contract that kept
+  `ui_draw.ax` portable all along.

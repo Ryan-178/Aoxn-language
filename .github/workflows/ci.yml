@@ -6,8 +6,9 @@ on:
   pull_request:
 
 jobs:
-  # Aoxn targets Windows only (v0.30.0): one platform, one installer, one UI
-  # backend. This job is the whole test matrix.
+  # Windows is the FIRST-CLASS platform: the installer, the release
+  # packaging and the Win32/GDI UI backend live here. This job runs the
+  # whole suite.
   windows:
     runs-on: windows-latest
     steps:
@@ -48,3 +49,50 @@ jobs:
           $count = .\primes.exe
           if ("$count" -ne "9592") { throw "primes returned $count, expected 9592" }
 
+  # Linux (v0.46.0): the compiler itself (ELF objects, -lm, no /STACK flag),
+  # the whole suite, and the X11 UI backend — linked against the real
+  # libX11/libXft, then driven for 30 real frames under Xvfb by
+  # examples/ui_probe_x11.ax. The Windows-only surface (installer stub,
+  # WinHTTP transport) stays gated to the windows job.
+  linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-
+
+      # clang compiles the generated C; the X headers are needed to LINK a
+      # ui_x11 program (X11 + Xft + their fontconfig/freetype deps)
+      - name: Install toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang libx11-dev libxft-dev libfontconfig1-dev xvfb
+
+      - name: Build
+        run: cargo build
+
+      - name: Test
+        run: cargo test
+
+      - name: Smoke test
+        run: |
+          cargo run -- run examples/hello.ax
+          cargo run -- run examples/strings.ax
+          cargo run -- run examples/stdlib_demo.ax
+          cargo run -- build examples/primes.ax -o primes
+          count=$(./primes)
+          if [ "$count" != "9592" ]; then echo "primes returned $count, expected 9592"; exit 1; fi
+
+      - name: X11 backend probe (Xvfb)
+        run: |
+          cargo run -- build examples/ui_probe_x11.ax -o ui-probe -l X11 -l Xft
+          xvfb-run -a ./ui-probe

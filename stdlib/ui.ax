@@ -6,9 +6,10 @@
 #
 # The widgets and the event loop live in the platform backend, which imports
 # this file and re-exports everything in one flat namespace:
-#   import * from "stdlib/ui_win"     # Windows (GDI) — link user32 gdi32
-# Aoxn is a Windows-only language (v0.30.0), so the Win32/GDI backend is the
-# only one; it defines the names the portable half expects.
+#   import * from "stdlib/ui_win"     # Windows (Win32/GDI) — link user32 gdi32
+#   import * from "stdlib/ui_x11"     # Linux (Xlib/Xft)  — link X11 Xft
+# Both backends implement the SAME plat_* primitive set (tests/ui.rs pins
+# that); the portable half names nothing platform-specific.
 #
 # Design (forced by the language, kept Qt-like in spirit):
 #   - Aoxn has no function pointers or closures, so callbacks/signals are
@@ -19,7 +20,7 @@
 #     block (8192 bytes = 1024 i64 slots) shared by every copy:
 #       0        active widget id (press claim, one drag at a time)
 #       1..3     frame arena: base ptr / bump offset / capacity
-#       4..259   key_cur[vk]  (0/1, GetAsyncKeyState snapshot)
+#       4..259   key_cur[vk]  (0/1, the per-frame key snapshot)
 #       260..515 key_prev[vk] (previous frame's snapshot, for edge detection)
 #       516..531 palette (16): bg panel text text_dim widget widget_hover
 #                widget_down border accent groove sel sel_text
@@ -44,14 +45,25 @@
 #       816      focused textbox caret owner id (caret lives at 539)
 #       817      event block ptr (v3): connect[256] + 32-event ring queue
 #       818      line cache block ptr (v3): line starts for multi-line edit
+#       819      textedit anchor of the drag in flight
+#       820/821  clip-rect stack base ptr / depth (both backends)
+#       822/823  clipboard buffer ptr / length (X11 selection owner state;
+#                  Windows keeps the bytes in GlobalAlloc instead)
+#       824      close request flag (X11 only: Aoxn passes UI by value, so
+#                  plat_close cannot set a field the app loop would see —
+#                  it flags here and plat_pump picks it up next frame)
+#       826      the sans body font handle (set by the backend's plat_init)
+#                  so ui_font_sans can restore it after ui_font_mono
+#                  pointed c.font at the monospace face
 #   - Per-frame text goes through a 64 KiB bump arena that resets every
 #     frame (utf16f/itoa10), so a steady-state UI leaks nothing. One-shot
 #     init strings use ui_utf16 (malloc) and are freed immediately.
 #   - Editing helpers (str_sub/str_insert/str_remove) malloc like string
 #     concat does: leaking is the language's by-design cost model.
 #
-# Platform status: Windows backend complete (stdlib/ui_win.ax). See
-# docs/ui.md for the widget reference and roadmap.
+# Platform status: the widget layer is portable; the backends are
+# stdlib/ui_win.ax (Windows, Win32/GDI) and stdlib/ui_x11.ax (Linux, Xlib +
+# Xft). See docs/ui.md for the widget reference and roadmap.
 
 import * from "../stdlib/stdlib.ax"
 # ---- values ----
@@ -184,6 +196,7 @@ struct UI:
     old_bmp: int
     font: int
     font_big: int
+    font_mono: int
     msg: int
     pt: int
     rect: int
@@ -203,8 +216,9 @@ struct UI:
 # zero-valued context (platform fields stay 0 until the backend fills them)
 def ui_new() -> UI:
     return UI(hwnd=0, win_dc=0, mem_dc=0, bmp=0, old_bmp=0, font=0, font_big=0,
-        msg=0, pt=0, rect=0, st=0, w=0, h=0, mx=-1, my=-1, dn=False,
-        dn_prev=False, dn2=False, open=False, frames=0, cap_ms=15, wheel=0)
+        font_mono=0, msg=0, pt=0, rect=0, st=0, w=0, h=0, mx=-1, my=-1,
+        dn=False, dn_prev=False, dn2=False, open=False, frames=0,
+        cap_ms=15, wheel=0)
 
 # allocate the shared heap block + frame arena + WM_CHAR queue. Used by the
 # platform backend at init and by headless tests of the portable half.

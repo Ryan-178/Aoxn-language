@@ -383,6 +383,12 @@ def net_http_request(method: string, url: string, headers: string, body: string,
 # directly. `body_len` 0 means "no body" and `body_ptr` is then ignored.
 def net_http_request_bytes(method: string, url: string, headers: string, body_ptr: int, body_len: int, ua: string, connect_ms: int, recv_ms: int) -> NetHttpResp:
     r = NetHttpResp(status=0, body="", request_id="", retry_after=0, err=0, errmsg="")
+    if target_os() != "windows":
+        # honest platform gate: the transport is WinHTTP, and there is no
+        # TLS stack in the language to replace it with on Linux yet
+        r.err = 1
+        r.errmsg = "net/http: no transport on this platform yet (WinHTTP is Windows-only; docs/platform-support.md)"
+        return r
     u = net_url_split(url)
     if len(u.host) == 0:
         r.err = 1
@@ -508,6 +514,10 @@ def net_http_stream_open(method: string, url: string, headers: string, body: str
 # carried by a string.
 def net_http_stream_open_bytes(method: string, url: string, headers: string, body_ptr: int, body_len: int, ua: string, connect_ms: int, recv_ms: int) -> NetHttpStream:
     s = NetHttpStream(session=0, conn=0, req=0, status=0, got=0, request_id="", err=0, errmsg="")
+    if target_os() != "windows":
+        s.err = 1
+        s.errmsg = "net/http: no transport on this platform yet (WinHTTP is Windows-only; docs/platform-support.md)"
+        return s
     u = net_url_split(url)
     if len(u.host) == 0:
         s.err = 1
