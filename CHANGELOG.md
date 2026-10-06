@@ -42,7 +42,14 @@ monospace font.
   platform" runtime error on Linux instead of failing to link.
 - **CI gains a Linux job** (`ubuntu-latest`): the whole suite, plus
   `examples/ui_probe_x11.ax` driven for 30 real frames under Xvfb — the
-  check that the X11 backend LINKS and its event loop honours close.
+  check that the X11 backend LINKS and its event loop honours close. The
+  first run caught two things a Windows-only check never sees and both are
+  fixed: `aoxn-setup`'s wizard call is now inside a `#[cfg(windows)]` block
+  (the console path serves every other platform), and the two SDK test
+  crates — which link `-l winhttp` and `-l ws2_32` — are `#![cfg(windows)]`
+  gated so they compile to nothing where those libraries do not exist.
+  Cross-checking locally: `cargo check --workspace --tests --target
+  x86_64-unknown-linux-gnu` (std-only target, no linker needed).
 
 ### Platform: the X11 UI backend (rewritten)
 

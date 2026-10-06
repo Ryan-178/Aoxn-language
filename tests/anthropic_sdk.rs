@@ -1,3 +1,5 @@
+#![cfg(windows)]
+
 //! stdlib/anthropic SDK tests.
 //!
 //! Two layers:
@@ -16,6 +18,10 @@
 //! Both drivers need `-l winhttp` (the externs are declared even where the
 //! gated paths never run), the mock needs `-l ws2_32`.
 
+//!
+//! Windows-only by construction: the drivers link `-l winhttp` and the
+//! mock links `-l ws2_32`, and there is no such library on Linux — the
+//! transport they exercise is Windows-only anyway (docs/platform-support.md).
 use std::path::PathBuf;
 use std::process::Command;
 

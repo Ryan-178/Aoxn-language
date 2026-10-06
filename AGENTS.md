@@ -1058,6 +1058,13 @@ crates/aoxn-pkg       package manager crate (its own dependency set; see above)
   `aoxn doctor` — a broken installer fails the build. `ubuntu-latest`
   (v0.46.0) runs the whole suite plus the X11 probe under Xvfb
   (`apt install clang libx11-dev libxft-dev libfontconfig1-dev xvfb`).
+- **Cfg-gated code needs a cross-check before it lands.** `rustup target
+  add x86_64-unknown-linux-gnu` (std only, no linker needed) +
+  `cargo check --workspace --tests --target x86_64-unknown-linux-gnu`
+  catches every `#[cfg(not(windows))]` mistake locally — the v0.46.0 CI run
+  caught `setup/main.rs` calling `ui::wizard` on Linux exactly because this
+  was not done. Windows-only test crates that link Windows libraries
+  (`winhttp`, `ws2_32`) are gated with `#![cfg(windows)]` at the top.
 - **Windows first-class, Linux supported (v0.46.0).** Do NOT add macOS
   claims or a Cocoa backend. The wiki is frozen and still describes older
   behavior; `docs/platform-support.md` is the current answer.

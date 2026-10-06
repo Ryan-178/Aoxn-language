@@ -131,10 +131,23 @@ fn main() -> ExitCode {
     }
 
     // The window calls this with the options its checkboxes produced, not
-    // with the defaults: that is the whole point of asking the user.
-    let start_install = move |opts: InstallOptions| start_worker(opts, &tx, cancel);
-    let code = ui::wizard(VERSION, &defaults, rx, cancel, Box::new(start_install));
-    ExitCode::from(code as u8)
+    // with the defaults: that is the whole point of asking the user. The
+    // wizard lives in `mod ui`, which is Windows-only — the cfg blocks keep
+    // it out of the non-Windows build entirely (the console branch above
+    // catches every other platform, since `!cfg!(windows)` is true there).
+    #[cfg(windows)]
+    {
+        let start_install = move |opts: InstallOptions| start_worker(opts, &tx, cancel);
+        let code = ui::wizard(VERSION, &defaults, rx, cancel, Box::new(start_install));
+        return ExitCode::from(code as u8);
+    }
+    #[cfg(not(windows))]
+    {
+        // exists so the `if` above keeps a statement after it on Linux,
+        // where the wizard block is compiled out; the console branch
+        // already returned
+        unreachable!("non-Windows builds take the console path")
+    }
 }
 
 /// Spawn the installation on a worker thread and report the outcome. Shared by
