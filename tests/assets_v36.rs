@@ -189,10 +189,16 @@ fn emitting_writes_the_bundle_and_its_references() {
     let written = assets.emit(&out_dir).expect("emit");
     assert!(written.len() >= 3, "expected bundle + stylesheet + png, got {written:?}");
     assert!(written.iter().all(|p| p.starts_with(&out_dir)), "wrote outside the target dir");
-    // the emitted stylesheet's url() must name a file that actually exists
+    // the emitted stylesheet of a.css is `a.<hash>.css`. Match by file NAME:
+    // the old spelling fell back to `…\assets\a…` with a literal backslash,
+    // which never matched on Linux — and this is one of the tests that DOES
+    // run on a clang-less host (it needs no compiler, just collect + emit).
     let css_file = written
         .iter()
-        .find(|p| p.to_string_lossy().contains("a.css") || p.to_string_lossy().starts_with(&format!("{}\\a", out_dir.display())))
+        .find(|p| {
+            let name = p.file_name().and_then(|n| n.to_str()).unwrap_or("");
+            name.starts_with("a.") && name.ends_with(".css")
+        })
         .expect("a stylesheet was emitted");
     let css = std::fs::read_to_string(css_file).unwrap();
     if let Some(name) = css.split("url(").nth(1).and_then(|s| s.split(')').next()) {

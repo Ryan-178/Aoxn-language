@@ -64,10 +64,22 @@ fn cache(dir: &Path) -> PathBuf {
     dir.join("cache")
 }
 
+/// The three tests below compile and run programs (or ask `doctor` to), which
+/// needs clang. On a host without one — a Linux CI box that only wants the
+/// pure-Rust surface, for example — they skip, exactly like the SDK / UI /
+/// self-hosting tests do.
+fn have_clang() -> bool {
+    aoxn::find_clang().is_some()
+}
+
 /// `import * from "stdlib"` works from an unrelated working directory — the
 /// whole point of a one-click install (docs/install.md).
 #[test]
 fn stdlib_imports_resolve_by_name_from_any_directory() {
+    if !have_clang() {
+        eprintln!("skipping: clang not found (set AOXN_CLANG or add clang to PATH)");
+        return;
+    }
     let scratch = Scratch::new("byname");
     let prog = scratch.write(
         "prog.ax",
@@ -87,6 +99,10 @@ fn stdlib_imports_resolve_by_name_from_any_directory() {
 /// unreleased stdlib without touching the install).
 #[test]
 fn aoxn_stdlib_env_redirects_bare_imports() {
+    if !have_clang() {
+        eprintln!("skipping: clang not found (set AOXN_CLANG or add clang to PATH)");
+        return;
+    }
     let scratch = Scratch::new("env");
     scratch.write(
         "mystdlib/mystdlib.ax",
@@ -142,6 +158,10 @@ fn bundled_examples_resolve_stdlib_by_name() {
 /// its own smoke test must pass too.
 #[test]
 fn doctor_reports_the_toolchain() {
+    if !have_clang() {
+        eprintln!("skipping: clang not found (set AOXN_CLANG or add clang to PATH)");
+        return;
+    }
     let scratch = Scratch::new("doctor");
     let cache_dir = cache(scratch.path()).display().to_string();
     let (code, out) = run_in(scratch.path(), &["doctor", "--json"], &[("AOXN_CACHE_DIR", &cache_dir)]);
