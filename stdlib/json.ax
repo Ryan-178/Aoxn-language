@@ -250,14 +250,23 @@ def j_arr_int(dom: JDom, i: int, k: int, dflt: int) -> int:
 
 struct JParse:
     src: string
+    sn: int        # len(src), computed ONCE — see j_at
     pos: int
     dom: JDom
     err: int       # 0 = ok, 1 = failed (first error wins)
     errmsg: string
     res: int       # extra result channel (hex escape value, ...)
 
+# The end-of-input test needs the source length, and `len()` on a string IS
+# strlen AT EVERY USE SITE (codegen emits __builtin_strlen inline). Testing it
+# here made the whole parser O(n^2): every character of every token paid a full
+# scan of the remaining document. Measured at -O3, identical shape, doubling the
+# document quadrupled the time (13 KB 19 ms, 30 KB 84 ms, 62 KB 343 ms,
+# 126 KB 1421 ms, 266 KB 7064 ms) and a 266 KB response took 7 s. The length is
+# a pure function of the immutable `src`, so it is computed once at the entry
+# point and carried here; `j_parse`/`j_parse_into` are the only constructors.
 def j_at(p: JParse) -> int:
-    if p.pos >= len(p.src):
+    if p.pos >= p.sn:
         return -1
     return load_u8(p.src, p.pos)
 
@@ -305,7 +314,7 @@ def jp_lit(p: JParse, word: string, kind: int, ival: int, fval: float) -> JParse
         p.pos = p.pos + 1
         i = i + 1
     dom = jdom_push(p.dom, kind, ival, fval, 0, 0)
-    return JParse(src=p.src, pos=p.pos, dom=dom, err=p.err, errmsg=p.errmsg, res=p.res)
+    return JParse(src=p.src, sn=p.sn, pos=p.pos, dom=dom, err=p.err, errmsg=p.errmsg, res=p.res)
 
 # ---- strings ----
 
@@ -334,11 +343,31 @@ def jp_hex4(p: JParse) -> JParse:
 # the source length: every output byte consumes at least one input byte
 # (escapes shrink, `\uXXXX` is 6 bytes -> <= 3 UTF-8 bytes, a surrogate pair
 # is 12 -> 4).
+#
+# The buffer is sized from what is LEFT of the input and then grown
+# geometrically, NOT allocated at `len(src)` up front. The old spelling made
+# every string allocate the whole document, and strings are never freed by
+# design (see the header): a 330 KB document with 20 000 strings pushed 6.29 GB
+# of allocator traffic through a 325 MB peak at ~33 KB/s. The amortized cost
+# of doubling is identical, and the peak becomes the sum of the actual string
+# lengths. `+ 8` is headroom: one iteration stores at most 4 bytes
+# (`net_cp_utf8`), and it is re-checked before every store.
+def JP_STR_CHUNK() -> int:
+    return 64
+
 def jp_str(p: JParse) -> JParse:
     p.pos = p.pos + 1
-    out = malloc(len(p.src) + 1)
+    cap = p.sn - p.pos
+    if cap > JP_STR_CHUNK():
+        cap = JP_STR_CHUNK()
+    if cap < 32:
+        cap = 32
+    out = malloc(cap + 8)
     oi = 0
     while True:
+        if oi + 8 > cap:
+            cap = cap * 2
+            out = realloc(out, cap + 8)
         c = j_at(p)
         if c == -1:
             return jp_fail(p, "unterminated string")
@@ -346,7 +375,7 @@ def jp_str(p: JParse) -> JParse:
             p.pos = p.pos + 1
             store_u8(out, oi, 0)
             dom = jdom_push(p.dom, J_STR(), 0, 0.0, out, 0)
-            return JParse(src=p.src, pos=p.pos, dom=dom, err=p.err, errmsg=p.errmsg, res=p.res)
+            return JParse(src=p.src, sn=p.sn, pos=p.pos, dom=dom, err=p.err, errmsg=p.errmsg, res=p.res)
         if c == 92:
             p.pos = p.pos + 1
             e = j_at(p)
@@ -417,6 +446,13 @@ def jp_str(p: JParse) -> JParse:
 
 # ---- numbers ----
 
+# the exponent ceiling `j_num_float` clamps at. 400 decimal places is far
+# past the double range (the last finite is ~1.8e308), so the clamped answer
+# is the IEEE one -- inf, 0.0 or a subnormal -- and the scaling loop stays
+# bounded at 400 iterations.
+def J_MAX_EXP() -> int:
+    return 400
+
 # pure: the mantissa/exponent text of a JSON number -> float
 def j_num_float(s: string) -> float:
     i = 0
@@ -456,7 +492,17 @@ def j_num_float(s: string) -> float:
         while i < len(s):
             c = load_u8(s, i)
             if c >= 48 and c <= 57:
-                e = e * 10 + (c - 48)
+                # Clamp while accumulating. A double saturates to inf/0 long
+                # before 10^400, so nothing above that is distinguishable --
+                # but the digit run itself used to be unbounded, which made
+                # `1e999999999` spin the scaling loop below for minutes (a DoS
+                # on any untrusted JSON: an API response, a user file). The
+                # accumulator could also wrap past i64 and come back SMALL,
+                # so the clamp has to be here, not only on the loop.
+                if e < J_MAX_EXP():
+                    e = e * 10 + (c - 48)
+                    if e > J_MAX_EXP():
+                        e = J_MAX_EXP()
                 i = i + 1
             else:
                 break
@@ -525,7 +571,7 @@ def jp_num(p: JParse) -> JParse:
     else:
         f = j_num_float(text)
         dom = jdom_push(p.dom, J_FLOAT(), 0, f, 0, 0)
-    return JParse(src=p.src, pos=p.pos, dom=dom, err=p.err, errmsg=p.errmsg, res=p.res)
+    return JParse(src=p.src, sn=p.sn, pos=p.pos, dom=dom, err=p.err, errmsg=p.errmsg, res=p.res)
 
 # ---- arrays ----
 
@@ -536,7 +582,7 @@ def jp_arr(p: JParse) -> JParse:
     if j_at(p) == 93:
         p.pos = p.pos + 1
         dom = jdom_push(p.dom, J_ARR(), kids.len, 0.0, kids.data, 0)
-        return JParse(src=p.src, pos=p.pos, dom=dom, err=p.err, errmsg=p.errmsg, res=p.res)
+        return JParse(src=p.src, sn=p.sn, pos=p.pos, dom=dom, err=p.err, errmsg=p.errmsg, res=p.res)
     while True:
         p = jp_value(p)
         if p.err == 1:
@@ -549,7 +595,7 @@ def jp_arr(p: JParse) -> JParse:
         elif c == 93:
             p.pos = p.pos + 1
             dom = jdom_push(p.dom, J_ARR(), kids.len, 0.0, kids.data, 0)
-            return JParse(src=p.src, pos=p.pos, dom=dom, err=p.err, errmsg=p.errmsg, res=p.res)
+            return JParse(src=p.src, sn=p.sn, pos=p.pos, dom=dom, err=p.err, errmsg=p.errmsg, res=p.res)
         else:
             return jp_fail(p, "expected ',' or ']' in array")
     # unreachable: every loop path returns; the checker needs a tail return
@@ -565,7 +611,7 @@ def jp_obj(p: JParse) -> JParse:
     if j_at(p) == 125:
         p.pos = p.pos + 1
         dom = jdom_push(p.dom, J_OBJ(), vals.len, 0.0, vals.data, keys.data)
-        return JParse(src=p.src, pos=p.pos, dom=dom, err=p.err, errmsg=p.errmsg, res=p.res)
+        return JParse(src=p.src, sn=p.sn, pos=p.pos, dom=dom, err=p.err, errmsg=p.errmsg, res=p.res)
     while True:
         p = jp_ws(p)
         if j_at(p) != 34:
@@ -589,7 +635,7 @@ def jp_obj(p: JParse) -> JParse:
         elif c == 125:
             p.pos = p.pos + 1
             dom = jdom_push(p.dom, J_OBJ(), vals.len, 0.0, vals.data, keys.data)
-            return JParse(src=p.src, pos=p.pos, dom=dom, err=p.err, errmsg=p.errmsg, res=p.res)
+            return JParse(src=p.src, sn=p.sn, pos=p.pos, dom=dom, err=p.err, errmsg=p.errmsg, res=p.res)
         else:
             return jp_fail(p, "expected ',' or '}' in object")
     # unreachable: every loop path returns; the checker needs a tail return
@@ -607,7 +653,7 @@ def j_parse(src: string) -> JParse:
 # SAME slab, so their child indices are already correct and no remapping is
 # needed. `p.dom.last` is the fragment's root.
 def j_parse_into(dom: JDom, src: string) -> JParse:
-    p = JParse(src=src, pos=0, dom=dom, err=0, errmsg="", res=0)
+    p = JParse(src=src, sn=len(src), pos=0, dom=dom, err=0, errmsg="", res=0)
     p = jp_value(p)
     if p.err == 1:
         return p
@@ -678,96 +724,146 @@ def j_fmt_f(f: float) -> string:
     store_u8(buf, last + 1, 0)
     return out + as_string(buf)
 
-# escape a string into a JSON string literal (WITH the surrounding quotes).
-# Control bytes below 32 become \u00XX except the named \b \f \n \r \t.
-# Bytes >= 128 pass through: JSON text is UTF-8, and so are Aoxn strings.
-def j_quote(s: string) -> string:
-    out = malloc(len(s) * 6 + 3)
-    store_u8(out, 0, 34)
-    oi = 1
+# A byte sink for the serializer. The language has no address-of, so the write
+# cursor travels BY VALUE and every append hands the struct back — the same
+# write-back discipline `JParse` and `Vec` use. Growing geometrically keeps
+# the whole serialize linear in the output size.
+struct JOut:
+    buf: int
+    n: int
+    cap: int
+
+def jw_reserve(w: JOut, need: int) -> JOut:
+    if w.n + need + 1 <= w.cap:
+        return w
+    newcap = w.cap * 2
+    if newcap < w.n + need + 1:
+        newcap = w.n + need + 1
+    if newcap == 0:
+        newcap = 64
+    w.buf = realloc(w.buf, newcap)
+    w.cap = newcap
+    return w
+
+def jw_byte(w: JOut, c: int) -> JOut:
+    w = jw_reserve(w, 1)
+    store_u8(w.buf, w.n, c)
+    w.n = w.n + 1
+    return w
+
+def jw_str(w: JOut, s: string) -> JOut:
+    n = len(s)
+    w = jw_reserve(w, n)
     i = 0
-    while i < len(s):
+    while i < n:
+        store_u8(w.buf, w.n + i, load_u8(s, i))
+        i = i + 1
+    w.n = w.n + n
+    return w
+
+# escape a string into a JSON string literal (WITH the surrounding quotes),
+# appending into the sink. Control bytes below 32 become \u00XX except the
+# named \b \f \n \r \t. Bytes >= 128 pass through: JSON text is UTF-8, and so
+# are Aoxn strings.
+def jw_quote(w: JOut, s: string) -> JOut:
+    w = jw_byte(w, 34)
+    n = len(s)
+    i = 0
+    while i < n:
         c = load_u8(s, i)
         if c == 34:
-            store_u8(out, oi, 92)
-            store_u8(out, oi + 1, 34)
-            oi = oi + 2
+            w = jw_byte(w, 92)
+            w = jw_byte(w, 34)
         elif c == 92:
-            store_u8(out, oi, 92)
-            store_u8(out, oi + 1, 92)
-            oi = oi + 2
+            w = jw_byte(w, 92)
+            w = jw_byte(w, 92)
         elif c == 10:
-            store_u8(out, oi, 92)
-            store_u8(out, oi + 1, 110)
-            oi = oi + 2
+            w = jw_byte(w, 92)
+            w = jw_byte(w, 110)
         elif c == 13:
-            store_u8(out, oi, 92)
-            store_u8(out, oi + 1, 114)
-            oi = oi + 2
+            w = jw_byte(w, 92)
+            w = jw_byte(w, 114)
         elif c == 9:
-            store_u8(out, oi, 92)
-            store_u8(out, oi + 1, 116)
-            oi = oi + 2
+            w = jw_byte(w, 92)
+            w = jw_byte(w, 116)
         elif c == 8:
-            store_u8(out, oi, 92)
-            store_u8(out, oi + 1, 98)
-            oi = oi + 2
+            w = jw_byte(w, 92)
+            w = jw_byte(w, 98)
         elif c == 12:
-            store_u8(out, oi, 92)
-            store_u8(out, oi + 1, 102)
-            oi = oi + 2
+            w = jw_byte(w, 92)
+            w = jw_byte(w, 102)
         elif c < 32:
-            store_u8(out, oi, 92)
-            store_u8(out, oi + 1, 117)
-            store_u8(out, oi + 2, 48)
-            store_u8(out, oi + 3, 48)
-            store_u8(out, oi + 4, net_hex_digit(c / 16))
-            store_u8(out, oi + 5, net_hex_digit(c % 16))
-            oi = oi + 6
+            w = jw_byte(w, 92)
+            w = jw_byte(w, 117)
+            w = jw_byte(w, 48)
+            w = jw_byte(w, 48)
+            w = jw_byte(w, net_hex_digit(c / 16))
+            w = jw_byte(w, net_hex_digit(c % 16))
         else:
-            store_u8(out, oi, c)
-            oi = oi + 1
+            w = jw_byte(w, c)
         i = i + 1
-    store_u8(out, oi, 34)
-    store_u8(out, oi + 1, 0)
-    return as_string(out)
+    w = jw_byte(w, 34)
+    return w
+
+# the single-string form, which is what the BUILDER below routes through.
+# Pre-reserved at the worst case (every byte a \u00XX) so it stays one alloc.
+def j_quote(s: string) -> string:
+    w = JOut(buf=0, n=0, cap=0)
+    w = jw_reserve(w, len(s) * 6 + 3)
+    w = jw_quote(w, s)
+    store_u8(w.buf, w.n, 0)
+    return as_string(w.buf)
+
+# serialize a node into the sink. ONE pass with geometric growth, not repeated
+# `out = out + ...`: string concatenation allocates a fresh buffer per step and
+# abandons the old one, so an n-element container cost O(n^2) allocations AND
+# O(n^2) bytes leaked. Measured at -O3 on a 20000-key response, the old
+# serializer touched 8.6 GB and took 28 s.
+def jw_value(w: JOut, dom: JDom, i: int) -> JOut:
+    k = j_kind(dom, i)
+    if k == J_STR():
+        return jw_quote(w, j_as_str(dom, i))
+    if k == J_INT():
+        return jw_str(w, str(j_ival(dom, i)))
+    if k == J_FLOAT():
+        return jw_str(w, j_fmt_f(j_fval(dom, i)))
+    if k == J_BOOL():
+        if j_ival(dom, i) == 1:
+            return jw_str(w, "true")
+        return jw_str(w, "false")
+    if k == J_ARR():
+        w = jw_byte(w, 91)
+        n = j_ival(dom, i)
+        k2 = 0
+        while k2 < n:
+            if k2 > 0:
+                w = jw_byte(w, 44)
+            w = jw_value(w, dom, j_arr_get(dom, i, k2))
+            k2 = k2 + 1
+        w = jw_byte(w, 93)
+        return w
+    if k == J_OBJ():
+        w = jw_byte(w, 123)
+        n = j_ival(dom, i)
+        k2 = 0
+        while k2 < n:
+            if k2 > 0:
+                w = jw_byte(w, 44)
+            w = jw_quote(w, j_obj_key(dom, i, k2))
+            w = jw_byte(w, 58)
+            w = jw_value(w, dom, j_obj_val_idx(dom, i, k2))
+            k2 = k2 + 1
+        w = jw_byte(w, 125)
+        return w
+    return jw_str(w, "null")
 
 # serialize a node back to a JSON text string (compact, no whitespace)
 def j_dumps(dom: JDom, i: int) -> string:
-    k = j_kind(dom, i)
-    if k == J_NULL():
-        return "null"
-    if k == J_BOOL():
-        if j_ival(dom, i) == 1:
-            return "true"
-        return "false"
-    if k == J_INT():
-        return str(j_ival(dom, i))
-    if k == J_FLOAT():
-        return j_fmt_f(j_fval(dom, i))
-    if k == J_STR():
-        return j_quote(j_as_str(dom, i))
-    if k == J_ARR():
-        out = "["
-        n = j_ival(dom, i)
-        k2 = 0
-        while k2 < n:
-            if k2 > 0:
-                out = out + ","
-            out = out + j_dumps(dom, j_arr_get(dom, i, k2))
-            k2 = k2 + 1
-        return out + "]"
-    if k == J_OBJ():
-        out = "{"
-        n = j_ival(dom, i)
-        k2 = 0
-        while k2 < n:
-            if k2 > 0:
-                out = out + ","
-            out = out + j_quote(j_obj_key(dom, i, k2)) + ":" + j_dumps(dom, j_obj_val_idx(dom, i, k2))
-            k2 = k2 + 1
-        return out + "}"
-    return "null"
+    w = JOut(buf=0, n=0, cap=0)
+    w = jw_value(w, dom, i)
+    w = jw_reserve(w, 1)
+    store_u8(w.buf, w.n, 0)
+    return as_string(w.buf)
 
 # convenience: parse then serialize (round-trip check)
 def j_roundtrip(src: string) -> string:
@@ -801,24 +897,34 @@ def j_roundtrip(src: string) -> string:
 def JB_MIN_CAP() -> int:
     return 8
 
+# the capacity a grown node must reach. The floor is the LIVE CHILD COUNT, and
+# that floor is load-bearing: a node the PARSER made adopted a Vec's buffer
+# but left its stored capacity at 0, so "0 means give me the default" used to
+# mean 8 — and reallocating a 32-slot (256 byte) buffer DOWN to 16 (128 bytes)
+# then writing slot 20 walked off the end. Any parsed object or array with 16+
+# members crashed with 0xC0000005 the first time a field was added to it, which
+# is exactly what `jb_set_raw` exists to do (see the AGENTS.md splice pattern).
+# `n + 1` is the one quantity that is always known, and 2*(n+1) > n means the
+# store the caller is about to make always lands inside the block.
+def jb_grow_cap(base: int) -> int:
+    n = load_i64(base + 8)
+    cap = to_int(load_f64(base + 16))
+    if cap < n + 1:
+        cap = n + 1
+    return cap * 2
+
 # make room for one more child on node `i`, doubling from its stored
 # capacity. Objects move BOTH buffers (values then keys); arrays move one.
 def jb_grow_arr(dom: JDom, i: int) -> JDom:
     base = dom.slab + i * 40
-    cap = to_int(load_f64(base + 16))
-    if cap <= 0:
-        cap = JB_MIN_CAP()
-    newcap = cap * 2
+    newcap = jb_grow_cap(base)
     store_i64(base + 24, realloc(load_i64(base + 24), newcap * 8))
     store_f64(base + 16, to_float(newcap))
     return dom
 
 def jb_grow_obj(dom: JDom, i: int) -> JDom:
     base = dom.slab + i * 40
-    cap = to_int(load_f64(base + 16))
-    if cap <= 0:
-        cap = JB_MIN_CAP()
-    newcap = cap * 2
+    newcap = jb_grow_cap(base)
     store_i64(base + 24, realloc(load_i64(base + 24), newcap * 8))
     store_i64(base + 32, realloc(load_i64(base + 32), newcap * 8))
     store_f64(base + 16, to_float(newcap))

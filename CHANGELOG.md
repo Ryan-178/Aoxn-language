@@ -5,6 +5,112 @@ minor bumps while pre-1.0: each minor version is a language milestone.
 
 ## [Unreleased]
 
+## [0.48.0] - 2026-10-07
+
+Theme: **a stdlib audit, and the three quadratic loops it found** — one of them
+a live heap corruption, two of them the `len()`-is-`strlen` trap that runs the
+JSON parser at ~33 KB/s on a realistic API response.
+
+Every defect below was REPRODUCED before the fix (compiled Aoxn probes at
+`-O0` and `-O3`, peak working set and wall clock measured) and is pinned by the
+new `tests/stdlib_defect_pins.rs`. The pins were checked against the
+pre-fix sources and DO fail there — the object/array one dies with
+`0xC0000005`.
+
+### Fixed: the JSON builder shrank a parsed node's buffer (heap corruption)
+
+- `jb_grow_arr` / `jb_grow_obj` treated a stored capacity of 0 as "give me the
+  default" (8). A node the PARSER made adopts a `Vec`'s buffer but leaves that
+  capacity at 0, so the first `jb_set`/`jb_push` on it realloc'd the adopted
+  buffer **downwards**: a 20-member object (Vec cap 32, 256 bytes) was
+  reallocated to 128 bytes and then written at slot 20. Any parsed object or
+  array with **16+ members** crashed with `0xC0000005` the first time a field
+  was added — which is exactly what `jb_set_raw`/`jb_push_raw` exist to do
+  (the Anthropic/OpenAI tool-schema splice pattern).
+  Confirmed differentially: 8 members fine, 20 members access violation.
+  Both grow functions now floor the capacity at the live child count
+  (`jb_grow_cap`), the one quantity that is always known. Growth doubles from
+  there, so the store the caller is about to make always lands inside the
+  block. The documented promise ("a parsed object can still be extended")
+  now holds.
+
+### Fixed: the JSON parser was O(n^2) in document size
+
+- `j_at` tested end-of-input with `len(p.src)`. **`len()` on a string IS
+  `strlen`, emitted inline at every use site** (`codegen_c.rs:1973`), so every
+  character of every token paid a full scan of the remaining document.
+  Measured at `-O3`, doubling the document quadrupled the time: 13 KB 19 ms,
+  30 KB 84 ms, 62 KB 343 ms, 126 KB 1421 ms, 266 KB **7064 ms**. The source
+  length is a pure function of the immutable `src`, so `JParse` now carries it
+  in a new `sn` field, computed once in `j_parse`/`j_parse_into`.
+  266 KB: **7064 ms -> 7 ms**.
+- `jp_str` allocated `len(p.src) + 1` **per string**. Safe (escapes only
+  shrink) but never freed by design, so a 330 KB document with 20 000 strings
+  pushed 6.29 GB of allocator traffic through a **325.8 MB peak at ~33 KB/s**.
+  The buffer is now sized from the remaining input and grown geometrically;
+  the amortized cost is identical and the peak becomes the sum of the actual
+  string lengths. Same document: **325.8 MB -> 4.8 MB**.
+- `j_num_float` read the exponent with **no digit bound**, so `1e999999999`
+  spun the scaling loop for minutes — a reachable DoS on any untrusted JSON
+  (an API response, a user config file). The accumulator is now clamped to
+  `J_MAX_EXP() = 400` while parsing, which is past the double range, so the
+  answer stays the IEEE one (inf / 0.0) and the loop is bounded. Clamping
+  during accumulation also closes an i64 wraparound that could return a
+  *small* exponent from a huge one.
+
+### Fixed: `j_dumps` was O(n^2) allocations AND O(n^2) leaked bytes
+
+- The serializer built its result by repeated `out = out + ...`. String
+  concatenation allocates a fresh buffer per step and abandons the old one, so
+  an n-element container cost n(n+1)/2 allocations with every intermediate
+  leaked. A 20 000-key response touched **8627.8 MB and 28.4 s**.
+  It is now ONE pass into a byte sink that grows geometrically (`JOut`,
+  `jw_*`), threaded by value in the same write-back discipline `JParse` and
+  `Vec` use — the language has no address-of, so the cursor is handed back
+  rather than pointed at. `j_quote` became a thin pre-reserved wrapper over
+  `jw_quote`, so the builder still routes through ONE escaping
+  implementation. Same document: **8627.8 MB -> 10.2 MB, 28.4 s -> 282 ms**,
+  and the round trip stays byte-identical to the input.
+
+### Fixed: base64 decode was O(n^2), and leaked the buffer it rejected
+
+- `b64_decode`'s loop bound was `len(s)` — a fresh strlen of the whole input
+  every iteration and every padding byte. Measured at `-O3`: 8 KB 7 ms,
+  16 KB 29 ms, 32 KB 138 ms, 64 KB 608 ms, and **1.4 MB did not finish inside
+  600 s**. Hoisting one `sn = len(s)` makes it linear; the encode arm always
+  took its length as a parameter and was already linear. 2.8 MB: **3 ms**.
+- The invalid-input paths returned `B64(p=out, n=-1)` and abandoned the
+  buffer, and `b64_decode_str` returned `""` without freeing it. The length of
+  a base64 body is attacker-chosen (an `Authorization` header, an SSE line),
+  so that leaked on a security boundary. Both paths now `free` and return
+  `p=0`.
+
+### Fixed: `os_has_env` read a stale `GetLastError`
+
+- Win32's last error is thread-sticky and a **successful** call does not clear
+  it, so any earlier miss — including `os_getenv`'s own probe of an absent
+  name — left `ERROR_ENVVAR_NOT_FOUND` (203) latched, and the next probe of a
+  variable that really existed answered `False`. The function exists precisely
+  to tell "present but empty" from "unset", and it could not. Now primed with
+  `SetLastError(0)` (new extern) before the lookup, so the only way out
+  holding 203 is a genuine miss.
+
+### Tests
+
+- `tests/stdlib_defect_pins.rs` — 10 checks across the six fixes above. A
+  heap-corruption regression surfaces as an abnormal driver exit, so the
+  status assert is load-bearing rather than a formality.
+
+### Also measured, deliberately NOT changed
+
+- `stdlib/net/sse.ax` never writes a NUL after the buffered bytes. The feed
+  always reserves one spare byte, so the `strlen` inside `str_sub` stops
+  inside the allocation: an uninitialized read, not an out-of-bounds one. Two
+  probes built to trigger it did not crash. Left as a hardening item.
+- `pathlib.ax`'s `path_norm` re-evaluates `len(p)` per byte (the same shape as
+  the base64 bug) but measured 0–1 ms at 8 KB — paths are short, so the
+  constant is negligible next to the three above. Left alone.
+
 ## [0.47.0] - 2026-10-07
 
 Theme: **the UI toolkit finally paints what it draws, and stops paying

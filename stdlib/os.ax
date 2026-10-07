@@ -53,6 +53,7 @@ extern def FindFirstFileW(pattern: int, data: int) -> int
 extern def FindNextFileW(h: int, data: int) -> int
 extern def FindClose(h: int) -> int
 extern def GetLastError() -> int
+extern def SetLastError(code: int) -> int
 
 # ---- POSIX externs (libc; prototypes only — see the header) ----
 
@@ -369,7 +370,17 @@ def os_getenv(name: string) -> string:
 def os_has_env(name: string) -> bool:
     if target_os() == "windows":
         w = os_to_wide(name)
+        # one WCHAR of room plus the terminator: a variable that EXISTS but is
+        # longer than this is still present, and the answer below comes from
+        # the error code, not from how much was written
         buf = malloc(4)
+        # The last error is thread-sticky and a SUCCESSFUL call does not clear
+        # it (only the functions documented as doing so do). Reading it after
+        # an unprimed lookup meant any earlier miss -- including `os_getenv`'s
+        # own probe of an absent name -- left 203 behind and made the NEXT
+        # probe of a variable that really exists answer False. Priming it to 0
+        # means the only way out of here holding 203 is a genuine miss.
+        SetLastError(0)
         GetEnvironmentVariableW(w, buf, 2)
         err = GetLastError()
         free(w)
