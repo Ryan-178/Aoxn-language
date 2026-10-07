@@ -415,6 +415,15 @@ the event bus at 817 (connect table + 32-event ring) and the line cache at
 allocate and release it — the platform backend calls them at init/fini,
 headless tests can too.
 
+Since v0.46.0/v0.47.0 the tail of the block carries per-platform and
+widget-layer state, all documented in the `ui.ax` header: 820/821 the
+backend clip stack (`SaveDC` handles on Windows, rects on X11), 822/823 the
+X11 clipboard buffer, 824 the X11 close flag, 826 the parked sans font,
+827..834 the widget layer's own clip shadow (827 stack, 828 depth,
+829..832 the clip in force, 833 the canvas-known flag) plus the
+text-measure cache at 834, and 835..840 the Windows DC state cache
+(selected brush/pen, their colors, selected font, text color).
+
 ## Platform matrix
 
 | OS | Backend file | Link flags | Status |
@@ -463,6 +472,13 @@ the language cannot express.
 - `ui_draw_calls_only_implemented_primitives`: every `plat_*` the widget
   layer calls is defined by BOTH `ui_win.ax` and `ui_x11.ax` (a missing
   one would otherwise only show up as a link error).
+- `ui_clip_stack_restores_and_culls` (Windows): draws known rects in known
+  colors and reads the canvas back with `GetPixel`, so a broken clip is a
+  failed expectation rather than a blank window nobody looks at. It pins
+  the v0.47.0 regression — "after-textbox", a nested push/pop pair, a
+  culled draw, two fills across a `RestoreDC`, and the measure cache
+  agreeing with itself. Against the pre-v0.47.0 stdlib it fails with SEVEN
+  mismatches, so it is a regression test and not decoration.
 
 Link-time coverage lives in CI rather than the unit tests: the Windows
 job builds the gallery against `-l user32 -l gdi32`; the Linux job
@@ -479,8 +495,9 @@ under Xvfb against `-l X11 -l Xft`.
   `ui_listbox`/`ui_combobox`/`ui_menu` take up to 32 items in a floating
   popup (`overlay_items_store` clamp — longer lists silently show their
   first 32 entries)
-- full-window repaint each frame — fine at widget scale, not optimized
-  for huge canvases
+- full-window repaint each frame — draws the visible op once and culls what
+  the clip cannot show (v0.47.0), but there is still no damage tracking, so
+  an idle frame costs a `BitBlt`
 - no animations/timing APIs; `cap_ms` and `plat_now_ms` (tooltip delay,
   caret blink) are the only pacing controls
 - once the new module system settles, `ui`/`ui_draw`/the backends should be
@@ -491,7 +508,10 @@ under Xvfb against `-l X11 -l Xft`.
 - **Text positioning is O(n) per click/drag**: `text_pos_in_range`
   measures one codepoint at a time and accumulates widths; the textbox
   and both textedit call sites share it (the per-codepoint re-measure of
-  `s[0..j)` that made long lines O(n²) is gone).
+  `s[0..j)` that made long lines O(n²) is gone). Since v0.47.0 it calls
+  `plat_measure_sub` directly, NOT the cached `ui_measure_sub`: those
+  one-codepoint ranges never repeat, so caching them would only flush the
+  entries the widgets reuse.
 - **The caret x-offset is cached** at st 532..535 (owner id / caret /
   length / width) — an idle focused textbox or textedit measures nothing
   per frame; the cache misses exactly when the text or caret moved.
@@ -502,5 +522,84 @@ under Xvfb against `-l X11 -l Xft`.
   same `sb_widget` (groove + thumb + claim/drag/release); the scrollbar
   hit column is the full widget height even when the track starts below
   a header.
-- Rendering cost is unchanged by design: one GDI fill/text call per
-  widget op, one `BitBlt` per frame (`plat_present`).
+
+## Performance notes (v0.47.0)
+
+Measured on this dev box (i5-1135G7, GDI, 1000x700 window), min of five
+interleaved runs, timed with `QueryPerformanceCounter`, against the
+pre-v0.47.0 stdlib compiled from the same sources by the same compiler.
+
+- **A draw the clip cannot show costs four slot reads.** `rect_visible` /
+  `text_visible` in `ui_draw.ax` answer that before the platform is asked
+  at all. A 3000 px document in a 200 px viewport (60 labels + 60
+  buttons, 96 % of them scrolled out of view) went from 79 ms to 47 ms per
+  60 frames: **-40 %**.
+- **A repeated text measure is answered from a 64-entry cache** keyed by
+  (content hash, byte range): 52.8 ms -> 0.55 ms per 20 000 measures of
+  the same string. The uncached `plat_measure` behind it is unchanged
+  (52.6 ms), so the cache is a pass-through, not a different answer.
+- **The Windows backend remembers the DC's selected pen, brush, font and
+  colors** instead of re-selecting them on every call: a 10x10 fill is
+  26.7 -> 25.1 us (alternating colors) and 24.8 -> 23.0 us (same color).
+- **A 100-widget scene with no clipping widgets** (40 buttons, 30
+  checkboxes, 10 spin boxes, tabs, menu bar, 16 labels) is **~9 % faster**
+  end to end. That scene paints identical pixels in both builds, so it is
+  the honest measure of the caches.
+- **The clip fix itself makes a frame do MORE work, on purpose.** A heavy
+  scene measured 1.8 ms/frame before v0.47.0 and 3.5 ms/frame after, and
+  that is not a regression: the old number came from a renderer that was
+  silently clipping most of the frame away (see below). What is left per
+  frame is the `BitBlt` (~0.8 ms for 1000x700), the background fill
+  (~0.08 ms) and one GDI call per visible widget op. `TextOutW` alone is
+  ~7 us; `GetAsyncKeyState`, `PeekMessageW` and `GetClientRect` are free
+  (10 000 calls each measure at 0 ms), which is why the pump was left
+  alone.
+
+### The clip stack, and why v0.47.0 exists
+
+`plat_clip_push` / `plat_clip_pop` had never restored anything. GDI's
+`IntersectClipRect` only ever NARROWS a DC's region, so the old pop —
+re-intersecting the popped rect — narrowed it further, and nothing ever
+reset it. One `ui_textbox` anywhere in a frame therefore left the whole
+window clipped to that textbox rect for the rest of the process,
+including the final `BitBlt` — a blit copies only the part of the source
+the source DC's clip allows. In the stock gallery the Editor tab showed
+the editor and lost the textbox, three labels and the status line drawn
+after it. Three changes, in this order:
+
+1. **`ui_win.ax` saves and restores**: one `SaveDC` handle per push
+   (st 820/821), `RestoreDC` on pop. That is what a push/pop stack means,
+   and it is exactly what the comment on `ui_x11.ax`'s `clip_apply` had
+   described all along.
+2. **`ui_draw.ax` keeps its own shadow of the stack** (st 827/828 hold the
+   effective rect per level, st 829..832 the one in force). Now that a pop
+   really restores, the shadow can also answer "can the platform see this
+   at all?" — which is what culling needs. `ui_init` and
+   `ui_resize_canvas` hand it the canvas rect (st 833 flips to 1); until
+   they do, nothing is culled, which is what keeps the headless portable
+   tests drawing everything they always did.
+3. **The backends receive the EFFECTIVE rect**, not the requested one, so
+   X11's push — which replaces the clip instead of intersecting it — nests
+   correctly too.
+
+Use `ui_clip_push` / `ui_clip_pop`, not the `plat_*` pair: the shadow is
+what the culling reads, and driving the backend primitive directly
+desynchronizes it.
+
+### What the DC state cache is allowed to forget
+
+The Windows cache holds what the DC currently has selected (st 835..840).
+Anything that changes the DC behind its back must call `dc_cache_drop`:
+`RestoreDC` on a clip pop, and the bitmap swap in `plat_canvas_resize`.
+A stale entry would paint in the wrong color, so that drop list — not the
+eight drawing primitives — is what has to stay in sync.
+
+## Rendering, end to end
+
+Rendering cost is unchanged by design: one GDI fill/text call per visible
+widget op, one `BitBlt` per frame (`plat_present`), a full-window
+background fill, no damage tracking, no retained scene. v0.47.0 made the
+toolkit draw what it always meant to draw and stop paying for what nobody
+can see. Making an IDLE frame cheaper than a busy one — damage rects, a
+display list, skipping the blit when the frame is identical to the last —
+is the next real lever and is not in this version.

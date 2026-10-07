@@ -58,8 +58,24 @@
 #       816      focused textbox caret owner id (caret lives at 539)
 #       817      event block ptr (v3): connect[256] + 32-event ring queue
 #       818      line cache block ptr (v3): line starts for multi-line edit
+#       820/821  backend clip stack ptr / depth (SaveDC handles on Windows,
+#                  rect stack on X11)
+#       826      the sans font handle parked by the backend's plat_init
+#       827..834 this layer's own two blocks (v0.47.0): 827 clip-shadow stack
+#                  ptr, 828 depth, 829..832 the clip in force, 833 the
+#                  "canvas known" flag, 834 text-measure cache ptr — see the
+#                  "clip bookkeeping" and "measure cache" sections below
 #   - Per-frame text goes through a 64 KiB bump arena that resets every
 #     frame (utf16f/itoa10), so a steady-state UI leaks nothing.
+#   - TWO per-frame costs are cut here rather than in the backends, because
+#     both are decisions about WHAT is worth asking the platform for, not
+#     about how to ask:
+#       - a draw that the current clip cannot show issues no platform call at
+#         all (ui_fill_rect and friends), which is what a scroll area's
+#         scrolled-out rows used to pay full price for;
+#       - a text measure whose (content, range) was already measured this
+#         session is answered from a 64-entry cache instead of a font metrics
+#         call.
 #   - KEY CODES are Win32 virtual-key numbers (VK_*), which is what the
 #     whole widget layer speaks. Backends translate their native key codes
 #     into this space (see vk_* below) and store the result in key_cur[],
@@ -222,44 +238,242 @@ def draw_tooltip_overlay(c: UI):
     ui_frame_rect(c, x, y, ts.w + 16, ts.h + 10, pal.border)
     ui_draw_text(c, x + 8, y + 5, s, pal.tooltip_text)
 
+# ---- clip bookkeeping: the EFFECTIVE clip the widget layer works against ----
+#
+# The widget layer owns a shadow of the clip stack so it can (a) restore the
+# previous rect on pop and (b) skip drawing that the platform would clip away
+# anyway. Two facts made this necessary rather than clever:
+#
+#   - GDI's IntersectClipRect only ever NARROWS the DC's region, so the old
+#     pop (re-intersect the popped rect) could not restore anything: after one
+#     ui_textbox the whole window stayed clipped to the textbox rect — and the
+#     final BitBlt with it. SaveDC/RestoreDC in ui_win.ax is the real fix; this
+#     shadow is what lets the widget layer KNOW the current rect.
+#   - A scroll area makes the app draw content that is scrolled out of view.
+#     Those draws cost a full GDI call each (measure + text + fill) and every
+#     one of them lands on a clipped pixel.
+#
+# st 827 = stack base ptr (30 levels x 4 slots: the EFFECTIVE clip in force at
+# that level), 828 = depth, 829..832 = the clip in force now (l, t, r, b),
+# 833 = "the canvas rect is known" flag. The flag is 0 until a backend hands us
+# a real canvas (ui_init / ui_resize_canvas), and while it is 0 nothing is
+# culled — which is what keeps the headless portable tests drawing everything.
+
+def ui_clip_canvas(c: UI, l: int, t: int, r: int, b: int):
+    st_set(c, 829, l)
+    st_set(c, 830, t)
+    st_set(c, 831, r)
+    st_set(c, 832, b)
+    st_set(c, 833, 1)
+
+def ui_clip_depth(c: UI) -> int:
+    return st_get(c, 828)
+
+# is any part of the rect (x, y, w, h) inside the clip? Cheap: four slot reads.
+def rect_visible(c: UI, x: int, y: int, w: int, h: int) -> bool:
+    if st_get(c, 833) == 0:
+        return True
+    if w <= 0 or h <= 0:
+        return False
+    if x >= st_get(c, 831) or y >= st_get(c, 832):
+        return False
+    if x + w <= st_get(c, 829) or y + h <= st_get(c, 830):
+        return False
+    return True
+
+# Text is culled WITHOUT measuring: a run of n bytes holds at most n codepoints
+# and no codepoint in the toolkit's faces advances more than 64 px (26 px bold
+# is the largest; a wide glyph is well under that), so `x + n * 64` is an upper
+# bound on the right edge and 64 px is an upper bound on the line height. Both
+# bounds are deliberately loose — culling too little only costs a clipped draw,
+# while culling too much would drop text the user can see.
+def text_visible(c: UI, x: int, y: int, nbytes: int) -> bool:
+    if st_get(c, 833) == 0:
+        return True
+    if x >= st_get(c, 831) or y >= st_get(c, 832):
+        return False
+    if x + nbytes * 64 <= st_get(c, 829) or y + 64 <= st_get(c, 830):
+        return False
+    return True
+
+def ui_clip_push(c: UI, l: int, t: int, r: int, b: int):
+    if st_get(c, 833) == 0:
+        plat_clip_push(c, l, t, r, b)
+        return
+    nl = st_get(c, 829)
+    if l > nl:
+        nl = l
+    nt = st_get(c, 830)
+    if t > nt:
+        nt = t
+    nr = st_get(c, 831)
+    if r < nr:
+        nr = r
+    nb = st_get(c, 832)
+    if b < nb:
+        nb = b
+    d = st_get(c, 828)
+    if d < 30:
+        # the backend's own stack is capped at the same 30 levels, so the two
+        # depths stay in step and every pop has something to restore
+        if st_get(c, 827) == 0:
+            st_set(c, 827, malloc(960))
+        p = st_get(c, 827) + d * 32
+        store_i64(p, nl)
+        store_i64(p + 8, nt)
+        store_i64(p + 16, nr)
+        store_i64(p + 24, nb)
+        st_set(c, 828, d + 1)
+    st_set(c, 829, nl)
+    st_set(c, 830, nt)
+    st_set(c, 831, nr)
+    st_set(c, 832, nb)
+    plat_clip_push(c, nl, nt, nr, nb)
+
+def ui_clip_pop(c: UI):
+    if st_get(c, 833) != 0:
+        d = st_get(c, 828)
+        if d > 0:
+            d = d - 1
+            st_set(c, 828, d)
+            if d > 0:
+                p = st_get(c, 827) + (d - 1) * 32
+                st_set(c, 829, load_i64(p))
+                st_set(c, 830, load_i64(p + 8))
+                st_set(c, 831, load_i64(p + 16))
+                st_set(c, 832, load_i64(p + 24))
+            else:
+                ui_clip_canvas(c, 0, 0, c.w, c.h)
+    plat_clip_pop(c)
+
+# ---- text-measure cache (64 entries, direct mapped) ----
+#
+# Every button, checkbox, radio, tab, menu title, spin arrow, combo item and
+# selected text range measures its text EVERY frame, and a measure is the
+# single most expensive thing in a widget frame: a UTF-16 conversion, an
+# lstrlenW and a platform text-extent call (GetTextExtentPoint32W on Windows,
+# XftTextExtentsUtf8 on X11 — an X round trip). The same string is measured
+# again next frame, and the frame after that.
+#
+# st 834 = block ptr. Entry = [hash+1, from, to, w, h] (hash+1 so 0 = empty).
+# The key is (content hash, from, to) rather than the string pointer, so two
+# equal strings at different addresses share one entry — the common case for
+# literals, table cells and labels that come from a model. The hash is a
+# bounded polynomial kept under 2^30 (signed overflow is UB in this
+# language, see web/http_buf.ax content_hash), which makes a false hit ~1e-8
+# per lookup and costs at most a label centered a few pixels off.
+#
+# The cache assumes the FONT never changes after plat_init, which is true of
+# both backends (ui_font_mono / ui_font_sans swap which face c.font points at
+# among the same two sizes). A different size would need ui_state_free + a
+# re-init, or an explicit drop.
+
+def measure_hash(s: string, f: int, t: int) -> int:
+    h = 7
+    i = f
+    while i < t:
+        h = (h * 131 + load_u8(s, i) + 1) % 1073741789
+        i = i + 1
+    return h
+
+def measure_cache(c: UI) -> int:
+    blk = st_get(c, 834)
+    if blk == 0:
+        blk = malloc(2560)
+        fill_zero(blk, 2560)
+        st_set(c, 834, blk)
+    return blk
+
+def ui_measure(c: UI, s: string) -> TextSize:
+    return ui_measure_sub(c, s, 0, len(s))
+
+def ui_measure_sub(c: UI, s: string, f: int, t: int) -> TextSize:
+    n = len(s)
+    if f < 0:
+        f = 0
+    if t > n:
+        t = n
+    if t <= f:
+        return plat_measure_sub(c, s, f, t)
+    hv = measure_hash(s, f, t)
+    blk = measure_cache(c)
+    e = (hv % 64) * 40
+    if load_i64(blk + e) == hv + 1 and load_i64(blk + e + 8) == f and load_i64(blk + e + 16) == t:
+        return TextSize(w=load_i64(blk + e + 24), h=load_i64(blk + e + 32))
+    ts = plat_measure_sub(c, s, f, t)
+    store_i64(blk + e, hv + 1)
+    store_i64(blk + e + 8, f)
+    store_i64(blk + e + 16, t)
+    store_i64(blk + e + 24, ts.w)
+    store_i64(blk + e + 32, ts.h)
+    return ts
+
+# ---- drawing primitives: thin, stable names over the backend ----
+# The widget layer calls THESE; each forwards to the backend primitive of
+# the same name. Keeping one spelling in the widget code means a backend
+# only has to implement `plat_*`. Each one first asks whether the clip can
+# possibly show what it is about to draw — a scrolled-away row then costs a
+# few slot reads instead of a platform call.
+
 def ui_fill_rect(c: UI, x: int, y: int, w: int, h: int, color: int):
+    if not rect_visible(c, x, y, w, h):
+        return
     plat_fill_rect(c, x, y, w, h, color)
 
 def ui_frame_rect(c: UI, x: int, y: int, w: int, h: int, color: int):
+    if not rect_visible(c, x, y, w, h):
+        return
     plat_frame_rect(c, x, y, w, h, color)
 
 def round_fill(c: UI, x: int, y: int, w: int, h: int, fill: int, border: int):
+    if not rect_visible(c, x, y, w, h):
+        return
     plat_round_fill(c, x, y, w, h, fill, border)
 
 def ui_ellipse(c: UI, x: int, y: int, w: int, h: int, fill: int, border: int):
+    if not rect_visible(c, x, y, w, h):
+        return
     plat_ellipse(c, x, y, w, h, fill, border)
 
 def ui_ellipse_fill(c: UI, x: int, y: int, w: int, h: int, fill: int):
+    if not rect_visible(c, x, y, w, h):
+        return
     plat_ellipse_fill(c, x, y, w, h, fill)
 
 def ui_draw_line(c: UI, x1: int, y1: int, x2: int, y2: int, color: int):
+    l = x1
+    if x2 < l:
+        l = x2
+    r = x1
+    if x2 > r:
+        r = x2
+    t = y1
+    if y2 < t:
+        t = y2
+    b = y1
+    if y2 > b:
+        b = y2
+    if not rect_visible(c, l, t, r - l + 1, b - t + 1):
+        return
     plat_line(c, x1, y1, x2, y2, color)
 
 def ui_draw_text(c: UI, x: int, y: int, s: string, color: int):
+    if not text_visible(c, x, y, len(s)):
+        return
     plat_text(c, x, y, s, color)
 
 def ui_draw_text_big(c: UI, x: int, y: int, s: string, color: int):
+    if not text_visible(c, x, y, len(s)):
+        return
     plat_text_big(c, x, y, s, color)
 
 def ui_draw_text_sub(c: UI, x: int, y: int, s: string, f: int, t: int, color: int):
+    n = t - f
+    if n < 0:
+        n = 0
+    if not text_visible(c, x, y, n):
+        return
     plat_text_sub(c, x, y, s, f, t, color)
-
-def ui_measure(c: UI, s: string) -> TextSize:
-    return plat_measure(c, s)
-
-def ui_measure_sub(c: UI, s: string, f: int, t: int) -> TextSize:
-    return plat_measure_sub(c, s, f, t)
-
-def ui_clip_push(c: UI, l: int, t: int, r: int, b: int):
-    plat_clip_push(c, l, t, r, b)
-
-def ui_clip_pop(c: UI):
-    plat_clip_pop(c)
 
 # ---- widgets (immediate mode: call every frame, own the state yourself) ----
 
@@ -647,12 +861,16 @@ def utf16f_sub(c: UI, s: string, from: int, to: int) -> int:
 # first version re-measured s[0..j) for every codepoint, which made a click
 # into a long line O(n²) (a second of GDI at ~4000 chars); textedit also
 # carried two inline copies of that loop.
+#
+# It goes straight to plat_measure_sub, NOT through the ui_measure_sub cache:
+# these ranges are one codepoint wide and never repeat, so caching them would
+# cost a hash per codepoint and flush the entries the widgets actually reuse.
 def text_pos_in_range(c: UI, s: string, from: int, to: int, tx: int, mx: int) -> int:
     i = from
     acc = 0
     while i < to:
         j = caret_right(s, i)
-        w1 = ui_measure_sub(c, s, i, j).w
+        w1 = plat_measure_sub(c, s, i, j).w
         if mx < tx + acc + w1 / 2:
             return i
         acc = acc + w1
@@ -1834,7 +2052,12 @@ def ui_init(title: string, w: int, h: int) -> UI:
         print("aoxn ui: no backend for this platform (import stdlib/ui_win on Windows, stdlib/ui_x11 on Linux)")
         return c
     c = ui_state_init(c)
-    return plat_init(c, title, w, h)
+    c = plat_init(c, title, w, h)
+    if c.open:
+        # the canvas rect is what the clip falls back to when the widget
+        # layer's stack is empty, and what makes culling possible at all
+        ui_clip_canvas(c, 0, 0, c.w, c.h)
+    return c
 
 # Shift the key snapshot: last frame's key_cur becomes key_prev, and
 # key_cur is zeroed for the backend to refill. Edge detection
@@ -1896,6 +2119,12 @@ def ui_close(c: UI):
 def ui_fini(c: UI):
     if plat_supported():
         plat_fini(c)
+    # the widget layer's own two blocks (clip shadow stack, measure cache);
+    # both are lazily allocated, so both may be 0
+    if st_get(c, 827) != 0:
+        free(st_get(c, 827))
+    if st_get(c, 834) != 0:
+        free(st_get(c, 834))
     ui_state_free(c)
     free(c.msg)
     free(c.pt)
@@ -1926,5 +2155,10 @@ def ui_resize_canvas(c: UI, nw: int, nh: int) -> UI:
     c = plat_canvas_resize(c, nw, nh)
     c.w = nw
     c.h = nh
+    # rebias the canvas only with an empty clip stack: mid-push the stack
+    # still holds rects expressed against the OLD canvas, and a resize
+    # between a push and its pop cannot happen (both happen inside one frame)
+    if ui_clip_depth(c) == 0:
+        ui_clip_canvas(c, 0, 0, nw, nh)
     return c
 

@@ -5,6 +5,101 @@ minor bumps while pre-1.0: each minor version is a language milestone.
 
 ## [Unreleased]
 
+## [0.47.0] - 2026-10-07
+
+Theme: **the UI toolkit finally paints what it draws, and stops paying
+for what nobody can see** — a clip stack that actually restores, draws
+culled against the current clip, a text-measure cache, and a Windows
+backend that remembers what it already told the DC.
+
+### Fixed: the clip stack never restored anything (Windows)
+
+`plat_clip_push` / `plat_clip_pop` kept a rect stack and re-issued
+`IntersectClipRect` on pop. GDI's clip only ever NARROWS a DC's region,
+so the pop narrowed it further, and nothing ever reset it: **one
+`ui_textbox` anywhere in a frame left the whole window clipped to that
+textbox rect for the rest of the process** — including the final
+`BitBlt`, which copies only the part of the source the source DC's clip
+allows. In `examples/ui_gallery.ax` the Editor tab showed the editor and
+silently lost the textbox, three labels and the status line drawn after
+it. `ui_x11.ax` had always been correct here (its `clip_apply` re-applies
+the top rect, and its comment describes this exact Windows failure); the
+Windows backend never got the same treatment.
+
+- `ui_win.ax` now saves and restores: one `SaveDC` handle per level (st
+  820/821), `RestoreDC` on pop. `SaveDC`/`RestoreDC` were declared since
+  v0.2x and never called.
+- `RestoreDC` also rolls back the selected objects and colors, so the pop
+  drops the DC state cache introduced below — a stale entry would paint
+  in the wrong color.
+
+### Added: clip-aware draw culling (both backends)
+
+`ui_draw.ax` keeps its own shadow of the clip stack (st 827..833: stack
+ptr, depth, the effective rect in force, and a "canvas known" flag), so
+`rect_visible` / `text_visible` can answer "can the platform see this?"
+before asking it. Every draw primitive — fill, frame, round, ellipse,
+line, text, text_big, text_sub — skips the platform call when the clip
+cannot show a pixel of it. Text is culled WITHOUT measuring: a run of n
+bytes holds at most n codepoints and none advances more than 64 px at the
+toolkit's font sizes, so the bounds are deliberately loose (culling too
+little costs a clipped draw; culling too much would drop visible text).
+
+Consequence worth knowing: `ui_clip_push` now hands the backends the
+EFFECTIVE (already intersected) rect, which also fixes X11's nested
+pushing — its push replaces the clip rather than intersecting it. Use
+`ui_clip_push` / `ui_clip_pop`, not the `plat_*` pair: the shadow is what
+the culling reads.
+
+### Added: a text-measure cache
+
+Every button, checkbox, radio, tab, menu title, spin arrow, combo item and
+selected text range measured its text every frame, and a measure is the
+most expensive thing in a widget frame (UTF-16/UTF-8 conversion,
+`lstrlenW`, then `GetTextExtentPoint32W` or `XftTextExtentsUtf8` — an X
+round trip). `ui_measure` / `ui_measure_sub` now keep a 64-entry
+direct-mapped cache (st 834) keyed by (bounded content hash, byte range),
+so two equal strings at different addresses share an entry.
+`text_pos_in_range` deliberately calls `plat_measure_sub` directly — its
+one-codepoint ranges never repeat and would only flush the cache.
+
+### Added: a Windows DC state cache
+
+The backend re-selected both stock objects and both colors on every
+primitive. It now remembers what the DC has selected (st 835..840:
+brush, pen, their colors, font, text color) and re-selects only on a
+change. The drop list is the thing to keep correct: `RestoreDC` on a clip
+pop and the bitmap swap in `plat_canvas_resize`.
+
+### Measured (min of five interleaved runs, `QueryPerformanceCounter`,
+i5-1135G7, GDI, 1000x700, against the pre-v0.47.0 stdlib built by the
+same compiler)
+
+- 3000 px document in a 200 px viewport, 60 labels + 60 buttons: 79 ms ->
+  47 ms per 60 frames (**-40 %**) — culling.
+- 20 000 measures of one string: 52.8 ms -> **0.55 ms** (96x); the
+  uncached `plat_measure` behind the cache is unchanged (52.6 ms).
+- 20 000 10x10 fills: 26.7 ms -> 25.1 ms (alternating colors), 24.8 ms ->
+  23.0 ms (same color).
+- A 100-widget scene with no clipping widgets (identical pixels in both
+  builds): ~9 % faster end to end.
+- **A heavy scene got SLOWER on purpose: 1.8 ms/frame -> 3.5 ms/frame.**
+  The old number came from a renderer that was clipping most of the frame
+  away. What remains per frame is `BitBlt` (0.8 ms), the background fill
+  (0.08 ms) and one GDI call per visible widget op; `TextOutW` is ~7 us.
+  `GetAsyncKeyState`, `PeekMessageW` and `GetClientRect` measured free
+  (10 000 calls, 0 ms), which is why the 256-key pump sweep is untouched.
+
+### Tests
+
+- `ui_clip_stack_restores_and_culls` (Windows) draws known rects in known
+  colors and reads the canvas back with `GetPixel`: fill, frame border vs
+  inside, a widget after a textbox, a nested push/pop pair, a culled
+  draw, two fills across a `RestoreDC`, and the measure cache. It fails
+  against the pre-v0.47.0 stdlib with seven mismatches, so it is a
+  regression test rather than a smoke test.
+- Suite: 284 tests green (Windows, clang present).
+
 ## [0.46.0] - 2026-10-06
 
 Theme: **Linux is a supported platform again, and the UI toolkit gains a

@@ -700,6 +700,154 @@ fn ui_window_v3_widgets_smoke() {
 }
 
 // ---------------------------------------------------------------------------
+// v0.47.0 — the clip stack
+//
+// Everything above asserts that a frame does not crash. This one asserts that
+// it PAINTS: the driver draws known rects in known colors and reads the
+// canvas back with GetPixel, so a broken clip is a failed expectation rather
+// than a blank window nobody looks at.
+//
+// It is here because of a bug that every smoke test passed straight through:
+// plat_clip_pop could not restore anything (GDI's IntersectClipRect only ever
+// narrows), so after ONE ui_textbox anywhere in a frame the whole window —
+// including the final BitBlt, which copies only what the source clip allows —
+// stayed clipped to that textbox rect for the rest of the process. The three
+// cases below are exactly that: "after-textbox", the nested push/pop pair, and
+// the culled draw the widget layer now skips on its own.
+// ---------------------------------------------------------------------------
+#[test]
+#[cfg(windows)]
+fn ui_clip_stack_restores_and_culls() {
+    if !have_clang() {
+        eprintln!("skipping: clang not found (set AOXN_CLANG or add clang to PATH)");
+        return;
+    }
+
+    let dir = temp_dir("clip");
+    let src = dir.join("ui_clip.ax");
+    let exe = dir.join("ui_clip.exe");
+    std::fs::write(
+        &src,
+        format!(
+            "import * from \"{}\"\n\nextern def GetPixel(dc: int, x: int, y: int) -> int\n\n{}\n",
+            abs("stdlib/ui_win.ax"),
+            r#"def check(name: string, got: int, want: int) -> int:
+    if got != want:
+        print("FAIL " + name + " got=" + str(got) + " want=" + str(want))
+        return 1
+    print("PASS " + name + " " + str(got))
+    return 0
+
+def main() -> int:
+    c = ui_init("clip", 400, 300)
+    if not c.open:
+        print("ui-window: none")
+        return 3
+    c.cap_ms = 0
+    red = ui_rgb(255, 0, 0)
+    grn = ui_rgb(0, 255, 0)
+    blu = ui_rgb(0, 0, 255)
+    wht = ui_rgb(255, 255, 255)
+    pal = ui_palette_get(c)
+    fails = 0
+    # a plain fill reaches the canvas
+    c = ui_frame(c)
+    ui_fill_rect(c, 10, 10, 50, 50, red)
+    ui_present(c)
+    fails = fails + check("fill", GetPixel(c.mem_dc, 20, 20), red)
+    # a frame rect paints its border and leaves its inside alone
+    ui_frame_rect(c, 100, 10, 50, 50, blu)
+    ui_present(c)
+    fails = fails + check("frame-border", GetPixel(c.mem_dc, 100, 10), blu)
+    fails = fails + check("frame-inside", GetPixel(c.mem_dc, 120, 30), pal.bg)
+    # the regression: a widget drawn AFTER a clipping one must still paint
+    c = ui_frame(c)
+    ui_textbox(c, 24, 40, 280, 30, "hello")
+    ui_present(c)
+    c = ui_frame(c)
+    ui_fill_rect(c, 200, 150, 60, 60, grn)
+    ui_present(c)
+    fails = fails + check("after-textbox", GetPixel(c.mem_dc, 210, 160), grn)
+    # nested clips: the inner pop gives back the OUTER clip, the outer pop
+    # gives back the canvas
+    c = ui_frame(c)
+    ui_clip_push(c, 0, 0, 100, 300)
+    ui_fill_rect(c, 0, 0, 100, 300, wht)
+    ui_clip_push(c, 0, 0, 100, 100)
+    ui_fill_rect(c, 0, 0, 100, 100, red)
+    ui_clip_pop(c)
+    ui_fill_rect(c, 0, 150, 100, 50, grn)
+    ui_present(c)
+    fails = fails + check("nested-inner", GetPixel(c.mem_dc, 50, 50), red)
+    fails = fails + check("nested-outer", GetPixel(c.mem_dc, 50, 170), grn)
+    c = ui_frame(c)
+    ui_clip_pop(c)
+    ui_fill_rect(c, 200, 200, 60, 60, blu)
+    ui_present(c)
+    fails = fails + check("after-outer-pop", GetPixel(c.mem_dc, 210, 210), blu)
+    # a draw the clip cannot show never reaches the canvas
+    c = ui_frame(c)
+    ui_clip_push(c, 0, 0, 50, 50)
+    ui_fill_rect(c, 300, 100, 40, 40, grn)
+    ui_draw_text(c, 300, 100, "offscreen", grn)
+    ui_clip_pop(c)
+    fails = fails + check("culled", GetPixel(c.mem_dc, 310, 110), pal.bg)
+    ui_fill_rect(c, 300, 100, 40, 40, grn)
+    fails = fails + check("drawn-after-cull", GetPixel(c.mem_dc, 310, 110), grn)
+    # the DC state cache must not survive a RestoreDC with a stale answer:
+    # two fills in a row must each take their own color
+    c = ui_frame(c)
+    ui_clip_push(c, 0, 0, 400, 300)
+    ui_clip_pop(c)
+    ui_fill_rect(c, 10, 250, 40, 40, red)
+    ui_fill_rect(c, 60, 250, 40, 40, grn)
+    ui_present(c)
+    fails = fails + check("cache-red", GetPixel(c.mem_dc, 20, 260), red)
+    fails = fails + check("cache-green", GetPixel(c.mem_dc, 70, 260), grn)
+    # the measure cache answers a repeat with the same numbers, and still
+    # tells two different strings apart
+    c = ui_frame(c)
+    a = ui_measure(c, "measure me")
+    b = ui_measure(c, "measure me")
+    d = ui_measure(c, "measure you")
+    fails = fails + check("measure-stable", b.w, a.w)
+    if a.w == d.w:
+        print("FAIL measure-distinct a=" + str(a.w) + " d=" + str(d.w))
+        fails = fails + 1
+    else:
+        print("PASS measure-distinct " + str(a.w) + "/" + str(d.w))
+    print("DONE fails=" + str(fails))
+    ui_fini(c)
+    return 0
+"#
+        ),
+    )
+    .unwrap();
+
+    let libs: Vec<String> = vec!["user32".to_string(), "gdi32".to_string()];
+    aoxn::build_paths_opts(&[src.display().to_string()], &exe, true, &libs, &[])
+        .expect("ui clip driver failed to compile");
+    let (code, out) = run_with_timeout(&exe, 60);
+    let code = code.expect("clip driver timed out (killed)");
+    if code == 3 {
+        assert!(out.contains("ui-window: none"), "skip without report: {out:?}");
+        eprintln!("skipped: no window could be created on this host");
+        let _ = std::fs::remove_dir_all(&dir);
+        return;
+    }
+    // every mismatch, not just the first: one drifted line per run is a slow
+    // way to read a table of expectations
+    let failed: Vec<&str> = out.lines().filter(|l| l.starts_with("FAIL")).collect();
+    assert!(failed.is_empty(), "clip/draw expectations failed: {failed:?}\nfull:\n{out}");
+    assert!(
+        out.contains("DONE fails=0"),
+        "clip driver reported failures: {out}"
+    );
+    assert_eq!(code, 0, "clip driver failed: {out:?}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+// ---------------------------------------------------------------------------
 // v0.30.0 — Windows-only toolkit
 //
 // The toolkit is three files: ui.ax (portable core), ui_draw.ax (the

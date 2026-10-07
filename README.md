@@ -49,7 +49,7 @@ def main() -> int:
 
 ### Install (one file, Windows)
 
-Download **`Aoxn-0.46.0-Setup.exe`** from the
+Download **`Aoxn-0.47.0-Setup.exe`** from the
 [releases page](https://github.com/AlonechatWorkspace/Aoxn-language/releases)
 and double-click it. That single executable carries the compiler, the
 standard library, the UI toolkit and the examples — nothing else to download,
@@ -319,10 +319,15 @@ scroll areas, tooltips), disabled groups, floating overlays and 16-role
 light/dark themes. Widgets are plain functions called every frame and the
 application owns all state, which is what fits a language without callbacks
 (yet). v0.45.0 was a performance and correctness pass over the machinery;
-**v0.46.0 adds horizontal scroll areas** (`ui_scroll_begin_h` /
+v0.46.0 added horizontal scroll areas (`ui_scroll_begin_h` /
 `ui_scroll_end_h`, a bottom scrollbar that nests with the vertical one)
-**and a monospace face** (`ui_font_mono(c)` / `ui_font_sans(c)` — Consolas
-on Windows, the fontconfig `Monospace` alias on Linux).
+and a monospace face (`ui_font_mono(c)` / `ui_font_sans(c)` — Consolas
+on Windows, the fontconfig `Monospace` alias on Linux); **v0.47.0 fixed
+the GDI clip stack, which had never restored anything** — one `ui_textbox`
+anywhere in a frame clipped the whole window (the final `BitBlt` included)
+to that textbox rect for the rest of the process — and added clip-aware
+draw culling, a 64-entry text-measure cache and a DC state cache in the
+Windows backend.
 
 **The toolkit is three portable files plus one backend per platform** — a
 portable core (`ui.ax`), a platform-neutral widget layer (`ui_draw.ax`),
@@ -582,13 +587,13 @@ program. It also compiles the real stdlib and the full `examples/` suite. See
 
 ## Testing & CI
 
-`cargo test` runs the end-to-end suite — **283 tests** in the compiler
+`cargo test` runs the end-to-end suite — **284 tests** in the compiler
 workspace (pipeline 154, compiler unit tests 18, installer stub 3, TypeScript
-front end 34, UI 10, install layout 6, CSS assets 21, CSS assets v0.36 18,
+front end 34, UI 11, install layout 6, CSS assets 21, CSS assets v0.36 18,
 symbol export 8, OpenAI SDK 2, Anthropic SDK 2, and one driver test per
 v0.44.0 stdlib module group: hashlib, datetime, math, pathlib, containers,
 os+glob, json file-IO) plus the `aoxn-pkg` crate's 94 via
-`bash run_pkg_tests.sh` — **377 in total** — where every pipeline test
+`bash run_pkg_tests.sh` — **378 in total** — where every pipeline test
 compiles `.ax` to an executable, runs it and asserts stdout + exit code. The
 suite includes the self-hosting fixed point: the stage-1 and stage-2
 compilers must emit byte-identical C and object files for the same program
@@ -727,46 +732,59 @@ Full reference, including limits: [`docs/css-assets.md`](docs/css-assets.md).
 
 ## Status
 
-**v0.46.0** · **Windows first-class + Linux supported** · 377 tests green
-(283 in the compiler workspace + 94 in `aoxn-pkg`; the IDE adds 36 Rust +
+**v0.47.0** · **the UI toolkit paints what it draws** · 378 tests green
+(284 in the compiler workspace + 94 in `aoxn-pkg`; the IDE adds 36 Rust +
 62 frontend tests of its own) ·
 
-**Linux is a supported platform again, and the UI toolkit gains a second
-backend through the same `plat_*` contract** (v0.46.0) — v0.30.0 had cut the
-platform list to Windows alone; v0.46.0 brings Linux back for the compiler
-(ELF objects, `-lm` linked, no `/STACK` flag), the whole test suite (a new
-`ubuntu-latest` CI job) and a **rewritten `stdlib/ui_x11.ax`**: Xlib for the
-window and input, Xft for antialiased UTF-8 text, an off-screen Pixmap for
-double buffering, the X11 selection protocol for the clipboard, a per-frame
-`XQueryKeymap` sweep so held keys read continuously down instead of
-flickering between autorepeat pairs, and the close request travelling
-through shared-block slot 824 (Aoxn passes `UI` by value, so `plat_close`
-cannot set a field the app loop would see). `target_os()` now folds the OS
-the compiler was BUILT on — `"windows"` or `"linux"` — and the self-hosted
-compiler needs no platform check of its own: its builtin emitter calls
-`target_os()`, a value burned in by whatever compiler built it, so every
-stage of the fixed-point chain on one machine folds the same host OS and the
-fixed point stays byte-identical by construction. The stdlib branches rather
-than forks: `os.ax` serves Linux through plain libc (mkdir/stat/opendir/
-readdir/getenv/setenv, the glibc struct offsets documented in the header)
-while the `W` Win32 calls keep serving Windows — an unreferenced `extern
-def` emits no symbol reference, so each platform links only its own side;
-`exe_path()` answers through `/proc/self/exe` on Linux. What stays
-Windows-only does so honestly: the HTTP transport rides WinHTTP and the
-entry points return a clean "no transport on this platform" error on Linux
-rather than failing to link, and the single-file installer remains a Windows
-artifact ·
+**the UI toolkit finally paints what it draws, and stops paying for what
+nobody can see** (v0.47.0) — the GDI clip stack had never restored
+anything (`IntersectClipRect` only ever narrows, so the old pop narrowed it
+further), which meant **one `ui_textbox` anywhere in a frame left the whole
+window clipped to that textbox rect for the rest of the process** —
+`BitBlt` included, since a blit copies only what the source clip allows;
+`ui_win.ax` now keeps one `SaveDC` handle per level and `RestoreDC`es on
+pop, the widget layer keeps its own shadow of that stack (so a pop restores
+the parent rect and can also cull draws the clip cannot show), every draw
+primitive skips the platform when the clip hides it (**-40 %** on a 3000 px
+document in a 200 px viewport), `ui_measure` answers from a 64-entry
+content-keyed cache (**96x** on a repeat: 52.8 ms -> 0.55 ms per 20 000
+measures), and the Windows backend remembers the DC's selected pen, brush,
+font and colors instead of re-selecting them per call (**-6 %** per fill,
+~9 % on a 100-widget scene). The new pixel-readback test
+(`ui_clip_stack_restores_and_culls`) fails against the previous stdlib with
+seven mismatches. Honest number: a heavy scene got **slower** (1.8 -> 3.5
+ms/frame) because the old one was not drawing most of the frame ·
 
-**the UI toolkit gains horizontal scroll areas and a monospace face**
-(v0.46.0) — `ui_scroll_begin_h(c, x, y, w, h, scroll_x, content_w)` +
-`ui_scroll_end_h(c)` add the bottom-scrollbar twin of the vertical scroll
-area (drag to scroll; the clip stack intersects, so the two nest —
-begin+begin_h+draw+end+end_h leaves exactly the content region), and
-`ui_font_mono(c)` / `ui_font_sans(c)` point the widget layer's body font at
-Consolas (Windows) or the fontconfig `Monospace` alias (Linux) and back —
-both faces opened by the backend at init and parked on `UI.font_mono` ·
+**the previous milestone** (v0.46.0) brought Linux back and gave the
+toolkit a second backend through the same `plat_*` contract — v0.30.0 had
+cut the platform list to Windows alone; v0.46.0 restores Linux for the
+compiler (ELF objects, `-lm` linked, no `/STACK` flag), the whole test
+suite (a new `ubuntu-latest` CI job) and a **rewritten `stdlib/ui_x11.ax`**:
+Xlib for the window and input, Xft for antialiased UTF-8 text, an
+off-screen Pixmap for double buffering, the X11 selection protocol for the
+clipboard, a per-frame `XQueryKeymap` sweep so held keys read continuously
+down instead of flickering between autorepeat pairs, and the close request
+travelling through shared-block slot 824 (Aoxn passes `UI` by value, so
+`plat_close` cannot set a field the app loop would see). `target_os()` now
+folds the OS the compiler was BUILT on — `"windows"` or `"linux"` — and the
+self-hosted compiler needs no platform check of its own: its builtin emitter
+calls `target_os()`, a value burned in by whatever compiler built it, so
+every stage of the fixed-point chain on one machine folds the same host OS
+and the fixed point stays byte-identical by construction. The stdlib
+branches rather than forks: `os.ax` serves Linux through plain libc
+(mkdir/stat/opendir/readdir/getenv/setenv, the glibc struct offsets
+documented in the header) while the `W` Win32 calls keep serving Windows —
+an unreferenced `extern def` emits no symbol reference, so each platform
+links only its own side; `exe_path()` answers through `/proc/self/exe` on
+Linux. What stays Windows-only does so honestly: the HTTP transport rides
+WinHTTP and the entry points return a clean "no transport on this platform"
+error on Linux rather than failing to link, and the single-file installer
+remains a Windows artifact. That release also added horizontal scroll areas
+(`ui_scroll_begin_h` / `ui_scroll_end_h`) and a monospace face
+(`ui_font_mono` / `ui_font_sans`; the clip stack intersects, so vertical and
+horizontal scroll areas nest) ·
 
-**the previous milestone** (v0.45.0) was a performance and correctness pass
+**before that** (v0.45.0) was a performance and correctness pass
 over the UI machinery: a popup-overflow clamp for combobox/menu lists past
 32 items, O(n) text positioning (one measure per codepoint accumulated),
 an O(1) `tree_has_child` on a per-node child count, the caret x-offset
@@ -826,7 +844,7 @@ Apache-2.0 — see [`LICENSE`](LICENSE).
 ### 一个 exe 装全部（Windows）
 
 从 [releases 页面](https://github.com/AlonechatWorkspace/Aoxn-language/releases)
-下载 **`Aoxn-0.46.0-Setup.exe`**，双击即可。**这一个 exe 里就带着编译器、标准库、
+下载 **`Aoxn-0.47.0-Setup.exe`**，双击即可。**这一个 exe 里就带着编译器、标准库、
 UI 工具箱和示例程序**——不用再下载别的，也不用自己解压：
 
 ```console
@@ -1032,10 +1050,14 @@ Esc 关闭）、**树/表格模型视图**（堆 `TreeModel`/`TableModel`）、�
 文本框、列表框、浮层下拉框、标签页、分组框、滚动区、工具提示）、禁用态、
 浮层覆盖与 16 色亮/暗主题。控件是每帧调用的普通函数，状态由应用自己
 持有——这正是"暂无回调"的语言所能承载的形态（用法示例见上方英文区）。
-v0.45.0 是对内部机制的一次性能与正确性整备；**v0.46.0 新增横向滚动区域**
+v0.45.0 是对内部机制的一次性能与正确性整备；v0.46.0 新增横向滚动区域
 （`ui_scroll_begin_h` / `ui_scroll_end_h`，底部滚动条，与竖向可嵌套）
-**与等宽字体**（`ui_font_mono(c)` / `ui_font_sans(c)`——Windows 上是
-Consolas，Linux 上是 fontconfig 的 `Monospace` 别名）。
+与等宽字体（`ui_font_mono(c)` / `ui_font_sans(c)`——Windows 上是
+Consolas，Linux 上是 fontconfig 的 `Monospace` 别名）；**v0.47.0 修好了
+GDI 裁剪栈——它从来没能恢复过**：一帧里只要出现一个 `ui_textbox`，整个
+窗口（含最后的 `BitBlt`）从那一刻起就被裁到那个 textbox 的矩形里，直到
+进程结束；同时加入按裁剪区剔除绘制、64 项文本测量缓存，以及 Windows
+后端的 DC 状态缓存。
 
 **工具箱由三个可移植文件加每平台一个后端组成**：可移植内核（`ui.ax`）、与
 平台无关的控件层（`ui_draw.ax`），以及 `ui_win.ax`（Win32/GDI）或
@@ -1222,12 +1244,12 @@ Web 服务同样能打：[`web/`](web/README.md) 套件用 Aoxn 写了 HTTP/1.1 
 
 ## 测试与 CI
 
-`cargo test` 跑端到端测试套件——编译器工作区 **283 个**（pipeline 154、编译器
-单元测试 18、安装器 stub 3、TypeScript 前端 34、UI 10、安装布局 6、CSS 资产
+`cargo test` 跑端到端测试套件——编译器工作区 **284 个**（pipeline 154、编译器
+单元测试 18、安装器 stub 3、TypeScript 前端 34、UI 11、安装布局 6、CSS 资产
 21、CSS 资产 v0.36 18、符号导出 8、OpenAI SDK 2、Anthropic SDK 2，以及
 v0.44.0 标准库模块组各一个驱动测试：hashlib、datetime、math、pathlib、
 containers、os+glob、json 文件 I/O），另有 `aoxn-pkg` crate 的 94 个经
-`bash run_pkg_tests.sh` 运行——**合计 377 个**——每个 pipeline 测试都是
+`bash run_pkg_tests.sh` 运行——**合计 378 个**——每个 pipeline 测试都是
 .ax → 可执行文件 → 运行 → 断言 stdout 与退出码。其中含自举固定点：
 stage-1 与 stage-2 编译器对同一程序必须产出逐字节一致的 C 文本与目标文件
 （目标文件比较会屏蔽 clang 写入每个 Windows 目标文件的 COFF 时间戳）。
@@ -1350,11 +1372,26 @@ print(asset_path(styles_fingerprint()))   # …\assets\82b4fb25….css
 
 ## 现状
 
-**v0.46.0** · **Windows 第一梯队 + Linux 受支持** · 377 测试全绿
-（编译器工作区 283 + `aoxn-pkg` 94；IDE 另有 36 个 Rust + 62 个前端测试）·
+**v0.47.0** · **UI 工具箱终于画出了它要画的东西** · 378 测试全绿
+（编译器工作区 284 + `aoxn-pkg` 94；IDE 另有 36 个 Rust + 62 个前端测试）·
 
-**Linux 重新成为受支持平台，UI 工具箱经同一套 `plat_*` 契约获得第二个
-后端**（v0.46.0）——v0.30.0 曾把平台清单砍到只剩 Windows；v0.46.0 把
+**UI 工具箱终于画出了它要画的东西，也不再为没人能看见的东西付费**
+（v0.47.0）——GDI 的裁剪栈从来没能恢复过（`IntersectClipRect` 只会收窄，
+所以旧的 pop 只会收得更窄），于是**一帧里只要出现一个 `ui_textbox`，整个
+窗口从那一刻起就被裁到那个 textbox 的矩形里，直到进程结束**——`BitBlt`
+也一样中招，因为 blit 只拷贝源 DC 裁剪区允许的部分。`ui_win.ax` 现在每层
+保存一个 `SaveDC` 句柄、pop 时 `RestoreDC`；控件层同时保留自己那份裁剪栈
+影子（pop 于是能真的还原父矩形，也能顺手剔掉裁剪区看不见的绘制——**-40 %**，
+场景是 3000 px 文档塞进 200 px 视口）；`ui_measure` 由 64 项按内容哈希
+索引的缓存回答（重复测量 **96×**：每 2 万次 52.8 ms → 0.55 ms）；Windows
+后端还会记住 DC 已选中的画笔、画刷、字体与颜色，不再每次重选（每次填充
+**-6 %**，100 控件场景整体约 **-9 %**）。新增的像素回读测试
+`ui_clip_stack_restores_and_culls` 在旧标准库上会报七处不符。诚实数字：
+重场景反而**变慢**了（1.8 → 3.5 ms/帧），因为旧的那个根本没画出大部分
+帧 ·
+
+**上一个里程碑**（v0.46.0）让 Linux 回归，并经同一套 `plat_*` 契约给工具箱
+加上第二个后端——v0.30.0 曾把平台清单砍到只剩 Windows；v0.46.0 把
 Linux 带回编译器（ELF 目标文件、自动链 `-lm`、不再传 `/STACK` 标志）、
 整套测试（新增 `ubuntu-latest` CI 任务）与**重写的 `stdlib/ui_x11.ax`**：
 Xlib 负责窗口与输入、Xft 负责反锯齿 UTF-8 文本、离屏 Pixmap 双缓冲、
@@ -1370,17 +1407,12 @@ X11 selection 协议剪贴板、每帧一次 `XQueryKeymap` 扫描（按住的�
 未被引用的 `extern def` 不产生符号引用，所以每个平台只链接自己那一侧；
 Linux 上 `exe_path()` 经 `/proc/self/exe` 回答。保持 Windows-only 的部分
 以诚实的方式守着：HTTP 传输层骑在 WinHTTP 上，Linux 上入口返回干净的
-「本平台暂无传输层」错误而不是链接失败；单文件安装器仍是 Windows 工件 ·
+「本平台暂无传输层」错误而不是链接失败；单文件安装器仍是 Windows 工件。
+同一版本还加入横向滚动区域（`ui_scroll_begin_h` / `ui_scroll_end_h`，
+裁剪栈取交集，故竖向与横向可嵌套）与等宽字体（`ui_font_mono` /
+`ui_font_sans`）·
 
-**UI 工具箱新增横向滚动区域与等宽字体**（v0.46.0）——
-`ui_scroll_begin_h(c, x, y, w, h, scroll_x, content_w)` +
-`ui_scroll_end_h(c)` 是竖向滚动区的底部滚动条孪生版（拖拽滚动；裁剪栈
-取交集，两者可嵌套——begin+begin_h+绘制+end+end_h 恰好留下内容区）；
-`ui_font_mono(c)` / `ui_font_sans(c)` 把控件层的正文字体指向 Consolas
-（Windows）或 fontconfig 的 `Monospace` 别名（Linux）再切回来——两张字体
-都由后端在 init 时打开并停在 `UI.font_mono` 上 ·
-
-**上一个里程碑**（v0.45.0）是对 UI 机制的性能与正确性整备：浮层列表超过
+**再之前**（v0.45.0）是对 UI 机制的性能与正确性整备：浮层列表超过
 32 项的溢出钳制、O(n) 文本定位、凭每节点子计数做到 O(1) 的
 `tree_has_child`、光标 x 偏移缓存（st 532..535）、可键盘导航的模态菜单、
 合并为一个的 `sb_widget`；v0.44.1 修复 `os_getenv` 截断超过 2048 字符的

@@ -547,12 +547,39 @@ crates/aoxn-pkg       package manager crate (its own dependency set; see above)
   bitwise ops in the language.
 - The shared heap block (`st`, 1024 i64 slots) layout is documented in the
   `ui.ax` header comment — extend it there when adding state. Slots
-  820/821 = the clip-rect stack, 822/823 = the clipboard buffer (X11's
+  820/821 = the backend clip stack (**Windows: one `SaveDC` handle per
+  level, `RestoreDC` on pop — `IntersectClipRect` only ever narrows, so
+  re-intersecting on pop could never restore; that bug clipped the whole
+  window to the first textbox rect for the rest of the process, BitBlt
+  included, and `tests/ui.rs::ui_clip_stack_restores_and_culls` is the
+  pixel readback that pins it**), 822/823 = the clipboard buffer (X11's
   selection-owner state; Windows keeps the bytes in GlobalAlloc),
   824 = the X11 close request consumed by `plat_pump` (Windows needs no
   flag — close detection is the `IsWindow` poll),
   826 = the sans font handle parked for `ui_font_sans`,
-  532..535 = the caret x-offset cache (owner id / caret / length / width).
+  532..535 = the caret x-offset cache (owner id / caret / length / width),
+  827..834 = the widget layer's own state: the clip SHADOW stack (827
+  stack, 828 depth, 829..832 the effective clip in force, 833 the
+  canvas-known flag) that `ui_clip_push`/`ui_clip_pop` maintain and that
+  `rect_visible`/`text_visible` cull against — nothing is culled until
+  `ui_init`/`ui_resize_canvas` set the canvas, so headless tests still
+  draw everything — and 834 the 64-entry text-measure cache keyed by
+  (bounded content hash, from, to),
+  835..840 = the Windows DC state cache (selected stock brush/pen, their
+  colors, selected font, text color); anything that changes the DC behind
+  its back must call `dc_cache_drop` (clip pop's `RestoreDC`, the resize
+  bitmap swap).
+- **Measure per-op costs before optimizing this toolkit** (i5-1135G7, GDI,
+  1000x700): `BitBlt` 0.8 ms, full-window fill 0.08 ms, `TextOutW` ~7 us,
+  `plat_measure` ~2.6 us, `plat_fill_rect` ~1.3 us, and
+  `GetAsyncKeyState` / `PeekMessageW` / `GetClientRect` are FREE (10 000
+  calls measure at 0 ms — the 256-key sweep in `plat_pump` is not worth
+  touching). v0.47.0's numbers: culling -40 % on a scroll scene, cached
+  measure 96x on a repeat, DC cache -6 % per fill, ~9 % on a 100-widget
+  scene. The clip fix itself made a heavy scene SLOWER (1.8 -> 3.5 ms per
+  frame) because the old number came from a renderer that was not drawing
+  most of the frame — if a benchmark here gets faster, check what stopped
+  being painted before you celebrate.
 - **GDI `DC_PEN`/`DC_BRUSH` traps (Windows)**: `GetStockObject(20)` is out
   of range and fails silently. Keep the decimal-constant discipline in the
   UI sources: no hex literals there (bitwise/shift operators exist since

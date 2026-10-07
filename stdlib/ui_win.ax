@@ -24,9 +24,10 @@
 #   - exes are console-subsystem (the compiler links the default CRT
 #     entry), so plat_init calls FreeConsole() to drop the stray console
 #     window. Piped stdout (tests, CI) keeps working: handles stay valid.
-#   - GDI's clip is one saved state, but the widget layer wants a push/pop
-#     RECT stack, so plat_clip_push/pop keep the rectangles in the shared
-#     heap block and re-intersect on restore (st 820/821).
+#   - GDI's clip region is part of the DC's saved state, so the widget layer's
+#     push/pop stack is SaveDC/RestoreDC (st 820/821), one saved handle per
+#     level. IntersectClipRect only ever narrows, so re-intersecting on pop
+#     could not restore the parent clip — see plat_clip_push.
 #
 # Widget state lives where the language can express it: with the caller
 # (checkbox/slider values are taken and returned) or in the shared heap
@@ -110,44 +111,98 @@ def plat_canvas_ok(c: UI) -> bool:
 
 # ---- drawing primitives ----
 # stock objects used below: NULL_BRUSH=5 NULL_PEN=8 DC_BRUSH=18 DC_PEN=19
+#
+# ---- DC state cache (v0.47.0) ----
+# Every primitive used to re-select both stock objects and both colors on
+# every call, so a 40-button frame spent ~300 GDI calls remembering what it
+# had already told the DC. Consecutive ops almost always want the same pen,
+# brush and color (a table's row separator, a scrollbar's groove, a run of
+# labels in one text color), so the backend remembers what is selected:
+#   835/836  selected brush / pen object
+#   837/838  the DC_BRUSH / DC_PEN colors
+#   839      selected font handle
+#   840      text color
+# Anything that can change the DC behind our back — RestoreDC on a clip pop,
+# and swapping the bitmap on a resize — calls dc_cache_drop first. A wrong
+# cached value would paint in the wrong color, so the drop list is the short
+# list to keep in sync, not the primitives.
+
+def dc_select_brush(c: UI, stock: int):
+    if st_get(c, 835) != stock:
+        SelectObject(c.mem_dc, GetStockObject(stock))
+        st_set(c, 835, stock)
+
+def dc_select_pen(c: UI, stock: int):
+    if st_get(c, 836) != stock:
+        SelectObject(c.mem_dc, GetStockObject(stock))
+        st_set(c, 836, stock)
+
+def dc_brush_color(c: UI, color: int):
+    if st_get(c, 837) != color:
+        SetDCBrushColor(c.mem_dc, color)
+        st_set(c, 837, color)
+
+def dc_pen_color(c: UI, color: int):
+    if st_get(c, 838) != color:
+        SetDCPenColor(c.mem_dc, color)
+        st_set(c, 838, color)
+
+def dc_font(c: UI, f: int):
+    if st_get(c, 839) != f:
+        SelectObject(c.mem_dc, f)
+        st_set(c, 839, f)
+
+def dc_text_color(c: UI, color: int):
+    if st_get(c, 840) != color:
+        SetTextColor(c.mem_dc, color)
+        st_set(c, 840, color)
+
+# the DC is no longer in the state we cached
+def dc_cache_drop(c: UI):
+    st_set(c, 835, 0)
+    st_set(c, 836, 0)
+    st_set(c, 837, -1)
+    st_set(c, 838, -1)
+    st_set(c, 839, 0)
+    st_set(c, 840, -1)
 
 def plat_fill_rect(c: UI, x: int, y: int, w: int, h: int, color: int):
-    SelectObject(c.mem_dc, GetStockObject(18))
-    SetDCBrushColor(c.mem_dc, color)
-    SelectObject(c.mem_dc, GetStockObject(8))
+    dc_select_brush(c, 18)
+    dc_brush_color(c, color)
+    dc_select_pen(c, 8)
     Rectangle(c.mem_dc, x, y, x + w, y + h)
 
 def plat_frame_rect(c: UI, x: int, y: int, w: int, h: int, color: int):
-    SelectObject(c.mem_dc, GetStockObject(19))
-    SetDCPenColor(c.mem_dc, color)
-    SelectObject(c.mem_dc, GetStockObject(5))
+    dc_select_pen(c, 19)
+    dc_pen_color(c, color)
+    dc_select_brush(c, 5)
     Rectangle(c.mem_dc, x, y, x + w, y + h)
 
 def plat_round_fill(c: UI, x: int, y: int, w: int, h: int, fill: int, border: int):
-    SelectObject(c.mem_dc, GetStockObject(18))
-    SetDCBrushColor(c.mem_dc, fill)
-    SelectObject(c.mem_dc, GetStockObject(19))
-    SetDCPenColor(c.mem_dc, border)
+    dc_select_brush(c, 18)
+    dc_brush_color(c, fill)
+    dc_select_pen(c, 19)
+    dc_pen_color(c, border)
     RoundRect(c.mem_dc, x, y, x + w, y + h, 8, 8)
 
 # filled ellipse with a ring around it (radio button body)
 def plat_ellipse(c: UI, x: int, y: int, w: int, h: int, fill: int, border: int):
-    SelectObject(c.mem_dc, GetStockObject(18))
-    SetDCBrushColor(c.mem_dc, fill)
-    SelectObject(c.mem_dc, GetStockObject(19))
-    SetDCPenColor(c.mem_dc, border)
+    dc_select_brush(c, 18)
+    dc_brush_color(c, fill)
+    dc_select_pen(c, 19)
+    dc_pen_color(c, border)
     Ellipse(c.mem_dc, x, y, x + w, y + h)
 
 # filled ellipse, no outline (radio button dot)
 def plat_ellipse_fill(c: UI, x: int, y: int, w: int, h: int, fill: int):
-    SelectObject(c.mem_dc, GetStockObject(18))
-    SetDCBrushColor(c.mem_dc, fill)
-    SelectObject(c.mem_dc, GetStockObject(8))
+    dc_select_brush(c, 18)
+    dc_brush_color(c, fill)
+    dc_select_pen(c, 8)
     Ellipse(c.mem_dc, x, y, x + w, y + h)
 
 def plat_line(c: UI, x1: int, y1: int, x2: int, y2: int, color: int):
-    SelectObject(c.mem_dc, GetStockObject(19))
-    SetDCPenColor(c.mem_dc, color)
+    dc_select_pen(c, 19)
+    dc_pen_color(c, color)
     MoveToEx(c.mem_dc, x1, y1, 0)
     LineTo(c.mem_dc, x2, y2)
 
@@ -155,14 +210,14 @@ def plat_text(c: UI, x: int, y: int, s: string, color: int):
     plat_text_sub(c, x, y, s, 0, len(s), color)
 
 def plat_text_big(c: UI, x: int, y: int, s: string, color: int):
-    SelectObject(c.mem_dc, c.font_big)
-    SetTextColor(c.mem_dc, color)
+    dc_font(c, c.font_big)
+    dc_text_color(c, color)
     p = utf16f(c, s)
     TextOutW(c.mem_dc, x, y, as_string(p), lstrlenW(as_string(p)))
 
 def plat_text_sub(c: UI, x: int, y: int, s: string, f: int, t: int, color: int):
-    SelectObject(c.mem_dc, c.font)
-    SetTextColor(c.mem_dc, color)
+    dc_font(c, c.font)
+    dc_text_color(c, color)
     p = utf16f_sub(c, s, f, t)
     TextOutW(c.mem_dc, x, y, as_string(p), lstrlenW(as_string(p)))
 
@@ -170,28 +225,40 @@ def plat_measure(c: UI, s: string) -> TextSize:
     return plat_measure_sub(c, s, 0, len(s))
 
 def plat_measure_sub(c: UI, s: string, f: int, t: int) -> TextSize:
-    SelectObject(c.mem_dc, c.font)
+    dc_font(c, c.font)
     p = utf16f_sub(c, s, f, t)
     n = lstrlenW(as_string(p))
     GetTextExtentPoint32W(c.mem_dc, as_string(p), n, c.rect)
     v = load_i64(c.rect)
     return TextSize(w=v % 4294967296, h=v / 4294967296)
 
-# GDI's clip is a single saved state; the widget layer wants a push/pop
-# RECT stack, so keep the rectangles ourselves and re-intersect on restore.
-# st 820 = stack base ptr, 821 = depth.
+# ---- the clip stack: SaveDC/RestoreDC, one saved state per push ----
+#
+# The old pair kept the pushed rects and re-issued IntersectClipRect on pop,
+# which cannot restore anything: GDI's clip only ever narrows, so the pop just
+# narrowed it further. The symptom was invisible in a smoke test and brutal
+# in use — ONE ui_textbox anywhere in the frame left the whole window clipped
+# to that textbox rect for the rest of the process, including the final BitBlt
+# (a blit copies only the part of the source the source DC's clip allows), so
+# nothing outside that rect was ever painted again. ui_x11.ax's comment on
+# clip_apply describes exactly this failure.
+#
+# SaveDC snapshots the region (plus the selected objects and colors) and
+# RestoreDC puts it back, which is what a push/pop stack means. st 820 = block
+# of saved-state handles (one i64 per level), 821 = depth, 30 levels max — the
+# same cap the widget layer's shadow stack uses, so the two stay in step.
 
 def plat_clip_push(c: UI, l: int, t: int, r: int, b: int):
-    if st_get(c, 820) == 0:
-        st_set(c, 820, malloc(960))
     depth = st_get(c, 821)
-    if depth < 30:
-        p = st_get(c, 820) + depth * 32
-        store_i64(p, l)
-        store_i64(p + 8, t)
-        store_i64(p + 16, r)
-        store_i64(p + 24, b)
-        st_set(c, 821, depth + 1)
+    if depth >= 30:
+        # no room for another saved state, so this push is a no-op on both
+        # stacks; a matching pop would unbalance them, but the widget layer
+        # only nests a handful deep (scroll area > list > text)
+        return
+    if st_get(c, 820) == 0:
+        st_set(c, 820, malloc(240))
+    store_i64(st_get(c, 820) + depth * 8, SaveDC(c.mem_dc))
+    st_set(c, 821, depth + 1)
     IntersectClipRect(c.mem_dc, l, t, r, b)
 
 def plat_clip_pop(c: UI):
@@ -199,8 +266,12 @@ def plat_clip_pop(c: UI):
     if depth > 0:
         depth = depth - 1
         st_set(c, 821, depth)
-        p = st_get(c, 820) + depth * 32
-        IntersectClipRect(c.mem_dc, load_i64(p), load_i64(p + 8), load_i64(p + 16), load_i64(p + 24))
+        id = load_i64(st_get(c, 820) + depth * 8)
+        if id != 0:
+            RestoreDC(c.mem_dc, id)
+            # RestoreDC rolls the selected objects and colors back too, so
+            # whatever the DC state cache remembers is now a lie
+            dc_cache_drop(c)
 
 # ---- window / canvas lifecycle ----
 
@@ -243,6 +314,9 @@ def plat_init(c: UI, title: string, w: int, h: int) -> UI:
         return c
     c.win_dc = GetDC(hwnd)
     c.mem_dc = CreateCompatibleDC(c.win_dc)
+    # nothing is selected yet: seed the DC state cache with "unknown", so the
+    # first draw of the first frame really does select and color everything
+    dc_cache_drop(c)
     c.bmp = CreateCompatibleBitmap(c.win_dc, w, h)
     c.old_bmp = SelectObject(c.mem_dc, c.bmp)
     c.font = make_font(-16, 400)
@@ -278,6 +352,9 @@ def make_font_mono(px: int) -> int:
 def plat_canvas_resize(c: UI, nw: int, nh: int) -> UI:
     SelectObject(c.mem_dc, c.old_bmp)
     DeleteObject(c.bmp)
+    # a fresh DC state comes with the fresh bitmap as far as we are concerned:
+    # forget what we think is selected rather than trust it
+    dc_cache_drop(c)
     c.bmp = CreateCompatibleBitmap(c.win_dc, nw, nh)
     c.old_bmp = SelectObject(c.mem_dc, c.bmp)
     return c

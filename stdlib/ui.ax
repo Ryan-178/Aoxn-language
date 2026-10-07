@@ -55,6 +55,18 @@
 #       826      the sans body font handle (set by the backend's plat_init)
 #                  so ui_font_sans can restore it after ui_font_mono
 #                  pointed c.font at the monospace face
+#       827..834 widget-layer state (ui_draw.ax, v0.47.0):
+#                  827 clip-shadow stack ptr (30 levels x 4 slots)
+#                  828 clip-shadow depth
+#                  829..832 the clip in force now (l, t, r, b)
+#                  833 "the canvas rect is known" flag (0 = cull nothing)
+#                  834 text-measure cache ptr (64 entries x 5 slots)
+#       835..840 Windows DC state cache (ui_win.ax only):
+#                  835/836 selected stock brush / stock pen index
+#                  837/838 the DC_BRUSH / DC_PEN colors in force
+#                  839 selected font handle, 840 text color
+#                  (X11 keeps nothing here — Xft/XSetForeground is cheap and
+#                  the port has no selected-object state to cache)
 #   - Per-frame text goes through a 64 KiB bump arena that resets every
 #     frame (utf16f/itoa10), so a steady-state UI leaks nothing. One-shot
 #     init strings use ui_utf16 (malloc) and are freed immediately.
