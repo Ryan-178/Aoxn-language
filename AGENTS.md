@@ -800,9 +800,18 @@ crates/aoxn-pkg       package manager crate (its own dependency set; see above)
   nested; hand-escaping it into a string literal is how a missing backslash
   becomes a 400. **Capacity for an OBJ/ARR node lives in its +16 slot** (the
   parser leaves `fval` at 0.0 because neither kind stores a float there),
-  and **a PARSED node has capacity 0** — `jb_grow_*` must treat 0 as "give me
-  the default". `j_parse_into(dom, src)` parses a fragment into an EXISTING
-  slab so its child indices are already correct and no remapping is needed.
+  and **a PARSED node has capacity 0** — but "0 means give me the default"
+  was a heap-corruption bug (v0.48.0). The parser ADOPTS a `Vec`'s child
+  buffer, so the block really is `Vec.cap` slots wide while the node claims
+  0; treating that as "capacity 8" and doubling to 16 made `jb_grow_*`
+  `realloc` a 20-member object's 256-byte buffer DOWN to 128 and then write
+  slot 20. **Any parsed object or array with 16+ members died with
+  0xC0000005 on its first `jb_set`** — which is precisely what
+  `jb_set_raw` exists to do. The rule now: **a grow must floor the capacity
+  at the live child count** (`jb_grow_cap`, the one quantity always known),
+  because a downward realloc is the failure and `n + 1` prevents it.
+  `j_parse_into(dom, src)` parses a fragment into an EXISTING slab so its
+  child indices are already correct and no remapping is needed.
 - **THE WRITE-BACK RULE, violated once already**: `jb_set_raw`/`jb_push_raw`
   used `dom` after `j_parse_into` had realloc'd the slab — the stale
   `dom.slab` was freed, and the next write was heap corruption (0xC0000374).
@@ -980,6 +989,26 @@ crates/aoxn-pkg       package manager crate (its own dependency set; see above)
   upgraded via an fopen probe; readable-but-EMPTY stays 1) and
   `j_write_file`. `net/codec.ax` keeps `net_b64_encode_*`; base64.ax is the
   general module with the decode direction.
+- **`len()` ON A STRING IS `strlen`, EMITTED INLINE AT EVERY USE SITE**
+  (`codegen_c.rs:1973`) — this is the single most expensive thing to get
+  wrong in this stdlib, and in v0.48.0 it was the cause of THREE quadratic
+  loops found in one audit: `j_at`'s end-of-input test (every character of
+  every token re-scanned the whole document — the JSON parser ran at
+  ~33 KB/s, 266 KB took 7 s), `jp_str`'s initial buffer size, and
+  `b64_decode`'s loop bound (1.4 MB did not finish in 600 s). **A `while`
+  whose condition mentions `len(s)` on a string is O(n) per iteration.** Hoist
+  it into an `int` before the loop, exactly as `b64_encode(data, length)`
+  already took its length as a parameter. `JParse` now carries the source
+  length in an `sn` field for the same reason. The same audit also found
+  `out = out + ...` in a loop (`j_dumps`) — concatenation allocates a fresh
+  buffer per step and abandons the old one, so it is O(n^2) allocations AND
+  O(n^2) leaked bytes; the serializer is now one pass into a byte sink that
+  grows geometrically (`JOut`/`jw_*`), threaded BY VALUE because the language
+  has no address-of.
+- **A `realloc` that can SHRINK is a bug waiting for a large input.** It bit
+  the JSON builder (`jb_grow_*`, above). When the recorded capacity of a
+  buffer may be 0 or stale while the block is really wider, floor the new
+  capacity at the live element count rather than trusting the record.
 - **"Vec[T] 基座" resolved as slot views, not a new type** (stdlib-todo
   §0.3): a Vec slot is 8 bytes — int/bool natively, f64 via
   `store_f64`/`load_f64` views (the bisect `_f` family is the worked

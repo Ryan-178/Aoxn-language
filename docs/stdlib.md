@@ -119,6 +119,16 @@ alphabets are accepted everywhere; padding is optional; a single orphan
 character (length % 4 == 1) and trailing garbage after `=` are rejected.
 `b64_decode_str` is the text convenience (NUL truncation documented).
 
+**Invalid input returns `n == -1` AND `p == 0`** (v0.48.0). The rejection
+paths used to hand back a buffer the caller had no way to release, and the
+length of a base64 body is chosen by whoever sent it — an `Authorization`
+header, a cookie, an SSE line — so that leaked on a security boundary.
+
+Both directions are O(n). `len()` on a string is `strlen` emitted inline at
+every use site, so a decode loop bounded by `len(s)` re-scans the whole input
+every iteration; the loop takes a hoisted `int` instead. The old spelling was
+quadratic: 64 KB took 608 ms and 1.4 MB did not finish inside 600 s.
+
 `stdlib/net/codec.ax` keeps `net_b64_encode_*` for the SDKs; it predates
 this module and does not move.
 
@@ -167,7 +177,11 @@ network layer; keep the copies in sync):
   size, then allocate and read — a fixed buffer silently truncated longer
   values, and the CI runners' PATH is longer than 2048 chars, which is how
   v0.44.1 caught it) `os_has_env` (distinguishes empty from unset via
-  `GetLastError == 203`) `os_setenv` `os_unsetenv` (deletes via a NULL
+  `GetLastError == 203`, and **primes it with `SetLastError(0)` first** —
+  Win32's last error is thread-sticky and a successful call does NOT clear
+  it, so any earlier miss, including `os_getenv`'s own probe of an absent
+  name, used to leave 203 latched and make the next probe of a variable that
+  really exists answer `False`) `os_setenv` `os_unsetenv` (deletes via a NULL
   value — the empty string would create an empty variable)
 - cwd: `os_cwd` `os_chdir`
 - `os_listdir(path) -> Vec` — names without `.`/`..`, discovery order;
@@ -195,6 +209,49 @@ promotion's addition is the file pair:
   failure** (a missing file upgrades the empty-document parse error via an
   fopen probe; a readable-but-EMPTY file is still err 1).
 - `j_write_file(path, dom, i) -> bool` — `j_dumps` to disk.
+
+### A parsed node can be extended — and how not to break it (v0.48.0)
+
+The parser ADOPTS a `Vec`'s child buffer into the node's `ptr_a`/`ptr_b`, so
+the block is really `Vec.cap` slots wide, but the node's capacity slot is
+left at 0. `jb_set`/`jb_push` on a parsed object or array therefore grow it,
+and the grow must **floor the new capacity at the live child count** — never
+at a "default" read from a 0. The old code doubled 0→8→16 and reallocated a
+20-member object's 256-byte buffer DOWN to 128 before writing slot 20, so any
+parsed container with **16+ members** died with `0xC0000005` on its first
+`jb_set`. That is exactly the `jb_set_raw` splice the SDKs use for tool
+schemas, which is why it survived: the SDK tests only ever built fresh nodes.
+`tests/stdlib_defect_pins.rs` is the pin.
+
+### Both directions are linear now, and that was not free
+
+Two loops in this module were quadratic, and one of them was a leak:
+
+- **`j_at`** tested end-of-input with `len(p.src)`. `len()` on a string is
+  `strlen` emitted inline at every use site, so every character of every
+  token re-scanned the remaining document. `JParse` now carries the length in
+  an `sn` field, computed once in `j_parse`/`j_parse_into`. Measured at
+  `-O3`: 266 KB went from 7064 ms to 7 ms.
+- **`jp_str`** allocated the whole document for EVERY string. Safe (escapes
+  only shrink, so the decoded form always fits) but never freed by design, so
+  a 330 KB document with 20 000 strings pushed 6.29 GB of allocator traffic
+  through a 325.8 MB peak. It is now sized from the remaining input and grown
+  geometrically — same document, 4.8 MB.
+- **`j_dumps`** built its result by repeated `out = out + ...`. Concatenation
+  allocates a fresh buffer per step and abandons the old one, so an n-element
+  container cost n(n+1)/2 allocations with every intermediate leaked: a
+  20 000-key response touched 8627.8 MB and 28.4 s. It is now one pass into
+  `JOut`, a byte sink that grows geometrically, threaded by value (there is
+  no address-of, so the cursor is handed back rather than pointed at).
+  `j_quote` is now a pre-reserved wrapper over `jw_quote`, so the builder
+  still routes through ONE escaping implementation. Round trips stay
+  byte-identical.
+
+`j_num_float` also clamps its exponent at `J_MAX_EXP() = 400`. The digit run
+used to be unbounded, so `1e999999999` spun the scaling loop for minutes — a
+reachable DoS on any untrusted JSON — and the accumulator could wrap past i64
+into a *small* exponent. 400 is past the double range, so the clamped answer
+is still the IEEE one (inf, or 0.0 for a large negative).
 
 ## bisect
 

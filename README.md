@@ -49,7 +49,7 @@ def main() -> int:
 
 ### Install (one file, Windows)
 
-Download **`Aoxn-0.47.0-Setup.exe`** from the
+Download **`Aoxn-0.48.0-Setup.exe`** from the
 [releases page](https://github.com/AlonechatWorkspace/Aoxn-language/releases)
 and double-click it. That single executable carries the compiler, the
 standard library, the UI toolkit and the examples — nothing else to download,
@@ -587,13 +587,15 @@ program. It also compiles the real stdlib and the full `examples/` suite. See
 
 ## Testing & CI
 
-`cargo test` runs the end-to-end suite — **284 tests** in the compiler
+`cargo test` runs the end-to-end suite — **285 tests** in the compiler
 workspace (pipeline 154, compiler unit tests 18, installer stub 3, TypeScript
 front end 34, UI 11, install layout 6, CSS assets 21, CSS assets v0.36 18,
 symbol export 8, OpenAI SDK 2, Anthropic SDK 2, and one driver test per
 v0.44.0 stdlib module group: hashlib, datetime, math, pathlib, containers,
-os+glob, json file-IO) plus the `aoxn-pkg` crate's 94 via
-`bash run_pkg_tests.sh` — **378 in total** — where every pipeline test
+os+glob, json file-IO — plus `stdlib_defect_pins`, the v0.48.0 regression
+suite for the JSON builder corruption and the quadratic loops) plus the
+`aoxn-pkg` crate's 94 via
+`bash run_pkg_tests.sh` — **379 in total** — where every pipeline test
 compiles `.ax` to an executable, runs it and asserts stdout + exit code. The
 suite includes the self-hosting fixed point: the stage-1 and stage-2
 compilers must emit byte-identical C and object files for the same program
@@ -732,12 +734,37 @@ Full reference, including limits: [`docs/css-assets.md`](docs/css-assets.md).
 
 ## Status
 
-**v0.47.0** · **the UI toolkit paints what it draws** · 378 tests green
-(284 in the compiler workspace + 94 in `aoxn-pkg`; the IDE adds 36 Rust +
+**v0.48.0** · **a stdlib audit: one heap corruption and three quadratic loops,
+all from the same two mistakes** · 379 tests green
+(285 in the compiler workspace + 94 in `aoxn-pkg`; the IDE adds 36 Rust +
 62 frontend tests of its own) ·
 
-**the UI toolkit finally paints what it draws, and stops paying for what
-nobody can see** (v0.47.0) — the GDI clip stack had never restored
+**the JSON builder could shrink a parsed node's buffer under you** (v0.48.0) —
+the parser adopts a `Vec`'s child buffer but leaves the node's capacity at 0,
+and the grow read that as "default 8", doubled to 16, and `realloc`'d a
+20-member object's 256-byte block **down** to 128 before writing slot 20. Any
+parsed object or array with 16+ members died with `0xC0000005` the first time
+a field was added — which is exactly what `jb_set_raw` exists to do, and why
+it survived: the SDK tests only ever built fresh nodes. Confirmed
+differentially (8 members fine, 20 members access violation). A grow now
+floors the capacity at the live child count ·
+**and `len()` on a string is `strlen` emitted inline at every use site**,
+which made three loops quadratic: `j_at`'s end-of-input test (the JSON parser
+ran at ~33 KB/s — a 266 KB response took 7 s), `jp_str`'s buffer size (every
+string allocated the whole document: a 330 KB payload with 20 000 strings
+peaked at 325.8 MB), and `b64_decode`'s loop bound (1.4 MB did not finish in
+600 s). `j_dumps` compounded it — concatenation allocates a fresh buffer per
+step and abandons the old one, so 20 000 keys touched **8627.8 MB and 28.4 s**.
+All four are now linear: 266 KB parses in 7 ms, the same 20 000-key response
+serializes in 282 ms at 10.2 MB, and base64 is 3 ms for 2.8 MB. Also fixed: an
+unbounded JSON exponent (`1e999999999` spun for minutes — a reachable DoS on
+any untrusted JSON), base64's rejection paths leaked a buffer whose length the
+sender chooses, and `os_has_env` read a stale `GetLastError` that Win32 does
+not clear on success — so a variable that really existed answered `False`
+after any earlier miss ·
+
+**the previous milestone** (v0.47.0) — the UI toolkit finally paints what it draws, and stops paying for what
+nobody can see — the GDI clip stack had never restored
 anything (`IntersectClipRect` only ever narrows, so the old pop narrowed it
 further), which meant **one `ui_textbox` anywhere in a frame left the whole
 window clipped to that textbox rect for the rest of the process** —
@@ -844,7 +871,7 @@ Apache-2.0 — see [`LICENSE`](LICENSE).
 ### 一个 exe 装全部（Windows）
 
 从 [releases 页面](https://github.com/AlonechatWorkspace/Aoxn-language/releases)
-下载 **`Aoxn-0.47.0-Setup.exe`**，双击即可。**这一个 exe 里就带着编译器、标准库、
+下载 **`Aoxn-0.48.0-Setup.exe`**，双击即可。**这一个 exe 里就带着编译器、标准库、
 UI 工具箱和示例程序**——不用再下载别的，也不用自己解压：
 
 ```console
@@ -1244,12 +1271,13 @@ Web 服务同样能打：[`web/`](web/README.md) 套件用 Aoxn 写了 HTTP/1.1 
 
 ## 测试与 CI
 
-`cargo test` 跑端到端测试套件——编译器工作区 **284 个**（pipeline 154、编译器
+`cargo test` 跑端到端测试套件——编译器工作区 **285 个**（pipeline 154、编译器
 单元测试 18、安装器 stub 3、TypeScript 前端 34、UI 11、安装布局 6、CSS 资产
 21、CSS 资产 v0.36 18、符号导出 8、OpenAI SDK 2、Anthropic SDK 2，以及
 v0.44.0 标准库模块组各一个驱动测试：hashlib、datetime、math、pathlib、
-containers、os+glob、json 文件 I/O），另有 `aoxn-pkg` crate 的 94 个经
-`bash run_pkg_tests.sh` 运行——**合计 378 个**——每个 pipeline 测试都是
+containers、os+glob、json 文件 I/O——外加 `stdlib_defect_pins`，即 v0.48.0
+为 JSON 构建器堆损坏与三处二次方循环加的回归套件），另有 `aoxn-pkg` crate 的
+94 个经 `bash run_pkg_tests.sh` 运行——**合计 379 个**——每个 pipeline 测试都是
 .ax → 可执行文件 → 运行 → 断言 stdout 与退出码。其中含自举固定点：
 stage-1 与 stage-2 编译器对同一程序必须产出逐字节一致的 C 文本与目标文件
 （目标文件比较会屏蔽 clang 写入每个 Windows 目标文件的 COFF 时间戳）。
@@ -1372,11 +1400,31 @@ print(asset_path(styles_fingerprint()))   # …\assets\82b4fb25….css
 
 ## 现状
 
-**v0.47.0** · **UI 工具箱终于画出了它要画的东西** · 378 测试全绿
-（编译器工作区 284 + `aoxn-pkg` 94；IDE 另有 36 个 Rust + 62 个前端测试）·
+**v0.48.0** · **一次标准库审计：一处堆损坏与三处二次方循环，都源于同样两个错误**
+· 379 测试全绿
+（编译器工作区 285 + `aoxn-pkg` 94；IDE 另有 36 个 Rust + 62 个前端测试）·
 
-**UI 工具箱终于画出了它要画的东西，也不再为没人能看见的东西付费**
-（v0.47.0）——GDI 的裁剪栈从来没能恢复过（`IntersectClipRect` 只会收窄，
+**JSON 构建器可能在你脚下把已解析节点的缓冲区改小**（v0.48.0）——解析器会
+接管 `Vec` 的子缓冲区，却把节点的容量槽留成 0，而扩容逻辑把 0 读成「默认 8」，
+翻倍到 16，于是把一个 20 成员对象的 256 字节块**向下** `realloc` 到 128 字节，
+再往第 20 槽写。任何**成员数 ≥16** 的已解析对象或数组，第一次加字段就会以
+`0xC0000005` 崩溃——而那恰恰是 `jb_set_raw` 的用途，也正是它长期没被发现的原因：
+SDK 测试只构建过全新的节点。差分实验坐实（8 个成员正常，20 个成员越界）。
+现在扩容一律以**存活子节点数**为下限 ·
+**并且 `len()` 作用在 string 上就是 `strlen`，且在每个使用点内联发射**，
+这让三处循环变成二次方：`j_at` 的输入结束判断（JSON 解析器只跑到 ~33 KB/s，
+266 KB 的响应要 7 秒）、`jp_str` 的缓冲区大小（每个串都按整篇文档分配：
+330 KB、2 万个串的输入峰值 325.8 MB）、`b64_decode` 的循环上界（1.4 MB 在
+600 秒内都没跑完）。`j_dumps` 又叠加了一层——字符串拼接每步新分配一块并丢弃
+旧的，于是 2 万个键的响应吃掉 **8627.8 MB 和 28.4 秒**。四处现已全部线性：
+266 KB 解析 7 ms，同一份 2 万键响应序列化 282 ms / 10.2 MB，base64 处理
+2.8 MB 是 3 ms。同时修掉：JSON 指数无上界（`1e999999999` 会空转数分钟，
+对任何不受信的 JSON 都是可达 DoS）、base64 的拒绝路径泄漏了长度由发送方
+决定的缓冲区、以及 `os_has_env` 读了陈旧的 `GetLastError`——Win32 成功时并不
+清除它，于是任何一次先前的查找未命中都会让**确实存在**的变量被答成 `False` ·
+
+**上一个里程碑**（v0.47.0）——UI 工具箱终于画出了它要画的东西，也不再为没人能看见的东西付费
+——GDI 的裁剪栈从来没能恢复过（`IntersectClipRect` 只会收窄，
 所以旧的 pop 只会收得更窄），于是**一帧里只要出现一个 `ui_textbox`，整个
 窗口从那一刻起就被裁到那个 textbox 的矩形里，直到进程结束**——`BitBlt`
 也一样中招，因为 blit 只拷贝源 DC 裁剪区允许的部分。`ui_win.ax` 现在每层
