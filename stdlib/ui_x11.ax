@@ -351,13 +351,19 @@ def plat_clip_push(c: UI, l: int, t: int, r: int, b: int):
     if st_get(c, 820) == 0:
         st_set(c, 820, malloc(960))
     depth = st_get(c, 821)
+    # The DEPTH always advances, even past the 30-slot array. It used to be
+    # stored inside the `depth < 30` branch, so a 31st push neither stored a
+    # rect nor counted — while plat_clip_pop decremented unconditionally.
+    # One over-deep nest therefore popped a rect that was never pushed and
+    # kept going, walking the stack off its own base into whatever the block
+    # held. Overflow now counts; only the storage saturates.
     if depth < 30:
         p = st_get(c, 820) + depth * 32
         store_i64(p, l)
         store_i64(p + 8, t)
         store_i64(p + 16, r)
         store_i64(p + 24, b)
-        st_set(c, 821, depth + 1)
+    st_set(c, 821, depth + 1)
     clip_apply(c)
 
 def plat_clip_pop(c: UI):
@@ -378,7 +384,12 @@ def clip_apply(c: UI):
         # first scroll area.
         XSetClipRectangles(c.win_dc, c.mem_dc, 0, 0, 0, 0, 0)
         return
-    p = st_get(c, 820) + (depth - 1) * 32
+    # past the 30 stored rects the deepest one we actually kept is the
+    # effective clip (see plat_clip_push)
+    idx = depth - 1
+    if idx > 29:
+        idx = 29
+    p = st_get(c, 820) + idx * 32
     l = load_i64(p)
     t = load_i64(p + 8)
     r = load_i64(p + 16)

@@ -132,12 +132,23 @@ ui_fill_rect(c, r.x, r.y, r.w, r.h, ui_rgb(90, 150, 220))
 ui_layout_end(c)                               # pop the hbox
 ```
 
+**Nesting deeper than 8 levels.** The cap is a refusal, not a silent drop, and
+it used to corrupt the stack: `lay_push` returned without pushing while
+`ui_layout_end` still decremented, so a 9th box popped its own 8th and every
+later end unwound a level too deep — the rest of the frame's widgets landed in
+the wrong box with nothing to indicate it. A refused push now balances its own
+`ui_layout_end` against a separate counter, so the 8 live levels cannot be
+touched, and `ui_layout_overflow(c)` tells you it happened. Raise the cap by
+widening the stack (`st 560..719` is 8 levels × 20 slots) if you need more.
+
 | Function | Signature | Behavior |
 |---|---|---|
 | `ui_vbox_begin` | `(c, x, y, w, h, margin, spacing)` | vertical stack; items are full inner width |
 | `ui_hbox_begin` | `(c, x, y, w, h, margin, spacing)` | horizontal stack; items are full inner height |
 | `ui_grid_begin` | `(c, x, y, w, h, cols, margin, spacing)` | grid with `cols` equal columns |
 | `ui_layout_end` | `(c)` | pops the current box/grid |
+| `ui_layout_depth` | `(c) -> int` | boxes currently open (0 = none) |
+| `ui_layout_overflow` | `(c) -> int` | box pushes refused past the 8-level cap (see below) |
 | `ui_v_item` | `(c, h) -> Rect` | next vbox row of height `h`; cursor advances by `h + spacing` |
 | `ui_h_item` | `(c, w) -> Rect` | next hbox column of width `w` |
 | `ui_v_item_p` | `(c, permille) -> Rect` | like `ui_v_item`, height = permille/1000 of inner height |
@@ -213,6 +224,31 @@ nothing (Aoxn string concat leaks by design; the arena is the discipline
 that keeps frame paths clean — same idea as the web server's byte buffers).
 Text *editing* allocates a fresh string per keystroke, the same cost model
 as `+`.
+
+**One press cycle, three helpers.** Every interactive widget used to open
+with the same eleven lines: read the claim from `st 0`, take it on the press
+edge inside the widget while also taking focus, and report a click on the
+release edge. Fifteen copies of that, which had already drifted. They are one
+cycle now (`ui_press`, `ui_press_claim`/`ui_press_release`, `ui_pressed`), so
+the two load-bearing details cannot drift apart: the claim is only taken when
+the slot is free, so an overlay that swallowed the press (`st 0 == -1`) is
+never stolen by a widget drawn underneath it; and the slot stays claimed for
+the whole hold, which is how the dragging widgets and the pressed-face
+colours recognise their own press. The text fields spell the claim half out
+because a click also has to place the caret. Wheel handling and scroll
+clamping are shared the same way (`ui_wheel_scroll`, `ui_clamp_scroll`), which
+is where the per-notch rate differences live (the text edit scrolls 3 notches
+per event, the scroll area a third of one).
+
+| Function | Signature | Behavior |
+|---|---|---|
+| `ui_press` | `(c, id, hot) -> bool` | the whole cycle: `True` on a press and release both inside |
+| `ui_press_claim` | `(c, id, hot) -> bool` | claim half only; `True` on the frame it claims |
+| `ui_press_release` | `(c, id) -> bool` | release half only; frees the claim |
+| `ui_pressed` | `(c, id) -> bool` | this widget currently holds the claim |
+| `ui_wheel_scroll` | `(c, scroll, maxs, per_notch) -> int` | subtract whole notches and clamp |
+| `ui_clamp_scroll` | `(scroll, maxs) -> int` | clamp to `[0, maxs]` |
+| `ui_font_height` | `(c) -> int` | the body font's line height, measured once and cached (slot 830). Centring on height does not depend on the text, so this replaces measuring a widget's whole string to read `ts.h` |
 
 ### Keyboard focus
 
@@ -408,8 +444,9 @@ The context's `st` pointer addresses 1024 i64 slots: key snapshots
 (4..515), palette (516..531), focus chain (536..538, registry 720..783),
 caret (539, cache 532..535), disabled counter (540), WM_CHAR queue
 (541..543), wheel (544), overlay record (545..555), tooltip hover
-(556..557), layout stack (558, frames 560..719), popup item pointers
-(784..815), textbox caret owner/anchor (816/819), and two v3 heap blocks:
+(556..557), layout stack (558, frames 560..719, overflow counter 559),
+popup item pointers (784..815), textbox caret owner/anchor (816/819), and
+two v3 heap blocks:
 the event bus at 817 (connect table + 32-event ring) and the line cache at
 818 (line starts for multi-line editing). `ui_state_init` / `ui_state_free`
 allocate and release it — the platform backend calls them at init/fini,
@@ -420,7 +457,8 @@ widget-layer state, all documented in the `ui.ax` header: 820/821 the
 backend clip stack (`SaveDC` handles on Windows, rects on X11), 822/823 the
 X11 clipboard buffer, 824 the X11 close flag, 826 the parked sans font,
 827..834 the widget layer's own clip shadow (827 stack, 828 depth,
-829..832 the clip in force, 833 the canvas-known flag) plus the
+829..832 the clip in force, 833 the canvas-known flag), slot **830** the cached
+body-font line height (`ui_font_height`), plus the
 text-measure cache at 834, and 835..840 the Windows DC state cache
 (selected brush/pen, their colors, selected font, text color).
 
@@ -479,6 +517,16 @@ the language cannot express.
   culled draw, two fills across a `RestoreDC`, and the measure cache
   agreeing with itself. Against the pre-v0.47.0 stdlib it fails with SEVEN
   mismatches, so it is a regression test and not decoration.
+- `ui_layout_overflow_and_arena_escape` (all platforms): the 8-level layout
+  cap balances a refused push against its own `ui_layout_end` instead of
+  popping a live box (`8 0 / 8 2 / 8 0` — the middle line is the one that
+  fails on the pre-v0.49.0 code), plus `itoa10`'s arena-exhaustion escape.
+- `ui_press_claim_cycle` (Windows): drives the press state machine the fifteen
+  widgets share — claim, hold, release inside, release outside, and the
+  overlay `-1` sentinel that must never be stolen. The smoke tests assert a
+  frame does not crash; this asserts a click *lands*.
+- `ui_font_height_is_a_cached_constant` (Windows): three calls, one
+  measurement, positive, and invalidated by a font switch.
 
 Link-time coverage lives in CI rather than the unit tests: the Windows
 job builds the gallery against `-l user32 -l gdi32`; the Linux job

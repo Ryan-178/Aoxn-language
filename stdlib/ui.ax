@@ -37,6 +37,10 @@
 #                  547..551 x, y, w, item_h, n
 #                  552 current item, 553 scroll (items), 554 items/text ptr#       556/557  tooltip hover id / hover start (ms)
 #       558      layout stack depth
+#       559      layout OVERFLOW counter: box pushes refused past the 8-level
+#                  cap. lay_push used to return without pushing while
+#                  ui_layout_end still decremented, so the 9th nesting level
+#                  popped its own 8th and unwound the rest of the frame.
 #       560..719 layout stack: 8 levels x 20 slots (kind, inner x/y/w/h,
 #                  cursor x/y, spacing, cols, col, row_h, ...)
 #       720..751 focus registry, previous frame (tab order, 32 ids)
@@ -45,7 +49,11 @@
 #       816      focused textbox caret owner id (caret lives at 539)
 #       817      event block ptr (v3): connect[256] + 32-event ring queue
 #       818      line cache block ptr (v3): line starts for multi-line edit
-#       819      textedit anchor of the drag in flight
+#       819      textbox SELECTION ANCHOR (the caret is 539). Only the focused
+#                  textbox writes this pair, so two textboxes in one frame
+#                  cannot clobber each other — but there is ONE pair, so the
+#                  caret does not survive a focus switch: refocusing a field
+#                  puts the caret at the end (see ui_textbox).
 #       820/821  clip-rect stack base ptr / depth (both backends)
 #       822/823  clipboard buffer ptr / length (X11 selection owner state;
 #                  Windows keeps the bytes in GlobalAlloc instead)
@@ -59,6 +67,10 @@
 #                  827 clip-shadow stack ptr (30 levels x 4 slots)
 #                  828 clip-shadow depth
 #                  829..832 the clip in force now (l, t, r, b)
+#                  830 cached line height of the current body font
+#                       (0 = not measured yet). Cleared by ui_font_mono /
+#                       ui_font_sans like the measure cache: a height from
+#                       the wrong face is worse than none.
 #                  833 "the canvas rect is known" flag (0 = cull nothing)
 #                  834 text-measure cache ptr (64 entries x 5 slots)
 #       835..840 Windows DC state cache (ui_win.ax only):
@@ -100,7 +112,12 @@ def i32_at(p: int) -> int:
 def utf16_write(s: string, p: int) -> int:
     i = 0
     n = 0
-    while i < len(s):
+    # `len()` on a string is strlen, EMITTED INLINE AT EVERY USE SITE — so
+    # `while i < len(s)` re-scans the entire string once per character and
+    # this function was O(n^2). Hoist the length into an int first, exactly
+    # as utf16_write_sub already does at its own bounds.
+    total = len(s)
+    while i < total:
         b = load_u8(s, i)
         if b < 128:
             cp = b
@@ -333,8 +350,20 @@ def utf16f(c: UI, s: string) -> int:
 # decimal int -> NUL-terminated ASCII in the frame arena (pointer to first
 # digit). Used by ui_label_int so hot paths never build Aoxn strings.
 def itoa10(c: UI, v: int) -> int:
-    if st_get(c, 2) + 24 > st_get(c, 3):
-        return ui_utf16(str(v))
+    # The escape must hand back the SAME KIND of buffer as the happy path:
+    # plain ASCII bytes with a NUL, because that is what the draw path reads
+    # (plat_text_sub runs the bytes through utf16_write_sub, i.e. treats them
+    # as UTF-8). It used to return ui_utf16(str(v)) — UTF-16 — so whenever
+    # the arena filled up, ui_label_int drew a number whose every second byte
+    # was a NUL: `as_string` and len() both stopped at the first digit. An
+    # Aoxn string is ASCII, immutable and leaks by design (the documented
+    # cost model for one-shot buffers), so it is the right escape.
+    #
+    # Base first, then capacity — the same two tests utf16f makes, so neither
+    # can be reached with an arena base of 0 (which would write digits through
+    # address 0).
+    if st_get(c, 1) == 0 or st_get(c, 2) + 24 > st_get(c, 3):
+        return as_ptr(str(v))
     p = st_get(c, 1) + st_get(c, 2)
     neg = False
     if v < 0:
@@ -382,6 +411,15 @@ def lay_base(c: UI) -> int:
 def lay_push(c: UI, kind: int, x: int, y: int, w: int, h: int, margin: int, spacing: int):
     d = st_get(c, 558)
     if d >= 8:
+        # Past the 8-level cap. The old code returned here WITHOUT pushing,
+        # but ui_layout_end decremented the depth anyway — so the app's 9th
+        # box silently popped its own 8th, and every subsequent ui_layout_end
+        # unwound one level deeper than it should: the rest of the frame's
+        # widgets landed in the wrong box, with nothing anywhere reporting it.
+        # The push and its end now balance against an overflow counter
+        # (st 559) instead, so the 8 live levels are untouchable and the
+        # dropped level is visible through ui_layout_overflow.
+        st_set(c, 559, st_get(c, 559) + 1)
         return
     b = 560 + d * 20
     iw = w - margin * 2
@@ -415,9 +453,25 @@ def ui_grid_begin(c: UI, x: int, y: int, w: int, h: int, cols: int, margin: int,
     st_set(c, b + 8, cols)
 
 def ui_layout_end(c: UI):
+    # Drain the OVERFLOW first. A push past the 8-level cap was refused (see
+    # lay_push), so its matching end must not take a level away from a box
+    # that really is open — that is the whole bug this ordering fixes.
+    if st_get(c, 559) > 0:
+        st_set(c, 559, st_get(c, 559) - 1)
+        return
     d = st_get(c, 558)
     if d > 0:
         st_set(c, 558, d - 1)
+
+# how many box pushes exceeded the 8-level nesting cap this frame. Non-zero
+# means a layout was dropped: raise the cap in the ui.ax header (st 560..719
+# holds 8 levels of 20 slots) or flatten the nesting.
+def ui_layout_overflow(c: UI) -> int:
+    return st_get(c, 559)
+
+# current box nesting depth (0 = none open)
+def ui_layout_depth(c: UI) -> int:
+    return st_get(c, 558)
 
 # full-width item of height h in a vbox; advances the cursor
 def ui_v_item(c: UI, h: int) -> Rect:
@@ -499,6 +553,53 @@ def ui_focus_reg(c: UI, id: int):
     if n < 32:
         st_set(c, 752 + n, id)
         st_set(c, 537, n + 1)
+
+# ---- the press claim (st slot 0), shared by every interactive widget ----
+#
+# Fifteen widgets used to open with the same eleven lines: read the claim,
+# take it on the press EDGE inside the widget while also taking focus, and
+# report a click on the release edge. That is one cycle with one answer, so
+# it is one function; the copies had already drifted (some set a local `act`,
+# some did not, one forgot the focus), which is what makes them a liability
+# rather than merely verbose.
+#
+# Two details are load-bearing and easy to lose in a rewrite:
+#   - the claim is only taken when the slot is 0, so an overlay that already
+#     swallowed the press (slot 0 == -1: an open combobox popup or menu) is
+#     never stolen by a widget drawn underneath it;
+#   - the slot stays claimed for the whole hold, which is how the dragging
+#     widgets (slider, textbox, textedit) and the pressed-face colours
+#     recognise their own press — hence ui_pressed.
+
+# the whole cycle: returns True on a press AND release both inside
+def ui_press(c: UI, id: int, hot: bool) -> bool:
+    # Claiming on this frame and releasing on it cannot both happen (one is
+    # the press edge, the other the release edge), so the release half is
+    # only reached on the frame the press ends — and `hot` is re-read then,
+    # because whether the pointer is still inside is the caller's question.
+    ui_press_claim(c, id, hot)
+    return ui_press_release(c, id) and hot
+
+# the claim half alone — for widgets that place the caret or read the mouse
+# again between the press and the release. True on the frame it claims.
+def ui_press_claim(c: UI, id: int, hot: bool) -> bool:
+    if hot and c.dn and not c.dn_prev and st_get(c, 0) == 0:
+        st_set(c, 0, id)
+        ui_focus(c, id)
+        return True
+    return False
+
+# the release half alone: True on the frame this widget's press ends
+# (whether or not the pointer is still inside — that is the caller's call).
+def ui_press_release(c: UI, id: int) -> bool:
+    if st_get(c, 0) == id and c.dn_prev and not c.dn:
+        st_set(c, 0, 0)
+        return True
+    return False
+
+# true while this widget holds the claim (a drag in flight, or held down)
+def ui_pressed(c: UI, id: int) -> bool:
+    return st_get(c, 0) == id
 
 def ui_focused(c: UI, id: int) -> bool:
     return st_get(c, 536) == id
@@ -662,6 +763,22 @@ def caret_right(s: string, at: int) -> int:
 
 def ui_wheel(c: UI) -> int:
     return st_get(c, 544)
+
+# Wheel + clamp, shared by the six scrollable widgets (list box, combobox
+# popup, scroll area, text edit, tree, table) — each of them repeated the
+# same four lines, and they had drifted: the text edit scrolls three notches
+# per wheel event and the scroll area a third of a notch, and getting that
+# difference wrong in a copy is invisible until someone scrolls it.
+def ui_wheel_scroll(c: UI, scroll: int, maxs: int, per_notch: int) -> int:
+    scroll = scroll - ui_wheel(c) / 120 * per_notch
+    return ui_clamp_scroll(scroll, maxs)
+
+def ui_clamp_scroll(scroll: int, maxs: int) -> int:
+    if scroll > maxs:
+        scroll = maxs
+    if scroll < 0:
+        scroll = 0
+    return scroll
 
 def ui_overlay_kind(c: UI) -> int:
     return st_get(c, 545)

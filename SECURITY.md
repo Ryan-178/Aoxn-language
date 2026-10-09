@@ -16,8 +16,8 @@ minors do not.
 
 | Version | Supported |
 |---|---|
-| `0.47.x` (current) | ✅ yes |
-| `0.46.x` and earlier | ❌ no — please reproduce on `main` or the latest release |
+| `0.49.x` (current) | ✅ yes |
+| `0.48.x` and earlier | ❌ no — please reproduce on `main` or the latest release |
 | `main` (development) | ✅ yes, fixes land here first |
 
 Fix versions are always noted in [`CHANGELOG.md`](CHANGELOG.md). If you need a
@@ -300,7 +300,12 @@ though a bug report about the *documentation* is welcome.
   cache keys on a bounded 30-bit content hash, so a collision mis-centers one
   label. Both are rendering outcomes, not memory-safety holes — but a
   backend that lets a crafted message move either state out of range IS in
-  scope and should be reported.
+  scope and should be reported. Since v0.49.0 two more invariants hold: the
+  X11 backend's clip depth (slot 821) always advances on push even when the
+  30-rect storage saturates, so a depth that disagrees with the stored rect
+  count means a corrupted shared block; and the layout stack's overflow
+  counter (slot 559) balances every refused `lay_push`, so a depth of 0 with
+  a nonzero counter means the 8 live levels were popped out of order.
 - **The window server as an untrusted input source.** The Win32/GDI backend
   (`ui_win.ax`) speaks to whatever window owns the process, and the X11
   backend (`ui_x11.ax`, back since v0.46.0) speaks to whatever server
@@ -366,8 +371,8 @@ Aoxn 处于 pre-1.0 阶段：只有最新的版本线接收安全修复，旧的
 
 | 版本 | 支持情况 |
 |---|---|
-| `0.47.x`（当前） | ✅ 支持 |
-| `0.46.x` 及更早 | ❌ 不支持——请在 `main` 或最新发布上复现 |
+| `0.49.x`（当前） | ✅ 支持 |
+| `0.48.x` 及更早 | ❌ 不支持——请在 `main` 或最新发布上复现 |
 | `main`（开发线） | ✅ 支持，修复最先落在这里 |
 
 修复版本永远记在 [`CHANGELOG.md`](CHANGELOG.md)。如需把修复反向移植到旧
@@ -573,7 +578,11 @@ tag，请在报告里说明，我们再商量。
   `plat_clip_pop` 而不是 `ui_clip_*` 包装会让影子失步，于是绘制被静默丢弃；
   它的文本测量缓存以有界的 30 位内容哈希为键，撞上就会让某个标签居中偏移。
   两者都是渲染层面的结果，不是内存安全漏洞——但若后端被构造的消息把这两处
-  状态写到越界，则**属于范围内**，请报告。
+  状态写到越界，则**属于范围内**，请报告。自 v0.49.0 起另有两条不变式：X11
+  后端的裁剪深度（槽 821）即使 30 个矩形的存储饱和也始终随 push 递增，因此
+  深度与已存矩形数不一致意味着共享块已损坏；布局栈的溢出计数器（槽 559）与
+  每次被拒绝的 `lay_push` 对冲，因此深度归零而计数非零意味着 8 个存活层级
+  被乱序弹出。
 - **把窗口服务器当作不可信输入源。** Win32/GDI 后端（`ui_win.ax`）会与拥有
   该进程的窗口对话；X11 后端（`ui_x11.ax`，v0.46.0 起回归）则与 `DISPLAY`
   指向的任何服务器对话——因此恶意的（或已被攻破的）窗口管理器或 X 服务器与

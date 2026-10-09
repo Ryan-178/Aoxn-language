@@ -11,7 +11,7 @@
 # the only backend a program can import.
 #
 # A backend is one file that imports this one and supplies:
-#   plat_canvas_new/resize/free   the off-screen drawing surface
+#   plat_canvas_resize             the off-screen drawing surface
 #   plat_present                   blit the surface to the window
 #   plat_fill_rect / plat_frame_rect / plat_round_fill / plat_ellipse
 #   plat_ellipse_fill / plat_line / plat_text / plat_text_big
@@ -51,6 +51,7 @@
 #                  row), 553 scroll (items), 554 items/text ptr
 #       556/557  tooltip hover id / hover start (ms)
 #       558      layout stack depth
+#       559      layout overflow counter (box pushes past the 8-level cap)
 #       560..719 layout stack: 8 levels x 20 slots
 #       720..751 focus registry, previous frame (tab order, 32 ids)
 #       752..783 focus registry, this frame
@@ -58,6 +59,9 @@
 #       816      focused textbox caret owner id (caret lives at 539)
 #       817      event block ptr (v3): connect[256] + 32-event ring queue
 #       818      line cache block ptr (v3): line starts for multi-line edit
+#       819      textbox selection anchor (caret lives at 539); only the
+#                  focused textbox writes it
+#       830      cached body-font line height (ui_font_height)
 #       820/821  backend clip stack ptr / depth (SaveDC handles on Windows,
 #                  rect stack on X11)
 #       826      the sans font handle parked by the backend's plat_init
@@ -144,13 +148,10 @@ def vk_x() -> int:
     return 88
 
 # ---- platform primitive contract ----
-# Implemented by exactly one backend (ui_win.ax). The bodies
-# here are the headless fallback: a program that imports a backend always
-# gets the real ones (a backend's definitions override these, since it
-# imports this file and the loader keeps the first definition — so the
-# stubs are only reached if a widget is somehow called with no backend).
-# The `plat_*` names are documented, not defensive: the toolkit is always
-# used through a backend.
+# Supplied by a backend, never defined here. There are no stubs in this
+# file: a program always imports one backend (stdlib/ui_win.ax on Windows,
+# stdlib/ui_x11.ax on Linux) and gets the real primitives, which is what
+# lets this file declare no platform extern at all.
 
 # ---- drawing primitives: thin, stable names over the backend ----
 # The widget layer calls THESE; each forwards to the backend primitive of
@@ -387,6 +388,21 @@ def measure_cache(c: UI) -> int:
 def ui_measure(c: UI, s: string) -> TextSize:
     return ui_measure_sub(c, s, 0, len(s))
 
+# One unit of vertical text in the current body font, measured ONCE.
+#
+# Centring on height needs it in the text box, the tab strip, the buttons,
+# the toggle, the spin box and the combobox — and until now the only way to
+# learn it was to measure the widget's own string, which in the text box meant
+# hashing the whole field's content every frame to read a constant. Cached in
+# st 830 and dropped by the same font switch that invalidates the measure
+# cache, so a wrong height cannot outlive the face that produced it.
+def ui_font_height(c: UI) -> int:
+    h = st_get(c, 830)
+    if h == 0:
+        h = ui_measure(c, "0").h
+        st_set(c, 830, h)
+    return h
+
 def ui_measure_sub(c: UI, s: string, f: int, t: int) -> TextSize:
     n = len(s)
     if f < 0:
@@ -491,17 +507,7 @@ def ui_button(c: UI, x: int, y: int, w: int, h: int, s: string) -> bool:
     id = ui_wid_id(x, y)
     off = ui_disabled(c)
     hot = ui_mouse_in(c, x, y, w, h) and not off
-    act = st_get(c, 0)
-    if hot and c.dn and not c.dn_prev and act == 0:
-        st_set(c, 0, id)
-        act = id
-        ui_focus(c, id)
-    clicked = False
-    if act == id and c.dn_prev and not c.dn:
-        if hot:
-            clicked = True
-        st_set(c, 0, 0)
-        act = 0
+    clicked = ui_press(c, id, hot)
     if key_activate(c, id) and not off:
         clicked = True
     if not off:
@@ -510,7 +516,8 @@ def ui_button(c: UI, x: int, y: int, w: int, h: int, s: string) -> bool:
     face = pal.widget
     if off:
         face = pal.disabled_face
-    if hot and act == id:
+    down = hot and ui_pressed(c, id)
+    if down:
         face = pal.widget_down
     elif hot:
         face = pal.widget_hover
@@ -520,7 +527,7 @@ def ui_button(c: UI, x: int, y: int, w: int, h: int, s: string) -> bool:
     ts = ui_measure(c, s)
     tx = x + (w - ts.w) / 2
     ty = y + (h - ts.h) / 2
-    if hot and act == id:
+    if down:
         ty = ty + 1
     round_fill(c, x, y, w, h, face, pen)
     tcol = pal.text
@@ -557,15 +564,8 @@ def ui_checkbox(c: UI, x: int, y: int, s: string, checked: bool) -> bool:
     ts = ui_measure(c, s)
     hot = ui_mouse_in(c, x, y, 22 + ts.w, 20) and not off
     id = ui_wid_id(x, y)
-    act = st_get(c, 0)
-    if hot and c.dn and not c.dn_prev and act == 0:
-        st_set(c, 0, id)
-        act = id
-        ui_focus(c, id)
-    if act == id and c.dn_prev and not c.dn:
-        if hot:
-            result = not checked
-        st_set(c, 0, 0)
+    if ui_press(c, id, hot):
+        result = not checked
     if key_activate(c, id) and not off:
         result = not checked
     if not off:
@@ -595,15 +595,8 @@ def ui_slider(c: UI, x: int, y: int, w: int, value: int, vmin: int, vmax: int) -
     id = ui_wid_id(x, y)
     off = ui_disabled(c)
     hot = ui_mouse_in(c, x - 8, y - 4, w + 16, 28) and not off
-    act = st_get(c, 0)
-    if hot and c.dn and not c.dn_prev and act == 0:
-        st_set(c, 0, id)
-        act = id
-        ui_focus(c, id)
-    if act == id and c.dn_prev and not c.dn:
-        st_set(c, 0, 0)
-        act = 0
-    if act == id and c.dn:
+    ui_press(c, id, hot)
+    if ui_pressed(c, id) and c.dn:
         span = w - 10
         if span < 1:
             span = 1
@@ -675,16 +668,8 @@ def ui_toggle(c: UI, x: int, y: int, w: int, h: int, s: string, on: bool) -> boo
     off = ui_disabled(c)
     id = ui_wid_id(x, y)
     hot = ui_mouse_in(c, x, y, w, h) and not off
-    act = st_get(c, 0)
-    if hot and c.dn and not c.dn_prev and act == 0:
-        st_set(c, 0, id)
-        act = id
-        ui_focus(c, id)
-    if act == id and c.dn_prev and not c.dn:
-        if hot:
-            result = not on
-        st_set(c, 0, 0)
-        act = 0
+    if ui_press(c, id, hot):
+        result = not on
     if key_activate(c, id) and not off:
         result = not on
     if not off:
@@ -698,7 +683,8 @@ def ui_toggle(c: UI, x: int, y: int, w: int, h: int, s: string, on: bool) -> boo
     if off:
         face = pal.disabled_face
         tcol = pal.disabled_text
-    if hot and act == id:
+    down = hot and ui_pressed(c, id)
+    if down:
         face = pal.widget_down
         if result:
             face = pal.sel
@@ -708,7 +694,7 @@ def ui_toggle(c: UI, x: int, y: int, w: int, h: int, s: string, on: bool) -> boo
     ts = ui_measure(c, s)
     tx = x + (w - ts.w) / 2
     ty = y + (h - ts.h) / 2
-    if hot and act == id:
+    if down:
         ty = ty + 1
     round_fill(c, x, y, w, h, face, pen)
     ui_draw_text(c, tx, ty, s, tcol)
@@ -724,15 +710,8 @@ def ui_radio(c: UI, x: int, y: int, s: string, group: int, item: int) -> int:
     ts = ui_measure(c, s)
     hot = ui_mouse_in(c, x, y, 22 + ts.w, 20) and not off
     id = ui_wid_id(x, y)
-    act = st_get(c, 0)
-    if hot and c.dn and not c.dn_prev and act == 0:
-        st_set(c, 0, id)
-        act = id
-        ui_focus(c, id)
-    if act == id and c.dn_prev and not c.dn:
-        if hot:
-            result = item
-        st_set(c, 0, 0)
+    if ui_press(c, id, hot):
+        result = item
     if key_activate(c, id) and not off:
         result = item
     if not off:
@@ -918,23 +897,20 @@ def ui_textbox(c: UI, x: int, y: int, w: int, h: int, text: string) -> TextEdit:
         caret = len(s)
     if anchor > len(s):
         anchor = len(s)
-    act = st_get(c, 0)
     shift = ui_key_down(c, 16)
     ctrl = ui_key_down(c, 17)
-    if hot and c.dn and not c.dn_prev and act == 0:
-        st_set(c, 0, id)
-        act = id
-        ui_focus(c, id)
+    # the claim half is done by hand (ui_press_claim) because a click here
+    # also has to place the caret, which is why the text fields cannot use
+    # the whole-cycle ui_press
+    if ui_press_claim(c, id, hot):
         focused = True
         st_set(c, 816, id)
         caret = text_pos_from_x(c, s, x + 8, c.mx)
         if not shift:
             anchor = caret
-    if act == id and c.dn:
+    if ui_pressed(c, id) and c.dn:
         caret = text_pos_from_x(c, s, x + 8, c.mx)
-    if act == id and c.dn_prev and not c.dn:
-        st_set(c, 0, 0)
-        act = 0
+    ui_press_release(c, id)
     if focused and not off:
         if ctrl and ui_key_pressed(c, 65):
             anchor = 0
@@ -1018,8 +994,12 @@ def ui_textbox(c: UI, x: int, y: int, w: int, h: int, text: string) -> TextEdit:
     tcol = pal.text
     if off:
         tcol = pal.disabled_text
-    ts = ui_measure_sub(c, s, 0, len(s))
-    ty = y + (h - ts.h) / 2
+    # The line height is a property of the FONT, not of this field's text:
+    # measuring the whole string here existed only to read ts.h, and it cost
+    # an O(n) content hash over the ENTIRE field on every frame (the measure
+    # cache saves the GDI call, not the hash) to learn a constant. One
+    # character, measured once.
+    ty = y + (h - ui_font_height(c)) / 2
     lo = anchor
     hi = caret
     if anchor > caret:
@@ -1058,10 +1038,7 @@ def ui_listbox[N](c: UI, x: int, y: int, w: int, h: int, items: [string; N], n: 
     maxs = n - vis
     if maxs < 0:
         maxs = 0
-    if scroll > maxs:
-        scroll = maxs
-    if scroll < 0:
-        scroll = 0
+    scroll = ui_clamp_scroll(scroll, maxs)
     off = ui_disabled(c)
     id = ui_wid_id(x, y)
     has_sb = n > vis
@@ -1070,11 +1047,7 @@ def ui_listbox[N](c: UI, x: int, y: int, w: int, h: int, items: [string; N], n: 
         sbw = 0
     hot = ui_mouse_in(c, x, y, w - sbw, h) and not off
     if hot and has_sb and not off:
-        scroll = scroll - ui_wheel(c) / 120
-        if scroll > maxs:
-            scroll = maxs
-        if scroll < 0:
-            scroll = 0
+        scroll = ui_wheel_scroll(c, scroll, maxs, 1)
     if not off:
         ui_focus_reg(c, id)
     pal = ui_palette_get(c)
@@ -1104,15 +1077,11 @@ def ui_listbox[N](c: UI, x: int, y: int, w: int, h: int, items: [string; N], n: 
         i = i + 1
     ui_clip_pop(c)
     # selection: press + release inside the list
-    if hot and c.dn and not c.dn_prev and st_get(c, 0) == 0:
-        st_set(c, 0, id)
-        ui_focus(c, id)
-    if st_get(c, 0) == id and c.dn_prev and not c.dn:
-        if hot:
-            it = scroll + (c.my - y) / item_h
-            if it >= 0 and it < n:
-                cur = it
-        st_set(c, 0, 0)
+    ui_press_claim(c, id, hot)
+    if ui_press_release(c, id):
+        it = scroll + (c.my - y) / item_h
+        if it >= 0 and it < n:
+            cur = it
     # scrollbar
     if has_sb:
         scroll = sb_widget(c, x, y, w, h, sbw, y, h, n, vis, scroll, maxs, off)
@@ -1142,13 +1111,8 @@ def ui_tabs[N](c: UI, x: int, y: int, w: int, labels: [string; N], n: int, cur: 
             ui_draw_text(c, tx + 14, y + (th - ts.h) / 2 + 1, labels[i], tcol)
         hot = ui_mouse_in(c, tx, y, tw, th) and not off
         id = ui_wid_id(x + i, y)
-        if hot and c.dn and not c.dn_prev and st_get(c, 0) == 0:
-            st_set(c, 0, id)
-            ui_focus(c, id)
-        if st_get(c, 0) == id and c.dn_prev and not c.dn:
-            if hot:
-                cur = i
-            st_set(c, 0, 0)
+        if ui_press(c, id, hot):
+            cur = i
         if hot:
             ui_frame_rect(c, tx, y, tw, th, pal.accent)
         tx = tx + tw
@@ -1211,15 +1175,10 @@ def ui_combobox[N](c: UI, x: int, y: int, w: int, items: [string; N], n: int, cu
             overlay_items_store(c, items, pop_n)
             st_set(c, 0, -1)
     if mine and in_popup and not edge:
-        scroll = st_get(c, 553) - ui_wheel(c) / 120
         maxs = pop_n - vis
         if maxs < 0:
             maxs = 0
-        if scroll > maxs:
-            scroll = maxs
-        if scroll < 0:
-            scroll = 0
-        st_set(c, 553, scroll)
+        st_set(c, 553, ui_wheel_scroll(c, st_get(c, 553), maxs, 1))
     if not off:
         ui_focus_reg(c, id)
     # closed box
@@ -1268,24 +1227,18 @@ def sb_widget(c: UI, x: int, y: int, w: int, h: int, sbw: int, sy: int, sh: int,
         ty = sy + (track - th) * scroll / maxs
     tface = pal.widget
     hot_sb = ui_mouse_in(c, x + w - sbw, y, sbw, h) and not off
-    if st_get(c, 0) == id:
+    if ui_pressed(c, id):
         tface = pal.widget_down
     elif hot_sb:
         tface = pal.widget_hover
     round_fill(c, x + w - sbw + 2, ty, sbw - 4, th, tface, pal.border)
-    if hot_sb and c.dn and not c.dn_prev and st_get(c, 0) == 0:
-        st_set(c, 0, id)
-    if st_get(c, 0) == id and c.dn:
+    ui_press_claim(c, id, hot_sb)
+    if ui_pressed(c, id) and c.dn:
         denom = track - th
         if denom < 1:
             denom = 1
-        scroll = (c.my - sy - th / 2) * maxs / denom
-        if scroll > maxs:
-            scroll = maxs
-        if scroll < 0:
-            scroll = 0
-    if st_get(c, 0) == id and c.dn_prev and not c.dn:
-        st_set(c, 0, 0)
+        scroll = ui_clamp_scroll((c.my - sy - th / 2) * maxs / denom, maxs)
+    ui_press_release(c, id)
     return scroll
 
 # ---- scroll area (clipped viewport with wheel + scrollbar) ----
@@ -1304,11 +1257,10 @@ def ui_scroll_begin(c: UI, x: int, y: int, w: int, h: int, scroll_y: int, conten
     off = ui_disabled(c)
     hot = ui_mouse_in(c, x, y, w, h) and not off
     if hot and not off:
+        # a third of a notch per event: this viewport scrolls by PIXELS, and
+        # it is the one place that does (the widget scrollbars step by rows)
         scroll_y = scroll_y - ui_wheel(c) * 32 / 120
-        if scroll_y > maxs:
-            scroll_y = maxs
-        if scroll_y < 0:
-            scroll_y = 0
+        scroll_y = ui_clamp_scroll(scroll_y, maxs)
     # scrollbar input + draw happen BEFORE the content clip below, or the
     # bar would clip itself away (the clip excludes the scrollbar column)
     if has_sb:
@@ -1348,24 +1300,18 @@ def sb_widget_h(c: UI, x: int, y: int, w: int, h: int, sbw: int, sx: int, sw: in
         tx = sx + (track - tw) * scroll / maxs
     tface = pal.widget
     hot_sb = ui_mouse_in(c, x, y + h - sbw, w, sbw) and not off
-    if st_get(c, 0) == id:
+    if ui_pressed(c, id):
         tface = pal.widget_down
     elif hot_sb:
         tface = pal.widget_hover
     round_fill(c, tx, y + h - sbw + 2, tw, sbw - 4, tface, pal.border)
-    if hot_sb and c.dn and not c.dn_prev and st_get(c, 0) == 0:
-        st_set(c, 0, id)
-    if st_get(c, 0) == id and c.dn:
+    ui_press_claim(c, id, hot_sb)
+    if ui_pressed(c, id) and c.dn:
         denom = track - tw
         if denom < 1:
             denom = 1
-        scroll = (c.mx - sx - tw / 2) * maxs / denom
-        if scroll > maxs:
-            scroll = maxs
-        if scroll < 0:
-            scroll = 0
-    if st_get(c, 0) == id and c.dn_prev and not c.dn:
-        st_set(c, 0, 0)
+        scroll = ui_clamp_scroll((c.mx - sx - tw / 2) * maxs / denom, maxs)
+    ui_press_release(c, id)
     return scroll
 
 # Begin a horizontal clipped viewport: returns the NEW scroll offset; draw
@@ -1400,6 +1346,8 @@ def ui_scroll_end_h(c: UI):
 def ui_font_mono(c: UI) -> UI:
     if c.font_mono != 0:
         c.font = c.font_mono
+        # the cached line height was measured in the OTHER face
+        st_set(c, 830, 0)
     return c
 
 # Restore the sans body font the backend opened at init (handle parked in
@@ -1408,6 +1356,7 @@ def ui_font_sans(c: UI) -> UI:
     f = st_get(c, 826)
     if f != 0:
         c.font = f
+        st_set(c, 830, 0)
     return c
 
 # ---- tooltip (hover the rect for ~0.55s; drawn on top in ui_present) ----
@@ -1461,28 +1410,19 @@ def ui_textedit(c: UI, x: int, y: int, w: int, h: int, text: string, anchor: int
     maxs = cnt - vis
     if maxs < 0:
         maxs = 0
-    if scroll > maxs:
-        scroll = maxs
-    if scroll < 0:
-        scroll = 0
+    scroll = ui_clamp_scroll(scroll, maxs)
     sbw = 12
     has_sb = cnt > vis
     if not has_sb:
         sbw = 0
     hot = ui_mouse_in(c, x, y, w - sbw, h) and not off
     if hot and not off:
-        scroll = scroll - ui_wheel(c) / 120 * 3
-        if scroll > maxs:
-            scroll = maxs
-        if scroll < 0:
-            scroll = 0
-    act = st_get(c, 0)
+        scroll = ui_wheel_scroll(c, scroll, maxs, 3)
     shift = ui_key_down(c, 16)
     ctrl = ui_key_down(c, 17)
-    if hot and c.dn and not c.dn_prev and act == 0:
-        st_set(c, 0, id)
-        act = id
-        ui_focus(c, id)
+    # see ui_textbox: the claim half is spelled out because a click also
+    # places the caret
+    if ui_press_claim(c, id, hot):
         focused = True
         row = scroll + (c.my - y) / row_h
         if row >= cnt:
@@ -1492,16 +1432,14 @@ def ui_textedit(c: UI, x: int, y: int, w: int, h: int, text: string, anchor: int
         caret = text_pos_in_range(c, s, line_start(c, row), line_end(c, row), x + 8, c.mx)
         if not shift:
             anchor = caret
-    if act == id and c.dn:
+    if ui_pressed(c, id) and c.dn:
         row = scroll + (c.my - y) / row_h
         if row >= cnt:
             row = cnt - 1
         if row < 0:
             row = 0
         caret = text_pos_in_range(c, s, line_start(c, row), line_end(c, row), x + 8, c.mx)
-    if act == id and c.dn_prev and not c.dn:
-        st_set(c, 0, 0)
-        act = 0
+    ui_press_release(c, id)
     if focused and not off:
         if ctrl and ui_key_pressed(c, 65):
             anchor = 0
@@ -1584,8 +1522,7 @@ def ui_textedit(c: UI, x: int, y: int, w: int, h: int, text: string, anchor: int
     maxs = cnt - vis
     if maxs < 0:
         maxs = 0
-    if scroll > maxs:
-        scroll = maxs
+    scroll = ui_clamp_scroll(scroll, maxs)
     if not off:
         ui_focus_reg(c, id)
     pal = ui_palette_get(c)
@@ -1826,21 +1763,14 @@ def ui_tree(c: UI, x: int, y: int, w: int, h: int, m: TreeModel, sel: int, scrol
     maxs = vic - vis
     if maxs < 0:
         maxs = 0
-    if res.scroll > maxs:
-        res.scroll = maxs
-    if res.scroll < 0:
-        res.scroll = 0
+    res.scroll = ui_clamp_scroll(res.scroll, maxs)
     sbw = 12
     has_sb = vic > vis
     if not has_sb:
         sbw = 0
     hot = ui_mouse_in(c, x, y, w - sbw, h) and not off
     if hot and has_sb and not off:
-        res.scroll = res.scroll - ui_wheel(c) / 120
-        if res.scroll > maxs:
-            res.scroll = maxs
-        if res.scroll < 0:
-            res.scroll = 0
+        res.scroll = ui_wheel_scroll(c, res.scroll, maxs, 1)
     if not off:
         ui_focus_reg(c, id)
     if ui_focused(c, id) and not off:
@@ -1892,21 +1822,17 @@ def ui_tree(c: UI, x: int, y: int, w: int, h: int, m: TreeModel, sel: int, scrol
         j = j + 1
     ui_clip_pop(c)
     # input: expander toggle vs label select
-    if hot and c.dn and not c.dn_prev and st_get(c, 0) == 0:
-        st_set(c, 0, id)
-        ui_focus(c, id)
-    if st_get(c, 0) == id and c.dn_prev and not c.dn:
-        if hot:
-            row = res.scroll + (c.my - y) / row_h
-            node = tree_nth_visible(m, row)
-            if node >= 0:
-                d = tree_depth(m, node)
-                tx = x + 10 + d * 18
-                if tree_has_child(m, node) and c.mx < tx - 2:
-                    tree_set_expanded(m, node, not tree_expanded(m, node))
-                else:
-                    res.sel = node
-        st_set(c, 0, 0)
+    ui_press_claim(c, id, hot)
+    if ui_press_release(c, id):
+        row = res.scroll + (c.my - y) / row_h
+        node = tree_nth_visible(m, row)
+        if node >= 0:
+            d = tree_depth(m, node)
+            tx = x + 10 + d * 18
+            if tree_has_child(m, node) and c.mx < tx - 2:
+                tree_set_expanded(m, node, not tree_expanded(m, node))
+            else:
+                res.sel = node
     if has_sb:
         res.scroll = sb_widget(c, x, y, w, h, sbw, y, h, vic, vis, res.scroll, maxs, off)
     return res
@@ -1931,10 +1857,7 @@ def ui_table(c: UI, x: int, y: int, w: int, h: int, m: TableModel, sel_row: int,
     maxs = rows - vis
     if maxs < 0:
         maxs = 0
-    if res.scroll > maxs:
-        res.scroll = maxs
-    if res.scroll < 0:
-        res.scroll = 0
+    res.scroll = ui_clamp_scroll(res.scroll, maxs)
     sbw = 12
     has_sb = rows > vis
     if not has_sb:
@@ -1957,11 +1880,7 @@ def ui_table(c: UI, x: int, y: int, w: int, h: int, m: TableModel, sel_row: int,
         cw0 = 20
     hot = ui_mouse_in(c, x, y, w - sbw, h - head_h) and not off
     if hot and has_sb and not off:
-        res.scroll = res.scroll - ui_wheel(c) / 120
-        if res.scroll > maxs:
-            res.scroll = maxs
-        if res.scroll < 0:
-            res.scroll = 0
+        res.scroll = ui_wheel_scroll(c, res.scroll, maxs, 1)
     if not off:
         ui_focus_reg(c, id)
     if ui_focused(c, id) and not off:
@@ -2032,15 +1951,11 @@ def ui_table(c: UI, x: int, y: int, w: int, h: int, m: TableModel, sel_row: int,
         r = r + 1
     ui_clip_pop(c)
     # row select
-    if hot and c.dn and not c.dn_prev and st_get(c, 0) == 0:
-        st_set(c, 0, id)
-        ui_focus(c, id)
-    if st_get(c, 0) == id and c.dn_prev and not c.dn:
-        if hot:
-            row = res.scroll + (c.my - y - head_h) / row_h
-            if row >= 0 and row < rows:
-                res.sel = row
-        st_set(c, 0, 0)
+    ui_press_claim(c, id, hot)
+    if ui_press_release(c, id):
+        row = res.scroll + (c.my - y - head_h) / row_h
+        if row >= 0 and row < rows:
+            res.sel = row
     if has_sb:
         res.scroll = sb_widget(c, x, y, w, h, sbw, y + head_h, h - head_h, rows, vis, res.scroll, maxs, off)
     return res

@@ -847,6 +847,310 @@ def main() -> int:
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// Layout depth accounting past the 8-level cap, and itoa10's arena escape.
+///
+/// The first half is about a stack that used to lie. `lay_push` REFUSED the
+/// 9th box by returning without pushing, but `ui_layout_end` decremented the
+/// depth anyway — so one over-deep nesting popped its own 8th box, and every
+/// later end unwound a level too deep: the rest of the frame's widgets landed
+/// in the wrong box, with nothing anywhere reporting it. The push and its end
+/// now balance against an overflow counter that an app or a test can read.
+///
+/// The second half pins the arena-exhaustion path of itoa10: the digits must
+/// still come out right when the bump arena has no room, since that malloc
+/// escape is what the whole "steady-state frames allocate nothing" property
+/// leans on.
+#[test]
+fn ui_layout_overflow_and_arena_escape() {
+    if !have_clang() {
+        eprintln!("skipping: clang not found (set AOXN_CLANG or add clang to PATH)");
+        return;
+    }
+
+    let dir = temp_dir("layovf");
+    let src = dir.join("ui_layovf.ax");
+    let exe = dir.join("ui_layovf.exe");
+    std::fs::write(
+        &src,
+        format!(
+            "import * from \"{}\"\n\n{}",
+            abs("stdlib/ui.ax"),
+            r#"def main() -> int:
+    c = ui_new()
+    c = ui_state_init(c)
+    # eight real levels
+    i = 0
+    while i < 8:
+        ui_vbox_begin(c, 0, 0, 100, 100, 0, 0)
+        i = i + 1
+    print(str(ui_layout_depth(c)) + " " + str(ui_layout_overflow(c)))
+    # the 9th and 10th must be REFUSED and must not disturb the 8 live ones
+    ui_vbox_begin(c, 0, 0, 100, 100, 0, 0)
+    ui_hbox_begin(c, 0, 0, 100, 100, 0, 0)
+    print(str(ui_layout_depth(c)) + " " + str(ui_layout_overflow(c)))
+    # two matching ends drain the overflow WITHOUT popping a live box: this
+    # is the assertion that fails on the old code (depth would read 6)
+    ui_layout_end(c)
+    ui_layout_end(c)
+    print(str(ui_layout_depth(c)) + " " + str(ui_layout_overflow(c)))
+    # and the innermost live box still owns the cursor
+    r = ui_v_item(c, 7)
+    print(r.y)
+    # unwinding the eight real levels empties the stack
+    i = 0
+    while i < 8:
+        ui_layout_end(c)
+        i = i + 1
+    print(str(ui_layout_depth(c)) + " " + str(ui_layout_overflow(c)))
+    # an extra end at depth 0 is a no-op, not an underflow
+    ui_layout_end(c)
+    print(str(ui_layout_depth(c)) + " " + str(ui_layout_overflow(c)))
+    # itoa10 renders the digits both in the arena and via the escape. The two
+    # paths must return the SAME KIND of buffer: ui_label_int draws the result
+    # through plat_text_sub, which re-encodes it as UTF-8, so an escape that
+    # returned UTF-16 drew a one-digit number once the arena filled.
+    p1 = itoa10(c, -4321)
+    s1 = as_string(p1)
+    n1 = len(s1)
+    print(s1 + "/" + str(n1))
+    st_set(c, 3, st_get(c, 2))
+    p2 = itoa10(c, -4321)
+    s2 = as_string(p2)
+    print(s2 + "/" + str(len(s2)))
+    print("same " + str(s1 == s2))
+    st_set(c, 3, st_get(c, 2) + 65536)
+    print(as_string(itoa10(c, 0)))
+    ui_state_free(c)
+    return 0
+"#
+        ),
+    )
+    .unwrap();
+
+    aoxn::build_paths_opts(&[src.display().to_string()], &exe, true, &[], &[])
+        .expect("ui layout-overflow driver failed to compile");
+    let (code, out) = run_with_timeout(&exe, 60);
+    assert_eq!(
+        code,
+        Some(0),
+        "ui layout-overflow driver exited abnormally: {out:?}"
+    );
+    let lines: Vec<&str> = out.lines().collect();
+    let expected = [
+        "8 0",       // eight real levels, no overflow
+        "8 2",       // two refused pushes: depth untouched, overflow counted
+        "8 0",       // two ends drain the overflow without popping a live box
+        "0",         // the innermost live box still owns the cursor
+        "0 0",       // unwinding the eight real levels empties the stack
+        "0 0",       // an extra end at depth 0 is a no-op
+        "-4321/5",   // itoa10 in the arena: the digits AND their length
+        "-4321/5",   // ...and through the escape with the arena exhausted
+        "same true", // ...identical text, not UTF-16 in one arm of the if
+        "0",         // zero is still "0", not ""
+    ];
+    assert_eq!(lines.len(), expected.len(), "unexpected output: {out:?}");
+    for (got, want) in lines.iter().zip(expected.iter()) {
+        assert_eq!(got, want, "layout-overflow output mismatch");
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The press-claim helpers must behave exactly like the fifteen widget bodies
+/// they replaced, because every interactive widget now routes through them.
+///
+/// This drives the claim state machine directly, which the window smoke tests
+/// cannot: they assert a frame does not crash, not that a click lands. What is
+/// pinned is the four things the copies each got subtly right, and one they
+/// did not (the overlay sentinel must never be stolen):
+///   - a press INSIDE claims and focuses;
+///   - a release on the next frame reports the click, and only then;
+///   - a release OUTSIDE still frees the claim (a drag that ends off-widget
+///     must not leave the slot stuck forever, which would wedge every
+///     subsequent press);
+///   - a press edge while slot 0 is -1 (an open popup ate the click) is
+///     refused, so a widget drawn under the overlay cannot steal the release.
+#[cfg(windows)]
+#[test]
+fn ui_press_claim_cycle() {
+    if !have_clang() {
+        eprintln!("skipping: clang not found (set AOXN_CLANG or add clang to PATH)");
+        return;
+    }
+
+    let dir = temp_dir("press");
+    let src = dir.join("ui_press.ax");
+    let exe = dir.join("ui_press.exe");
+    std::fs::write(
+        &src,
+        format!(
+            "import * from \"{}\"\n\n{}",
+            abs("stdlib/ui_win.ax"),
+            r#"def main() -> int:
+    c = ui_init("ui press", 320, 200)
+    if not c.open:
+        print("ui-window: none")
+        return 3
+    c.cap_ms = 0
+    a = ui_wid_id(10, 10)
+    b = ui_wid_id(100, 100)
+    # --- a press INSIDE claims and takes focus, and is not yet a click.
+    # Each step is its own statement: a print that CONCATENATES a mutating
+    # call with a read of the same slot does not sequence them the way the
+    # source reads, so the slot is read into a local first.
+    st_set(c, 0, 0)
+    c.dn_prev = False
+    c.dn = True
+    took = ui_press_claim(c, a, True)
+    holds = ui_pressed(c, a)
+    print("claim " + str(took) + " " + str(holds))
+    print("click1 " + str(ui_press(c, a, True)))
+    print("held " + str(ui_pressed(c, a)))
+    # --- a second widget must NOT steal a held claim
+    stole = ui_press_claim(c, b, True)
+    print("steal " + str(stole) + " " + str(ui_pressed(c, a)))
+    # --- release on the next frame IS the click, and frees the slot
+    c.dn_prev = True
+    c.dn = False
+    hit = ui_press(c, a, True)
+    free0 = st_get(c, 0)
+    print("click2 " + str(hit) + " " + str(free0))
+    # --- a release OUTSIDE frees the claim but is not a click: this is the
+    # case that used to wedge slot 0 at the widget id forever
+    st_set(c, 0, 0)
+    c.dn_prev = False
+    c.dn = True
+    ui_press_claim(c, a, True)
+    c.dn_prev = True
+    c.dn = False
+    miss = ui_press(c, a, False)
+    free1 = st_get(c, 0)
+    print("outside " + str(miss) + " " + str(free1))
+    # --- the overlay sentinel (-1) is never stolen
+    st_set(c, 0, -1)
+    c.dn_prev = False
+    c.dn = True
+    sn0 = ui_press_claim(c, a, True)
+    sn1 = st_get(c, 0)
+    print("sentinel " + str(sn0) + " " + str(sn1))
+    print("sentinel-click " + str(ui_press(c, a, True)))
+    # --- wheel + clamp: notches down, never below zero, never past the end
+    print(str(ui_clamp_scroll(5, 3)) + " " + str(ui_clamp_scroll(-4, 3)) + " " + str(ui_clamp_scroll(2, 3)))
+    ui_fini(c)
+    return 0
+"#
+        ),
+    )
+    .unwrap();
+
+    let libs: Vec<String> = vec!["user32".to_string(), "gdi32".to_string()];
+    aoxn::build_paths_opts(&[src.display().to_string()], &exe, true, &libs, &[])
+        .expect("ui press driver failed to compile");
+    let (code, out) = run_with_timeout(&exe, 60);
+    let code = code.expect("press driver timed out (killed)");
+    if code == 3 {
+        assert!(out.contains("ui-window: none"), "skip without report: {out:?}");
+        eprintln!("skipped: no window could be created on this host");
+        let _ = std::fs::remove_dir_all(&dir);
+        return;
+    }
+    assert_eq!(code, 0, "press driver failed: {out:?}");
+    let lines: Vec<&str> = out.lines().collect();
+    let expected = [
+        "claim true true",      // a press inside claims and focuses
+        "click1 false",         // ...and is not yet a click (same edge frame)
+        "held true",            // the slot stays claimed for the whole hold
+        "steal false true",     // a second widget cannot steal a held claim
+        "click2 true 0",        // the release frame is the click, and frees it
+        "outside false 0",      // a release outside frees the claim, no click
+        "sentinel false -1",    // an overlay-eaten press is not stolen
+        "sentinel-click false", // ...so the widget under it never fires
+        "3 0 2",                // clamp: over, under, in range
+    ];
+    assert_eq!(lines.len(), expected.len(), "unexpected output: {out:?}");
+    for (got, want) in lines.iter().zip(expected.iter()) {
+        assert_eq!(got, want, "press-cycle output mismatch");
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// `ui_font_height` must be a stable, font-derived constant — the text box
+/// used to measure its WHOLE field every frame purely to read `ts.h`, which
+/// the v0.47.0 measure cache turned into an O(n) content hash per frame to
+/// learn something that does not depend on the text at all.
+///
+/// So: one call, and the cached value must be identical on every later call
+/// (a cache that recomputed would defeat the point), positive, and no larger
+/// than the height of a real glyph run.
+#[cfg(windows)]
+#[test]
+fn ui_font_height_is_a_cached_constant() {
+    if !have_clang() {
+        eprintln!("skipping: clang not found (set AOXN_CLANG or add clang to PATH)");
+        return;
+    }
+
+    let dir = temp_dir("fonth");
+    let src = dir.join("ui_fonth.ax");
+    let exe = dir.join("ui_fonth.exe");
+    std::fs::write(
+        &src,
+        format!(
+            "import * from \"{}\"\n\n{}",
+            abs("stdlib/ui_win.ax"),
+            r#"def main() -> int:
+    c = ui_init("ui font height", 320, 200)
+    if not c.open:
+        print("ui-window: none")
+        return 3
+    c.cap_ms = 0
+    # first call measures and caches; later calls must return the same number
+    h1 = ui_font_height(c)
+    h2 = ui_font_height(c)
+    h3 = ui_font_height(c)
+    print("stable " + str(h1 == h2 and h2 == h3))
+    print("positive " + str(h1 > 0))
+    # a wide string must not change it
+    wide = ui_measure(c, "MMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMM")
+    print("bounded " + str(h1 <= wide.h))
+    # a font switch must invalidate it (the height belongs to the face)
+    c = ui_font_mono(c)
+    print("cleared " + str(st_get(c, 830)))
+    h4 = ui_font_height(c)
+    print("recovered " + str(h4 > 0))
+    ui_fini(c)
+    return 0
+"#
+        ),
+    )
+    .unwrap();
+
+    let libs: Vec<String> = vec!["user32".to_string(), "gdi32".to_string()];
+    aoxn::build_paths_opts(&[src.display().to_string()], &exe, true, &libs, &[])
+        .expect("ui font-height driver failed to compile");
+    let (code, out) = run_with_timeout(&exe, 60);
+    let code = code.expect("font-height driver timed out (killed)");
+    if code == 3 {
+        assert!(out.contains("ui-window: none"), "skip without report: {out:?}");
+        eprintln!("skipped: no window could be created on this host");
+        let _ = std::fs::remove_dir_all(&dir);
+        return;
+    }
+    assert_eq!(code, 0, "font-height driver failed: {out:?}");
+    let lines: Vec<&str> = out.lines().collect();
+    let expected = [
+        "stable true",    // cached: three calls, one measurement
+        "positive true",  // a real font has a real line height
+        "bounded true",   // not taller than a 40-glyph measure
+        "cleared 0",      // ui_font_mono drops the old face's height
+        "recovered true", // ...and the next call re-measures in the new one
+    ];
+    assert_eq!(lines.len(), expected.len(), "unexpected output: {out:?}");
+    for (got, want) in lines.iter().zip(expected.iter()) {
+        assert_eq!(got, want, "font-height output mismatch");
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 // ---------------------------------------------------------------------------
 // v0.30.0 — Windows-only toolkit
 //

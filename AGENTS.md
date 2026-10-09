@@ -568,7 +568,25 @@ crates/aoxn-pkg       package manager crate (its own dependency set; see above)
   835..840 = the Windows DC state cache (selected stock brush/pen, their
   colors, selected font, text color); anything that changes the DC behind
   its back must call `dc_cache_drop` (clip pop's `RestoreDC`, the resize
-  bitmap swap).
+  bitmap swap),
+  559 = the layout overflow counter (v0.49.0: a `lay_push` past the 8-level
+  cap balances its own `ui_layout_end` here instead of popping a live box —
+  `ui_layout_overflow`/`ui_layout_depth` read it/558),
+  830 = the cached body-font line height (`ui_font_height`, v0.49.0 — a
+  textbox used to measure its WHOLE field per frame just to read `ts.h`,
+  an O(n) content hash under the v0.47.0 measure cache).
+- **One press cycle, fifteen widgets (v0.49.0)**: `ui_press` /
+  `ui_press_claim` / `ui_press_release` / `ui_pressed` own the `st 0`
+  claim, and `ui_wheel_scroll`/`ui_clamp_scroll` own the wheel math — the
+  fifteen hand copies had already drifted. Two details are load-bearing:
+  the claim is only taken when the slot is free (an overlay's `-1` sentinel
+  is never stolen), and the slot stays claimed for the whole hold (dragging
+  widgets and pressed faces read it via `ui_pressed`). The text fields spell
+  the claim half out because a click must also place the caret. Also
+  v0.49.0: `itoa10`'s arena-exhaustion escape returns ASCII (it returned
+  UTF-16, so a full arena made `ui_label_int` draw one digit), and
+  `utf16_write` hoists `len(s)` out of its loop (`while i < len(s)` is
+  O(n²) — see the v0.48.0 stdlib rule).
 - **Measure per-op costs before optimizing this toolkit** (i5-1135G7, GDI,
   1000x700): `BitBlt` 0.8 ms, full-window fill 0.08 ms, `TextOutW` ~7 us,
   `plat_measure` ~2.6 us, `plat_fill_rect` ~1.3 us, and

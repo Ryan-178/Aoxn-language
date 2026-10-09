@@ -49,7 +49,7 @@ def main() -> int:
 
 ### Install (one file, Windows)
 
-Download **`Aoxn-0.48.0-Setup.exe`** from the
+Download **`Aoxn-0.49.0-Setup.exe`** from the
 [releases page](https://github.com/AlonechatWorkspace/Aoxn-language/releases)
 and double-click it. That single executable carries the compiler, the
 standard library, the UI toolkit and the examples — nothing else to download,
@@ -327,7 +327,17 @@ the GDI clip stack, which had never restored anything** — one `ui_textbox`
 anywhere in a frame clipped the whole window (the final `BitBlt` included)
 to that textbox rect for the rest of the process — and added clip-aware
 draw culling, a 64-entry text-measure cache and a DC state cache in the
-Windows backend.
+Windows backend. **v0.49.0** fixed the remaining silent failures: a 9th
+layout level used to pop the 8th (the rest of the frame landed in the wrong
+box, with nothing reporting it), `itoa10`'s arena-exhaustion escape returned
+UTF-16 where the draw path expects ASCII (so `ui_label_int` drew a one-digit
+number once the arena filled), `utf16_write` was O(n²) because
+`while i < len(s)` re-scanned the string once per character (626 µs → 3 µs
+per 2048-char call), and the X11 clip stack could pop a rect it never pushed.
+It also collapsed the fifteen copies of the press-claim/click-release cycle
+into `ui_press` / `ui_press_claim` / `ui_press_release` / `ui_pressed`, and
+replaced the text box's whole-field measure (an O(n) content hash per frame
+to learn a constant line height) with a cached `ui_font_height`.
 
 **The toolkit is three portable files plus one backend per platform** — a
 portable core (`ui.ax`), a platform-neutral widget layer (`ui_draw.ax`),
@@ -565,7 +575,7 @@ program. It also compiles the real stdlib and the full `examples/` suite. See
 | `src/ts/` | the TypeScript front end (TS-M1 W1 complete: S2b type layer + S3 modules) |
 | `stdlib/stdlib.ax` | the standard-library core, written in Aoxn itself |
 | `stdlib/{math,time,datetime,calendar,pathlib,base64,hashlib,hmac,os,glob,json,bisect,heapq}.ax` | the v0.44.0 module batch — `docs/stdlib.md` is its reference |
-| `stdlib/ui.ax`, `stdlib/ui_draw.ax` | the UI toolkit v3: portable core + platform-neutral widget layer (20+ widgets) |
+| `stdlib/ui.ax`, `stdlib/ui_draw.ax` | the UI toolkit v3: portable core + platform-neutral widget layer (20+ widgets); `ui.ax` also holds the layout engine, focus chain, text-editing primitives and the shared heap block |
 | `stdlib/ui_win.ax`, `stdlib/ui_x11.ax` | the two `plat_*` backends: Win32/GDI (Windows) and Xlib/Xft (Linux, v0.46.0) |
 | `stdlib/net/` | the shared API-client layer (v0.41.0, moved out of `stdlib/openai/`): codecs, JSON DOM + builder, WinHTTP transport, SSE — used by both SDKs |
 | `stdlib/openai/` | the OpenAI SDK (v0.40.1): headers, client, resources, accessors, `OaStream` — `docs/openai-sdk.md` |
@@ -587,15 +597,15 @@ program. It also compiles the real stdlib and the full `examples/` suite. See
 
 ## Testing & CI
 
-`cargo test` runs the end-to-end suite — **285 tests** in the compiler
+`cargo test` runs the end-to-end suite — **288 tests** in the compiler
 workspace (pipeline 154, compiler unit tests 18, installer stub 3, TypeScript
-front end 34, UI 11, install layout 6, CSS assets 21, CSS assets v0.36 18,
+front end 34, UI 14, install layout 6, CSS assets 21, CSS assets v0.36 18,
 symbol export 8, OpenAI SDK 2, Anthropic SDK 2, and one driver test per
 v0.44.0 stdlib module group: hashlib, datetime, math, pathlib, containers,
 os+glob, json file-IO — plus `stdlib_defect_pins`, the v0.48.0 regression
 suite for the JSON builder corruption and the quadratic loops) plus the
 `aoxn-pkg` crate's 94 via
-`bash run_pkg_tests.sh` — **379 in total** — where every pipeline test
+`bash run_pkg_tests.sh` — **382 in total** — where every pipeline test
 compiles `.ax` to an executable, runs it and asserts stdout + exit code. The
 suite includes the self-hosting fixed point: the stage-1 and stage-2
 compilers must emit byte-identical C and object files for the same program
@@ -734,10 +744,37 @@ Full reference, including limits: [`docs/css-assets.md`](docs/css-assets.md).
 
 ## Status
 
-**v0.48.0** · **a stdlib audit: one heap corruption and three quadratic loops,
-all from the same two mistakes** · 379 tests green
-(285 in the compiler workspace + 94 in `aoxn-pkg`; the IDE adds 36 Rust +
+**v0.49.0** · **the UI toolkit's remaining silent failures, and the fifteen
+copies of its input cycle** · 382 tests green
+(288 in the compiler workspace + 94 in `aoxn-pkg`; the IDE adds 36 Rust +
 62 frontend tests of its own) ·
+
+**a 9th layout level silently popped the 8th** (v0.49.0) — `lay_push` refused a
+box past the 8-level cap by returning without pushing, but `ui_layout_end`
+decremented anyway, so the 9th nesting level popped its own 8th and every later
+end unwound a level too deep: the rest of the frame's widgets landed in the
+wrong box with nothing reporting it. A refused push now balances its own end
+against a separate counter, and `ui_layout_overflow(c)` says it happened ·
+**`itoa10` returned UTF-16 on its escape path** (v0.49.0) — the arena path
+writes ASCII digits, which is what the draw path expects, but the
+arena-exhaustion escape returned `ui_utf16(str(v))`, so whenever the bump arena
+filled up `ui_label_int` drew a number with a NUL after every digit and both
+`len()` and `as_string()` stopped at the first one (`1/1` → `12345/5`) ·
+**`utf16_write` was O(n²)** (v0.49.0) — `while i < len(s)`, and `len()` on a
+string is `strlen` emitted inline at every use site, so the encoder re-scanned
+the entire string once per character: 626 µs → 3 µs per 2048-char call. The
+same trap v0.48.0 found three times in the JSON DOM; `ui.ax` had its own copy ·
+**the X11 clip stack could pop a rect it never pushed** (v0.49.0) — the push
+stored the rect and incremented the depth inside one `if depth < 30` branch
+while the pop decremented unconditionally, so a 31-deep nest walked the stack
+off its own base. The depth now always advances; only the storage saturates ·
+**and the fifteen copies of the press-claim/click-release cycle are one cycle
+now** (v0.49.0) — `ui_press` / `ui_press_claim` / `ui_press_release` /
+`ui_pressed`, with the two load-bearing details (an overlay-eaten press is
+never stolen; the slot stays claimed for the whole hold) documented where they
+live. No widget signature changed. The text box also stopped measuring its
+whole field every frame to learn a constant line height — that was an O(n)
+content hash per frame under the v0.47.0 measure cache.
 
 **the JSON builder could shrink a parsed node's buffer under you** (v0.48.0) —
 the parser adopts a `Vec`'s child buffer but leaves the node's capacity at 0,
@@ -871,7 +908,7 @@ Apache-2.0 — see [`LICENSE`](LICENSE).
 ### 一个 exe 装全部（Windows）
 
 从 [releases 页面](https://github.com/AlonechatWorkspace/Aoxn-language/releases)
-下载 **`Aoxn-0.48.0-Setup.exe`**，双击即可。**这一个 exe 里就带着编译器、标准库、
+下载 **`Aoxn-0.49.0-Setup.exe`**，双击即可。**这一个 exe 里就带着编译器、标准库、
 UI 工具箱和示例程序**——不用再下载别的，也不用自己解压：
 
 ```console
@@ -1084,7 +1121,15 @@ Consolas，Linux 上是 fontconfig 的 `Monospace` 别名）；**v0.47.0 修好�
 GDI 裁剪栈——它从来没能恢复过**：一帧里只要出现一个 `ui_textbox`，整个
 窗口（含最后的 `BitBlt`）从那一刻起就被裁到那个 textbox 的矩形里，直到
 进程结束；同时加入按裁剪区剔除绘制、64 项文本测量缓存，以及 Windows
-后端的 DC 状态缓存。
+后端的 DC 状态缓存。**v0.49.0** 收掉了其余的静默错误：第 9 层布局现在会
+弹掉第 8 层（此后整帧控件落进错误的盒子里，且无任何提示）、`itoa10` 的
+arena 耗尽逃逸路径返回的是 UTF-16 而绘制路径要的是 ASCII（所以 arena 一满
+`ui_label_int` 就只画出一位数字）、`utf16_write` 因 `while i < len(s)`
+逐字符重扫整串而是 O(n²)（2048 字符一次 626 µs → 3 µs），以及 X11 裁剪栈
+可能弹出一个从未 push 过的矩形。同时把十五份 press-claim/click-release
+周期合并成 `ui_press` / `ui_press_claim` / `ui_press_release` / `ui_pressed`，
+并把文本框每帧测量整段字段只为读一个常量行高（在 v0.47.0 测量缓存之下仍是
+每帧 O(n) 内容哈希）换成带缓存的 `ui_font_height`。
 
 **工具箱由三个可移植文件加每平台一个后端组成**：可移植内核（`ui.ax`）、与
 平台无关的控件层（`ui_draw.ax`），以及 `ui_win.ax`（Win32/GDI）或
@@ -1271,13 +1316,13 @@ Web 服务同样能打：[`web/`](web/README.md) 套件用 Aoxn 写了 HTTP/1.1 
 
 ## 测试与 CI
 
-`cargo test` 跑端到端测试套件——编译器工作区 **285 个**（pipeline 154、编译器
-单元测试 18、安装器 stub 3、TypeScript 前端 34、UI 11、安装布局 6、CSS 资产
+`cargo test` 跑端到端测试套件——编译器工作区 **288 个**（pipeline 154、编译器
+单元测试 18、安装器 stub 3、TypeScript 前端 34、UI 14、安装布局 6、CSS 资产
 21、CSS 资产 v0.36 18、符号导出 8、OpenAI SDK 2、Anthropic SDK 2，以及
 v0.44.0 标准库模块组各一个驱动测试：hashlib、datetime、math、pathlib、
 containers、os+glob、json 文件 I/O——外加 `stdlib_defect_pins`，即 v0.48.0
 为 JSON 构建器堆损坏与三处二次方循环加的回归套件），另有 `aoxn-pkg` crate 的
-94 个经 `bash run_pkg_tests.sh` 运行——**合计 379 个**——每个 pipeline 测试都是
+94 个经 `bash run_pkg_tests.sh` 运行——**合计 382 个**——每个 pipeline 测试都是
 .ax → 可执行文件 → 运行 → 断言 stdout 与退出码。其中含自举固定点：
 stage-1 与 stage-2 编译器对同一程序必须产出逐字节一致的 C 文本与目标文件
 （目标文件比较会屏蔽 clang 写入每个 Windows 目标文件的 COFF 时间戳）。
@@ -1400,9 +1445,33 @@ print(asset_path(styles_fingerprint()))   # …\assets\82b4fb25….css
 
 ## 现状
 
-**v0.48.0** · **一次标准库审计：一处堆损坏与三处二次方循环，都源于同样两个错误**
-· 379 测试全绿
-（编译器工作区 285 + `aoxn-pkg` 94；IDE 另有 36 个 Rust + 62 个前端测试）·
+**v0.49.0** · **UI 工具箱剩余的静默错误，以及它的输入周期的十五份拷贝**
+· 382 测试全绿
+（编译器工作区 288 + `aoxn-pkg` 94；IDE 另有 36 个 Rust + 62 个前端测试）·
+
+**第 9 层布局会静默弹掉第 8 层**（v0.49.0）——`lay_push` 对超出 8 层上限的
+盒子是「返回但不 push」，而 `ui_layout_end` 照样递减深度，于是第 9 层嵌套
+弹掉了它自己的第 8 层，此后每个 `ui_layout_end` 都多弹一层：该帧余下控件
+落进错误的盒子里，且无处报告。现在被拒绝的 push 用独立计数器（st 559）与
+自己的 `ui_layout_end` 对冲，8 个存活层级不可触碰，`ui_layout_overflow(c)`
+告诉你发生了什么 ·
+**`itoa10` 的逃逸路径返回 UTF-16**（v0.49.0）——arena 路径写的是 ASCII 数字，
+正是绘制路径所期望的（`plat_text_sub` 会把字节再过一遍 UTF-8 编码器），
+但 arena 耗尽逃逸返回 `ui_utf16(str(v))`：于是 arena 一满，`ui_label_int`
+画出的数字每位后面跟一个 NUL，`len()` 与 `as_string()` 都停在第一个上
+（`1/1` → `12345/5`）·
+**`utf16_write` 是 O(n²)**（v0.49.0）——`while i < len(s)`，而 `len()` 作用在
+string 上就是 `strlen` 且在每个使用点内联发射，编码器逐字符重扫整串：
+2048 字符一次 626 µs → 3 µs。这正是 v0.48.0 在 JSON DOM 里挖出三次的同一个
+陷阱，`ui.ax` 自己也有一份 ·
+**X11 裁剪栈可能弹出一个从未 push 过的矩形**（v0.49.0）——push 把存矩形和
+递增深度放在同一个 `if depth < 30` 分支里，而 pop 无条件递减，于是 31 层嵌套
+会把栈弹穿自己的基底。现在深度始终推进，只有存储会饱和 ·
+**press-claim/click-release 周期的十五份拷贝现在是一个周期**（v0.49.0）——
+`ui_press` / `ui_press_claim` / `ui_press_release` / `ui_pressed`，两处承重
+细节（被浮层吃掉的 press 绝不被偷走；整个按住期间槽位保持占用）写在它们
+所在之处。控件签名一个没变。文本框也不再每帧测量整段字段只为读一个常量行高
+——在 v0.47.0 测量缓存之下，那仍是每帧 O(n) 的内容哈希。
 
 **JSON 构建器可能在你脚下把已解析节点的缓冲区改小**（v0.48.0）——解析器会
 接管 `Vec` 的子缓冲区，却把节点的容量槽留成 0，而扩容逻辑把 0 读成「默认 8」，

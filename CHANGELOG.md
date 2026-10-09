@@ -5,6 +5,113 @@ minor bumps while pre-1.0: each minor version is a language milestone.
 
 ## [Unreleased]
 
+## [0.49.0] - 2026-10-09
+
+Theme: **the UI toolkit's remaining silent failures, and the fifteen copies of
+its input cycle.** v0.47.0 fixed the clip stack and the caching; this one is
+about the parts that were wrong in ways no test could see, plus the quadratic
+UTF-16 encoder that was hiding in plain sight.
+
+### Fixed: a 9th layout level silently popped the 8th
+
+`lay_push` REFUSED a box past the 8-level cap by returning without pushing —
+but `ui_layout_end` decremented the depth unconditionally, so the 9th nesting
+level popped its own 8th, and every later `ui_layout_end` unwound one level
+too deep. The rest of the frame's widgets landed in the wrong box, with
+nothing anywhere reporting it. A refused push now balances its own end
+against a separate counter (st 559), so the 8 live levels are untouchable,
+and `ui_layout_overflow(c)` / `ui_layout_depth(c)` make it observable.
+
+### Fixed: `itoa10` returned UTF-16 on its escape path
+
+`itoa10` writes plain ASCII digits into the frame arena, which is what the
+draw path expects (`plat_text_sub` runs the bytes back through the UTF-8
+encoder). Its arena-exhaustion escape returned `ui_utf16(str(v))` — UTF-16,
+NUL-interleaved — so **whenever the bump arena filled up, `ui_label_int` drew
+a number with a NUL after every digit**, and both `len()` and `as_string()`
+stopped at the first one. The escape now returns the Aoxn string itself
+(ASCII, immutable, leaks by design like every other one-shot buffer).
+Measured before/after on an `itoa10`-shaped call: `1/1` → `12345/5`.
+
+### Fixed: `utf16_write` was O(n²)
+
+`while i < len(s)`, and `len()` on a string is `strlen` **emitted inline at
+every use site** — so the encoder re-scanned the entire string once per
+character. `utf16_write_sub` already hoisted its bounds; this is its
+single-entry twin and it did not. Measured on this box (`--O3`, 20000 calls,
+2048-char ASCII string):
+
+| | `utf16_write` |
+|---|---|
+| before | 626 µs / call |
+| after | 3 µs / call |
+
+Cost fell from ~15 650x to ~300x for a 16x length ratio — quadratic to
+linear. This is the same trap v0.48.0 found three times in the JSON DOM;
+`ui.ax` had its own copy.
+
+### Fixed: the X11 clip stack could pop a rect it never pushed
+
+`plat_clip_push` stored the rect AND incremented the depth inside one
+`if depth < 30` branch, but `plat_clip_pop` decremented unconditionally. A
+31-deep nest therefore popped a rect that was never pushed and kept going,
+walking the stack off its own base. The depth now always advances; only the
+storage saturates, and `clip_apply` re-uses the deepest rect it did keep.
+
+### Changed: one press cycle instead of fifteen copies
+
+Fifteen widgets opened with the same eleven lines — read the claim from
+`st 0`, take it on the press edge while taking focus, report a click on the
+release edge — and the copies had already drifted (some kept a local `act`,
+some did not, one forgot the focus). They are one cycle now:
+`ui_press`, `ui_press_claim` / `ui_press_release`, `ui_pressed`. The two
+load-bearing details are documented where they live, because both are easy to
+lose in a rewrite: the claim is only taken when the slot is free, so an
+overlay that swallowed the press (`st 0 == -1`) is never stolen by a widget
+drawn underneath it; and the slot stays claimed for the whole hold, which is
+how the dragging widgets and the pressed-face colours recognise their own
+press. Wheel and scroll clamping are shared the same way
+(`ui_wheel_scroll` / `ui_clamp_scroll`) — that is where the per-notch rate
+differences live (the text edit scrolls 3 notches per event, the scroll area
+a third of one) and where the copies had begun to disagree.
+
+**No widget signature changed.**
+
+### Changed: a line height is a font property, not a string property
+
+`ui_textbox` measured its WHOLE field every frame purely to read `ts.h`, for
+vertical centring. The v0.47.0 measure cache removed the GDI call but not
+the **O(n) content hash** that cache is keyed on, so a several-hundred-char
+field still paid a full scan per frame to learn a constant. `ui_font_height`
+measures one character, caches it in slot 830, and drops it on a font switch
+alongside the measure cache.
+
+### Fixed: stale documentation
+
+- the `plat_*` contract comment claimed `ui_draw.ax` carries headless
+  fallback stubs and that a backend's definitions override them — there are no
+  stubs in the file, and since v0.46.0 there are two backends, not one;
+- `plat_canvas_new/resize/free` named a primitive that does not exist
+  (`plat_canvas_resize` does);
+- slot 819 was documented as "the textedit anchor of the drag in flight" while
+  the code uses it as the TEXTBOX selection anchor. It is now documented as
+  what it is, including the consequence: there is one pair, so the caret does
+  not survive a focus switch.
+
+### Tests
+
+- `ui_layout_overflow_and_arena_escape` — the layout cap balances against its
+  own overflow counter (the `8 0` on the third line is what fails on the old
+  code), and `itoa10`'s escape renders the same digits and the same `len()` as
+  its arena path, which is precisely what the UTF-16 bug broke.
+- `ui_press_claim_cycle` — drives the shared press cycle: claim, hold, a
+  second widget unable to steal it, release inside (a click), release outside
+  (frees the claim, no click — the case that used to wedge `st 0` forever),
+  and the overlay `-1` sentinel surviving. The window smoke tests assert a
+  frame does not crash; this asserts a click lands.
+- `ui_font_height_is_a_cached_constant` — stable across calls, positive,
+  bounded by a real glyph measure, and cleared by `ui_font_mono`.
+
 ## [0.48.0] - 2026-10-07
 
 Theme: **a stdlib audit, and the three quadratic loops it found** — one of them
