@@ -49,7 +49,7 @@ def main() -> int:
 
 ### Install (one file, Windows)
 
-Download **`Aoxn-0.50.4-Setup.exe`** from the
+Download **`Aoxn-0.50.5-Setup.exe`** from the
 [releases page](https://github.com/AlonechatWorkspace/Aoxn-language/releases)
 and double-click it. That single executable carries the compiler, the
 standard library, the UI toolkit and the examples — nothing else to download,
@@ -768,9 +768,37 @@ Full reference, including limits: [`docs/css-assets.md`](docs/css-assets.md).
 
 ## Status
 
-**v0.50.4** · **the stdlib built paths with a hardcoded `\`** · 385 tests
-green (291 in the compiler workspace + 94 in `aoxn-pkg`; the IDE adds 36 Rust
-+ 62 frontend tests of its own) ·
+**v0.50.5** · **`os_cwd()` handed back a pointer into memory it had already
+freed** · 385 tests green (291 in the compiler workspace + 94 in `aoxn-pkg`;
+the IDE adds 36 Rust + 62 frontend tests of its own) ·
+
+**one use-after-free, nine reported failures** — on Linux it did not crash so
+much as lie. The instrumented CI run said it outright:
+`FAIL chdir-no-move …/sandbox`, meaning `os_cwd()` answered `.../sandbox`
+*before* the `chdir` that was supposed to produce that path, and answered the
+same string again after. `as_string` is a **cast, not a copy**
+(`codegen_c.rs` emits `((char*)(x))`), so it aliases the buffer it is given —
+and the POSIX arm returned `as_string(p)` then freed `buf` (`p` *is* `buf`).
+glibc hands back the **same 4096-byte chunk** on the next request, so the
+second call overwrote the first answer in place: the two strings compared
+**equal with the working directory having moved**. Anything that captured a
+cwd and restored it later stayed in the wrong directory, so every relative
+path after it failed — the empty glob results and the dead json file I/O were
+all symptoms of that one line ·
+**a use-after-free can lie instead of crashing, so pin it at RUNTIME.** A
+static scan cannot see this class: the alias ran through two different
+variable names (`as_string(p)` aliasing a buffer freed as `buf`), which is
+exactly what defeated the first attempt at such a check. The new
+`cwd-answers-own-their-buffer` pin asserts the observable property — two
+`os_cwd()` calls around a `chdir` must differ. All 60 `as_string` sites in
+`stdlib/` were audited; this was the only real one ·
+**and the lesson about the v0.50.4 instrumentation**: a bare `FAIL chdir`
+told us nothing, and splitting it into named terms turned the next failure
+into a one-line diagnosis. When a failure's cause is unknown, spend the edit
+on the diagnostic rather than a speculative rewrite ·
+
+**the previous milestone** (v0.50.4) — **the stdlib built paths with a
+hardcoded `\`** —
 
 **`glob.ax` and `pathlib.ax` spelled every joined path with `"\\"`**, so on
 Linux a nested glob walked a path that names nothing:
@@ -791,9 +819,8 @@ their expectations from `path_sep()` now, and a new
 dual-platform modules for the construct (comment-stripping, Windows-only
 modules exempt because they name `\` inside a `target_os()` arm) ·
 **open, and instrumented rather than guessed**: `osglob`'s `chdir` check and
-three json file-I/O checks are still unexplained on Linux, and the driver now
-reports which term failed instead of a bare `FAIL chdir`, so one more CI run
-settles it ·
+three json file-I/O checks failed on Linux for a reason that turned out to sit
+upstream of all of them — see v0.50.5 below ·
 
 **the previous milestone** (v0.50.3) — **the stdlib clock linked on Linux and
 still told the wrong time: 369 years ahead** —
@@ -1036,7 +1063,7 @@ Apache-2.0 — see [`LICENSE`](LICENSE).
 ### 一个 exe 装全部（Windows）
 
 从 [releases 页面](https://github.com/AlonechatWorkspace/Aoxn-language/releases)
-下载 **`Aoxn-0.50.4-Setup.exe`**，双击即可。**这一个 exe 里就带着编译器、标准库、
+下载 **`Aoxn-0.50.5-Setup.exe`**，双击即可。**这一个 exe 里就带着编译器、标准库、
 UI 工具箱和示例程序**——不用再下载别的，也不用自己解压：
 
 ```console
@@ -1576,9 +1603,31 @@ print(asset_path(styles_fingerprint()))   # …\assets\82b4fb25….css
 
 ## 现状
 
-**v0.50.3** · **标准库时钟在 Linux 上链接通了，却仍在报 369 年后的时间** ·
-**v0.50.4** · **标准库用硬编码的 `\` 拼路径** · 385 测试全绿（编译器工作区 291 +
-`aoxn-pkg` 94；IDE 另有 36 个 Rust + 62 个前端测试）·
+**v0.50.4** · **标准库用硬编码的 `\` 拼路径** ·
+**v0.50.5** · **`os_cwd()` 返回了指向已释放内存的指针** · 385 测试全绿
+（编译器工作区 291 + `aoxn-pkg` 94；IDE 另有 36 个 Rust + 62 个前端测试）·
+
+**一处 use-after-free，九个失败标记**——在 Linux 上它不崩溃，而是说谎。带诊断的
+CI 直接说了：`FAIL chdir-no-move …/sandbox`，意思是 `os_cwd()` 在那次本该产生
+`sandbox` 的 `chdir` **之前**就回答了 `.../sandbox`，之后又回答了同一个字符串。
+`as_string` 是**强制类型转换、不是拷贝**（`codegen_c.rs` 发射 `((char*)(x))`），
+所以它别名着传进去的缓冲区——而 POSIX 那一支返回 `as_string(p)` 紧接着
+`free(buf)`（`p` **就是** `buf`）。glibc 会把**同一块 4096 字节的 chunk** 直接
+发回给下一次同样大小的请求，于是第二次调用就地覆盖了第一次的答案：工作目录已经
+变了，两个字符串却**相等**。任何先记下 cwd、稍后再回去的调用方就留在了错误的
+目录里，于是其后每一条相对路径都失败——glob 结果为空、json 文件 I/O 全瘫，
+都只是这行的下游症状 ·
+**use-after-free 可以说谎而不是崩溃，所以要在运行时钉住它**。静态扫描看不见这一类：
+别名经由两个不同的变量名（`as_string(p)` 别名着一块后来以 `buf` 之名释放的
+缓冲区），而这恰恰是第一版静态检查失效的原因。新钉子
+`cwd-answers-own-their-buffer` 断言可观察的性质——夹着一次 `chdir` 的两次
+`os_cwd()` 必须不同。`stdlib/` 里 60 处 `as_string` 已全部审计，这是唯一一处真
+问题 ·
+**以及 v0.50.4 那次诊断改动的教训**：一句 `FAIL chdir` 什么也没告诉你，把它拆成
+有名字的几项之后，下一次失败就变成了一行结论。**原因不明时，把力气花在诊断上，
+而不是猜测性地重写。** ·
+
+**上一个里程碑**（v0.50.4）——**标准库用硬编码的 `\` 拼路径**——
 
 **`glob.ax` 与 `pathlib.ax` 把每一条拼出来的路径都写成了 `"\\"`**，于是 Linux 上
 嵌套 glob 去 walk 一个什么也不指的路径：`glob("sandbox/sub/*.txt")` 走到

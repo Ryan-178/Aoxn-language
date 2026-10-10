@@ -1025,18 +1025,33 @@ crates/aoxn-pkg       package manager crate (its own dependency set; see above)
   `tests/osglob.rs` both asserted `"a\\b"`, so they would have failed on
   Linux even after the code was correct. Build expectations from
   `path_sep()`.
-- **OPEN as of v0.50.4, for the next Linux CI run to settle**: on
-  `ubuntu-latest`, `osglob`'s `chdir` check fails and every glob result is
-  EMPTY (`glob-star-txt 0`) while `glob-empty` and `glob-sorted` PASS — the
-  last two pass vacuously on an empty list. The separator bug explains the
-  empty glob, but not a `glob("sandbox/*.txt")` returning **0** where the
-  trace says 1, nor `json-read` reporting err 0 (a missing file is err 2 —
-  `json-read-missing` proves it) while `json-write` failed. Both are
-  consistent with the process having stayed in `sandbox/` after the chdir
-  and the restore failing, but that is inference, not a diagnosis. The
-  driver now names which chdir term failed and prints the json err codes,
-  reachability and values, so one more run settles it. **Do not "fix"
-  `os_chdir` by rewriting it before reading that output.**
+- **`as_string` is a CAST, not a copy** (`codegen_c.rs` emits `((char*)(x))`),
+  so its result ALIASES the buffer it is given — freeing that buffer is a
+  use-after-free, and the language's own rule is that strings leak by design.
+  v0.50.5 was `os_cwd()` doing exactly that on the POSIX arm: it returned
+  `as_string(p)` and freed `buf` (`p` IS `buf`). It is not a rare crash —
+  glibc returns the same 4096-byte chunk on the next request, so the second
+  `os_cwd()` overwrote the first answer IN PLACE and the two strings compared
+  **equal with the cwd having moved**. A caller that captured a cwd and
+  restored it later stayed in the wrong directory, and every relative path
+  after that failed: one use-after-free, nine reported failures, and the
+  apparent "glob finds nothing / json I/O is broken" symptoms were all
+  downstream of it. **When a function returns a string it built, either copy
+  into an exact-sized buffer (what `os_from_wide` does) or do not free — and
+  never `free` a buffer an `as_string` result points at.** All 60 `as_string`
+  sites in `stdlib/` were audited for this; the near-misses that are NOT bugs
+  are listed in CHANGELOG 0.50.5 (mutually exclusive arms; a Win32 call that
+  copies during the call; `j_parse`, whose `jp_str` copies into the DOM).
+- **A use-after-free can lie instead of crashing, so pin it at RUNTIME.** A
+  static scan for `as_string(x)` + `free(x)` does NOT find this class: the
+  alias ran through two different variable names (`as_string(p)` aliasing a
+  buffer freed as `buf`), which is exactly what defeated the first attempt at
+  such a check. `tests/osglob.rs::cwd-answers-own-their-buffer` asserts the
+  observable property instead — two `os_cwd()` calls around a `chdir` must
+  differ. **Instrument before theorising**: v0.50.4's `FAIL chdir` said
+  nothing, and splitting it into named terms made v0.50.5 a one-line
+  diagnosis. When a failure's cause is not yet known, spend the edit on the
+  diagnostic, not on a speculative rewrite.
 - **UCRT symbol collisions are a LINK-TIME trap**: a lowercase `nan`,
   `inf` or `copysign` DEFINITION duplicates UCRT symbols (the math externs
   share object files with them) → `lld-link: duplicate symbol`. That is why

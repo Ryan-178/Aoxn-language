@@ -5,6 +5,63 @@ minor bumps while pre-1.0: each minor version is a language milestone.
 
 ## [Unreleased]
 
+## [0.50.5] - 2026-10-10
+
+### Fixed
+
+- **`os_cwd()` returned a pointer into memory it had already freed.** On
+  Linux this did not crash so much as quietly lie. The v0.50.4 report named
+  it:
+
+  ```
+  FAIL chdir-no-move …/aoxn-os_glob_filesystem-4734/sandbox
+  ```
+
+  `os_cwd()` answered `.../sandbox` BEFORE the `chdir` that was supposed to
+  produce that path, and answered the same string again afterwards.
+
+  `as_string` is a **cast, not a copy** — `codegen_c.rs` emits
+  `((char*)(x))` — so `as_string(p)` aliases the buffer it is handed, and the
+  POSIX arm then did:
+
+  ```
+  out = as_string(p)
+  free(buf)
+  return out
+  ```
+
+  where `p` is `buf`. glibc's malloc hands back the **same 4096-byte chunk**
+  on the next request of that size, so the second `os_cwd()` overwrote the
+  first call's answer in place: the two strings were the same bytes and
+  compared equal with the working directory having moved. A caller that
+  captures a cwd and restores it later therefore stayed in the wrong
+  directory — which is why the osglob driver, after a failed `chdir`, found
+  **no** glob results and wrote `sandbox/doc.json` to
+  `sandbox/sandbox/doc.json`. One use-after-free, nine reported failures.
+
+  The POSIX arm now copies into an exact-sized buffer and frees the scratch —
+  what `os_from_wide` already did on the Windows arm of the same function.
+  Windows was never affected, because that arm copies.
+
+- **The whole family is one instance.** A scan of all 60 `as_string` uses in
+  `stdlib/` for a `free` of the aliased buffer found exactly this one. The
+  near-misses are worth recording because a future audit will trip over them:
+  `stdlib.ax`'s `exe_path` frees in the POSIX arm below a `return` in the
+  Windows arm (mutually exclusive); the `ui_win.ax` sites hand a pointer to a
+  Win32 call that copies during the call; and both SDK streaming arms
+  (`j_parse(as_string(ebuf))` then `free(ebuf)`) are safe because `jp_str`
+  allocates and copies every string into the DOM instead of aliasing the
+  source.
+
+### Pins
+
+- **`cwd-answers-own-their-buffer`** in `tests/osglob.rs`: two `os_cwd()`
+  calls with a `chdir` between them must yield different strings, and the
+  second must end in `sandbox`. This has to be a RUNTIME assertion — a static
+  scan cannot see the bug, because the alias ran through two different
+  variable names (`as_string(p)` aliasing a buffer later freed as `buf`),
+  which is exactly what defeated the first attempt at a static check here.
+
 ## [0.50.4] - 2026-10-10
 
 ### Fixed

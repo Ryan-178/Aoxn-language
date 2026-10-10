@@ -428,14 +428,31 @@ def os_cwd() -> string:
         s = os_from_wide(buf)
         free(buf)
         return s
+    # `as_string` is a CAST, not a copy (codegen_c.rs emits ((char*)(x))), so
+    # its result ALIASES the buffer it was given. Returning `as_string(p)` and
+    # then freeing `p` handed back a pointer into freed memory — v0.50.5, and
+    # it is not a rare crash: glibc's malloc returns the SAME 4096-byte chunk
+    # on the next request, so a second os_cwd() overwrote the first call's
+    # answer IN PLACE and the two strings compared equal with the working
+    # directory having moved. A caller that captured a cwd and later restored
+    # it stayed in the wrong directory, and every relative path after that
+    # failed. This copies, exactly like os_from_wide on the Windows arm.
     buf = malloc(4096)
     p = getcwd(buf, 4096)
     if p == 0:
         free(buf)
         return ""
-    out = as_string(p)
+    n = 0
+    while n < 4095 and load_u8(p, n) != 0:
+        n = n + 1
+    out = malloc(n + 1)
+    i = 0
+    while i < n:
+        store_u8(out, i, load_u8(p, i))
+        i = i + 1
+    store_u8(out, n, 0)
     free(buf)
-    return out
+    return as_string(out)
 
 def os_chdir(path: string) -> bool:
     if target_os() == "windows":

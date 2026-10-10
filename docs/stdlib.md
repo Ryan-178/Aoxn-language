@@ -212,6 +212,15 @@ node:crypto.
 
 ## os
 
+`os_cwd()` is the one function here that had to be rewritten twice on
+different platforms: its Windows arm copies through `os_from_wide`, and its
+POSIX arm now copies too. It used to `return as_string(p); free(buf)`, and
+since `as_string` is a **cast**, the returned string pointed into the block
+that had just been freed — glibc then handed the same chunk straight back to
+the next `os_cwd()`, so two answers compared equal with the directory having
+moved (v0.50.5). **Rule for this module: `as_string` aliases, so never
+`free` a buffer a returned string points at — copy, or let it leak.**
+
 The Win32 core, everything through the `W` APIs with UTF-8 ↔ UTF-16
 conversion (the `os_to_wide`/`os_from_wide` helpers are deliberately
 DUPLICATED from `net/codec.ax` — a filesystem module should not pull the

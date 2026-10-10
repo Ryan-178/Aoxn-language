@@ -34,6 +34,20 @@ def vec_has(v: Vec, s: string) -> bool:
         i = i + 1
     return False
 
+# does s end with tail? (no substring builtin; the loop is short)
+def ends_with(s: string, tail: string) -> bool:
+    n = len(s)
+    m = len(tail)
+    if m > n:
+        return False
+    off = n - m
+    i = 0
+    while i < m:
+        if str_get(s, off + i) != str_get(tail, i):
+            return False
+        i = i + 1
+    return True
+
 def main() -> int:
     fails = 0
     # ---- fresh sandbox ----
@@ -161,6 +175,21 @@ def main() -> int:
             else:
                 print("PASS chdir")
         os_chdir(before)
+    # a string from os_cwd() must OWN its buffer. v0.50.5 returned one that
+    # aliased a block the function had already freed; glibc handed the same
+    # 4096-byte chunk to the next os_cwd(), so the two answers compared EQUAL
+    # even though the working directory had moved — which is invisible as a
+    # crash and silent as a wrong directory. Two calls with a chdir between
+    # them is the whole repro.
+    c1 = os_cwd()
+    os_chdir("sandbox")
+    c2 = os_cwd()
+    os_chdir(c1)
+    if len(c1) > 0 and len(c2) > 0 and c1 != c2 and ends_with(c2, "sandbox"):
+        print("PASS cwd-answers-own-their-buffer")
+    else:
+        print("FAIL cwd-answers-own-their-buffer [" + c1 + "] [" + c2 + "]")
+        fails = fails + 1
     # ---- glob matcher (pure) ----
     if glob_match("*.ax", "foo.ax") and not glob_match("*.ax", "foo.c") and glob_match("a?c", "abc") and not glob_match("a?c", "abbc"):
         print("PASS match-star-q")
@@ -336,6 +365,7 @@ stderr:
         "env-path",
         "env-long-value",
         "chdir",
+        "cwd-answers-own-their-buffer",
         "match-star-q",
         "match-multi-star",
         "match-class",
