@@ -5,6 +5,46 @@ minor bumps while pre-1.0: each minor version is a language milestone.
 
 ## [Unreleased]
 
+## [0.50.1] - 2026-10-10
+
+### Fixed
+
+- **`stdlib/time.ax` and `stdlib/datetime.ax` could not link on Linux.**
+  Both modules (v0.44.0) called the Win32 clocks unconditionally —
+  `QueryPerformanceCounter`, `GetSystemTimeAsFileTime`, `GetTickCount64`,
+  `Sleep`, `GetLocalTime` — so every program importing them failed at the
+  link step on Linux (`undefined reference to 'GetLocalTime'`,
+  `clang: error: linker command failed with exit code 1`), which is where
+  the `ubuntu-latest` CI job stood at `tests/datetime.rs`. Invisible on
+  Windows, where those symbols exist. Both modules are now dual-platform,
+  the shape `stdlib/os.ax` already used: POSIX `clock_gettime` /
+  `nanosleep` / `localtime_r` behind `target_os()`, with the glibc
+  `struct tm` offsets documented in the source.
+
+- **The platform guard has to sit in the function that makes the call, not
+  only in its caller.** The first version of this fix guarded the six
+  public entry points and put the POSIX clocks in shared helpers, and it
+  failed on Windows instead (`undefined symbol: clock_gettime`): the
+  compiler emits EVERY function body, so an unguarded helper drags its
+  platform's symbols into the link no matter which branch reaches it. The
+  rule is now recorded in both module headers.
+
+  Why the branch is dropped at all: `if target_os() == "windows"` is
+  emitted as `__builtin_strcmp("windows", "windows") == 0`, and clang
+  constant-folds that before code generation — so the branch not taken
+  never becomes a call, and its symbols never reach the object file. This
+  holds at `-O0` as well as `-O3` (verified both with a standalone clang
+  probe and by reading the undefined-symbol table of the real generated
+  object), which is what makes the "declare both platforms, call one"
+  idiom work at all.
+
+- Pinned by `tests/datetime.rs::clock_modules_reference_only_this_platform`:
+  it compiles every clock entry point to an OBJECT FILE and asserts the
+  object names this platform's clock symbols and NOT the other platform's.
+  It is a two-way pin — the same assertion runs on both CI platforms, so
+  a missing guard on either side fails the build instead of waiting for a
+  user on the other OS.
+
 ## [0.50.0] - 2026-10-10
 
 Theme: **the second stdlib audit — the `len()`-is-`strlen` sweep finished,

@@ -1,25 +1,58 @@
-# Aoxn standard library — time (v0.44.0, docs/stdlib-todo.md #5).
+# Aoxn standard library — time (v0.44.0, docs/stdlib-todo.md #5; dual
+# platform since v0.51.0 — the module was Windows-only and would not LINK on
+# Linux, because an extern a program calls unconditionally is a symbol
+# reference in the object file, whatever the rest of the source says).
 #
-# Windows clocks, prefixed `time_`. Three clock sources, three purposes:
+# Clocks, prefixed `time_`. Windows has three sources, three purposes:
 #   - QueryPerformanceCounter  — monotonic, for measuring elapsed time
 #   - GetSystemTimeAsFileTime  — wall clock UTC, 100 ns units since 1601
 #   - GetTickCount64           — cheap monotonic milliseconds since boot
-# `Sleep` is the sleeper (milliseconds; Python's time.sleep takes seconds,
-# so time_sleep does the conversion).
+# Linux answers the same two clocks with one call:
+#   - clock_gettime(CLOCK_MONOTONIC) — the monotonic one
+#   - clock_gettime(CLOCK_REALTIME)  — the wall clock one
+# `Sleep` is the sleeper on Windows and `nanosleep` on Linux (milliseconds;
+# Python's time.sleep takes seconds, so time_sleep does the conversion).
 #
-# `timespec_get` does NOT link on this toolchain (clang/MSVC libs — recorded
-# in AGENTS.md), which is why everything here goes through the Win32 externs
-# instead. kernel32 is linked through the CRT: no -l flag needed.
+# `timespec_get` does NOT link on the Windows toolchain (clang/MSVC libs —
+# recorded in AGENTS.md), which is why everything there goes through the Win32
+# externs instead. kernel32 is linked through the CRT: no -l flag needed;
+# Linux needs no -l either (libc, and glibc >= 2.17 carries clock_gettime
+# and nanosleep there rather than in the old librt).
+#
+# The POSIX externs below are only PROTOTYPES — a platform never links the
+# other side's symbols because every function that calls one branches on
+# target_os() ITSELF, and the emitted condition is
+# `__builtin_strcmp("windows", "linux") == 0`, which clang constant-folds
+# BEFORE code generation: the branch that is not taken never becomes a call,
+# at -O0 as well as at -O3 (verified with a standalone clang probe). This is
+# the contract stdlib/os.ax already relies on.
+#
+# The guard has to be in the function that makes the call, NOT only in its
+# caller: the compiler emits every function body, so a POSIX helper reached
+# from a dead branch still drags clock_gettime into a Windows link. The same
+# trap in the other direction is why the v0.44.0 version of this file could
+# not link on Linux at all — every clock was called unconditionally.
+#
+# clock_gettime and nanosleep are declared by stdlib/ui_x11.ax too: the same
+# prototype from two modules is fine as long as no program imports both (the
+# existing precedent is GetTickCount64 in ui_win.ax).
 #
 # Plain Aoxn only (no dict/None/fn-ptr/raise): self-host compilable.
 
 import * from "stdlib.ax"
+
+# ---- Win32 externs (kernel32) ----
 
 extern def QueryPerformanceCounter(counter: int) -> int
 extern def QueryPerformanceFrequency(frequency: int) -> int
 extern def GetSystemTimeAsFileTime(ft: int)
 extern def GetTickCount64() -> int
 extern def Sleep(ms: int)
+
+# ---- POSIX externs (libc; prototypes only — see the header) ----
+
+extern def clock_gettime(clk: int, ts: int) -> int
+extern def nanosleep(req: int, rem: int) -> int
 
 # 100 ns ticks between 1601-01-01 and 1970-01-01 (the FILETIME epoch gap)
 def FT_UNIX_EPOCH() -> int:
@@ -29,32 +62,71 @@ def FT_UNIX_EPOCH() -> int:
 def FT_PER_SEC() -> int:
     return 10000000
 
+# ---- POSIX clocks (libc) ----
+#
+# The guard belongs in HERE, not in the caller: the compiler emits every
+# function body, so a helper that reached clock_gettime unguarded would put
+# the POSIX symbol into a WINDOWS link — and the caller's guard, dead or not,
+# does not stop it. That is the whole rule, and it is why each of these
+# re-checks target_os() even though every caller already did.
+#
+# CLOCK_REALTIME = 0, CLOCK_MONOTONIC = 1 (decimal, repo discipline). The id
+# is a parameter so one body serves both clocks. `struct timespec` is two
+# 8-byte fields (seconds, nanoseconds) on every 64-bit glibc, and the call
+# takes its address, hence `int`. 0 is a failure on every platform: a failed
+# clock answers 0 rather than the uninitialised block — an honest zero beats
+# a garbage timestamp.
+
+# nanoseconds on the clock named by clk (0 = REALTIME, 1 = MONOTONIC)
+def time_posix_clock_ns(clk: int) -> int:
+    if target_os() == "windows":
+        return 0
+    ts = malloc(16)
+    rc = clock_gettime(clk, ts)
+    if rc != 0:
+        free(ts)
+        return 0
+    sec = load_i64(ts)
+    nsec = load_i64(ts + 8)
+    free(ts)
+    return sec * 1000000000 + nsec
+
+# the POSIX FILETIME-shaped wall clock: 100 ns ticks since 1601-01-01
+def time_posix_ft() -> int:
+    if target_os() == "windows":
+        return 0
+    return FT_UNIX_EPOCH() + time_posix_clock_ns(0) / 100
+
 # monotonic nanoseconds. The naive `c * 1e9 / f` overflows i64 after ~292
 # days at a 10 MHz QPC, so the seconds part and the remainder are converted
 # separately: c / f * 1e9 + (c % f) * 1e9 / f — the remainder term is
 # bounded by 1e9 * f < 1e17.
 def time_now_ns() -> int:
-    ctr = malloc(8)
-    freq = malloc(8)
-    QueryPerformanceCounter(ctr)
-    QueryPerformanceFrequency(freq)
-    c = load_i64(ctr)
-    f = load_i64(freq)
-    free(ctr)
-    free(freq)
-    return c / f * 1000000000 + c % f * 1000000000 / f
+    if target_os() == "windows":
+        ctr = malloc(8)
+        freq = malloc(8)
+        QueryPerformanceCounter(ctr)
+        QueryPerformanceFrequency(freq)
+        c = load_i64(ctr)
+        f = load_i64(freq)
+        free(ctr)
+        free(freq)
+        return c / f * 1000000000 + c % f * 1000000000 / f
+    return time_posix_clock_ns(1)
 
 # monotonic microseconds (same split, 1e6 scale)
 def time_now_us() -> int:
-    ctr = malloc(8)
-    freq = malloc(8)
-    QueryPerformanceCounter(ctr)
-    QueryPerformanceFrequency(freq)
-    c = load_i64(ctr)
-    f = load_i64(freq)
-    free(ctr)
-    free(freq)
-    return c / f * 1000000 + c % f * 1000000 / f
+    if target_os() == "windows":
+        ctr = malloc(8)
+        freq = malloc(8)
+        QueryPerformanceCounter(ctr)
+        QueryPerformanceFrequency(freq)
+        c = load_i64(ctr)
+        f = load_i64(freq)
+        free(ctr)
+        free(freq)
+        return c / f * 1000000 + c % f * 1000000 / f
+    return time_posix_clock_ns(1) / 1000
 
 # UTC seconds since 1970-01-01 (wall clock; may jump with the user's clock)
 def time_unix() -> int:
@@ -66,21 +138,32 @@ def time_unix_ms() -> int:
 
 # raw 100 ns FILETIME ticks since 1601-01-01
 def time_unix_ft() -> int:
-    ft = malloc(8)
-    GetSystemTimeAsFileTime(ft)
-    v = load_i64(ft)
-    free(ft)
-    return v - FT_UNIX_EPOCH()
+    if target_os() == "windows":
+        ft = malloc(8)
+        GetSystemTimeAsFileTime(ft)
+        v = load_i64(ft)
+        free(ft)
+        return v - FT_UNIX_EPOCH()
+    return time_posix_ft()
 
 # milliseconds since boot (cheap, monotonic, lower resolution than QPC)
 def time_mono_ms() -> int:
-    return GetTickCount64()
+    if target_os() == "windows":
+        return GetTickCount64()
+    return time_posix_clock_ns(1) / 1000000
+
+# sleep in whole milliseconds
+def time_sleep_ms(ms: int):
+    if target_os() == "windows":
+        Sleep(ms)
+        return
+    req = malloc(16)
+    store_i64(req, 0)
+    store_i64(req + 8, ms * 1000000)
+    nanosleep(req, 0)
+    free(req)
 
 # sleep in seconds (Python's time.sleep spelling); sub-second sleeps work
 def time_sleep(sec: float):
     ms = sec * 1000.0
-    Sleep(ms as int)
-
-# sleep in whole milliseconds
-def time_sleep_ms(ms: int):
-    Sleep(ms)
+    time_sleep_ms(ms as int)

@@ -28,3 +28,9 @@ tmp/
 # tool's own defaults, so tracking it buys nothing but churn. The rules
 # that matter live in .gitignore above, which this file syncs FROM.
 /.zcodeignore
+
+# The Smart App Control stamp run_pkg_tests.sh writes into crates/aoxn-pkg/
+# so each test build gets a fresh binary hash. It is a throwaway artifact by
+# construction — the script rewrites it on every run and restores nothing, so
+# committing it would only put a stale timestamp in history.
+crates/aoxn-pkg/src/.testbuild.rs

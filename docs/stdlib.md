@@ -11,19 +11,45 @@ in `docs/stdlib-todo.md`.
 All modules are **plain Aoxn** except `hmac.ax` (function pointers, marked
 `selfhost 尚不可编译` in its header). No module needs a `-l` flag: the Win32
 APIs used (kernel32 time/filesystem) and the CRT math functions all link
-through the default set.
+through the default set, and Linux links libc (plus the compiler's `-lm`).
+
+## The one-platform rule, and how a module obeys it
+
+An `extern def` a program CALLS is a symbol reference in the object file,
+whatever the rest of the source says. So a stdlib module that names one
+platform's API and nothing else simply does not link on the other one — it
+fails at `lld-link`/`ld` with `undefined reference to 'GetLocalTime'` and no
+diagnostic pointing at the cause.
+
+The idiom that fixes it (`os.ax` first, v0.46.0; `time.ax` / `datetime.ax`
+joined in v0.50.1): **declare every platform's externs, and branch on
+`target_os()` in every function that calls one.** The backend emits
+
+```c
+if (((__builtin_strcmp("windows", "linux") == 0))) { ... }
+```
+
+which clang constant-folds *before* code generation, so the branch that is
+not taken never becomes a call and its symbols never reach the object file.
+That holds at `-O0` as well as `-O3` — `stdlib/os.ax` relies on it and the
+v0.50.1 test reads the object file's undefined-symbol table to prove it.
+
+**The guard goes in the function that makes the call, not only in its
+caller.** The compiler emits *every* function body, so a shared POSIX
+helper reached from a dead branch still drags `clock_gettime` into a Windows
+link. That is the shape of the bug v0.50.1 fixed.
 
 | module | file | one-liner |
 |---|---|---|
 | `math` | `stdlib/math.ax` | CRT trig/exp externs + the NaN/Inf toolkit |
-| `time` | `stdlib/time.ax` | QPC monotonic clock, FILETIME wall clock, `Sleep` |
+| `time` | `stdlib/time.ax` | QPC/`clock_gettime` monotonic clock, FILETIME/`CLOCK_REALTIME` wall clock |
 | `datetime` | `stdlib/datetime.ax` | civil calendar math + strftime subset |
 | `calendar` | `stdlib/calendar.ax` | month ranges, grids, weekday queries |
 | `pathlib` | `stdlib/pathlib.ax` | pure path string operations |
 | `base64` | `stdlib/base64.ax` | RFC 4648 encode **and** decode, std + URL-safe |
 | `hashlib` | `stdlib/hashlib.ax` | SHA-256 / SHA-1 / MD5, one-shot + incremental |
 | `hmac` | `stdlib/hmac.ax` | RFC 2104 over the hashlib one-shots (fn-ptr) |
-| `os` | `stdlib/os.ax` | Win32 filesystem core, env, cwd, listdir |
+| `os` | `stdlib/os.ax` | filesystem core, env, cwd, listdir (Win32 + POSIX) |
 | `glob` | `stdlib/glob.ax` | shell wildcards over `os_listdir` |
 | `json` | `stdlib/json.ax` | the JSON DOM (promoted from `net/`) + file I/O |
 | `bisect` | `stdlib/bisect.ax` | binary search + sorted insertion on `Vec` |
@@ -62,16 +88,24 @@ Zero-argument "constants" follow the no-module-bindings rule: `pi()`,
 
 Three clocks, three purposes:
 
-- `time_now_ns()` / `time_now_us()` — monotonic, QueryPerformanceCounter.
-  The seconds and the remainder are converted separately because the naive
-  `c * 1e9 / f` overflows i64 after ~292 days at 10 MHz.
-- `time_unix()` / `time_unix_ms()` / `time_unix_ft()` — wall clock UTC from
-  `GetSystemTimeAsFileTime` (100 ns ticks since 1601, minus the epoch gap).
-- `time_mono_ms()` — cheap monotonic milliseconds since boot.
-- `time_sleep(sec: float)` / `time_sleep_ms(ms: int)` — `Sleep` underneath.
+- `time_now_ns()` / `time_now_us()` — monotonic. Windows reads
+  QueryPerformanceCounter (the seconds and the remainder are converted
+  separately, because the naive `c * 1e9 / f` overflows i64 after ~292 days
+  at 10 MHz); Linux reads `clock_gettime(CLOCK_MONOTONIC)`.
+- `time_unix()` / `time_unix_ms()` / `time_unix_ft()` — wall clock UTC.
+  Windows: `GetSystemTimeAsFileTime` (100 ns ticks since 1601, minus the
+  epoch gap). Linux: `clock_gettime(CLOCK_REALTIME)`, put into the same
+  FILETIME shape by `time_posix_ft` so `time_unix_ft` means one thing on
+  both.
+- `time_mono_ms()` — cheap monotonic milliseconds since boot
+  (`GetTickCount64` / the monotonic clock divided down).
+- `time_sleep(sec: float)` / `time_sleep_ms(ms: int)` — `Sleep` on Windows,
+  `nanosleep` on Linux.
 
-`timespec_get` does NOT link on this toolchain (AGENTS.md); that is why
-everything goes through Win32 externs. kernel32 needs no `-l`.
+`timespec_get` does NOT link on the Windows toolchain (AGENTS.md); that is why
+everything there goes through Win32 externs. kernel32 needs no `-l`, and
+glibc ≥ 2.17 carries `clock_gettime`/`nanosleep` in libc (not the old librt),
+so Linux needs none either.
 
 ## datetime
 
@@ -81,7 +115,10 @@ calendar arithmetic — Howard Hinnant's `days_from_civil` /
 `floor_div` (C `/` truncates toward zero and would corrupt pre-1970 dates;
 `datetime_from_unix(-1)` is 1969-12-31 23:59:59 and tested).
 
-- `datetime_now()` — LOCAL time (`GetLocalTime`); `datetime_utcnow()` — UTC.
+- `datetime_now()` — LOCAL time: `GetLocalTime` on Windows, `localtime_r`
+  over `time_unix()` on Linux (the glibc `struct tm` offsets are documented
+  in the source; a refused conversion falls back to UTC rather than
+  crashing). `datetime_utcnow()` — UTC on both.
 - `datetime_from_unix` / `datetime_to_unix` — exact inverses.
 - `datetime_weekday` — Monday == 0 .. Sunday == 6 (Python), plus
   `datetime_isoweekday`; `datetime_is_leap`, `datetime_days_in_month`,

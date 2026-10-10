@@ -49,7 +49,7 @@ def main() -> int:
 
 ### Install (one file, Windows)
 
-Download **`Aoxn-0.50.0-Setup.exe`** from the
+Download **`Aoxn-0.50.1-Setup.exe`** from the
 [releases page](https://github.com/AlonechatWorkspace/Aoxn-language/releases)
 and double-click it. That single executable carries the compiler, the
 standard library, the UI toolkit and the examples — nothing else to download,
@@ -217,17 +217,22 @@ def main() -> int:
 ```
 
 The batch: `math` (CRT trig/exp + the `fdiv`/`NaN()`/`is_nan` toolkit the
-numeric libraries were waiting for), `time` (QPC monotonic + FILETIME wall
-clock), `datetime` (Hinnant civil-date math, hand-parsed `strftime` subset),
-`calendar`, `pathlib`, `base64` (encode **and** decode, std + URL-safe),
+numeric libraries were waiting for), `time` (monotonic + UTC wall clock:
+QueryPerformanceCounter and FILETIME on Windows, `clock_gettime` on Linux),
+`datetime` (Hinnant civil-date math, hand-parsed `strftime` subset, local
+time through `GetLocalTime` / `localtime_r`), `calendar`, `pathlib`,
+`base64` (encode **and** decode, std + URL-safe),
 `hashlib` (SHA-256/SHA-1/MD5, one-shot + incremental, pure Aoxn bitwise),
 `hmac`, `os` (filesystem core: all-wide UTF-16 on Windows, plain libc on Linux —
 env, cwd, listdir),
 `glob` (Python's dotfile rule, sorted output), `json` (the DOM promoted out
 of `net/` + file I/O), `bisect`, `heapq`. None of them touches
-`stdlib/stdlib.ax`, so the self-host fixed point is untouched. Reference —
-per-module APIs, Python deltas and the traps (UCRT symbol collisions, the
-zero-extended sentinel): [`docs/stdlib.md`](docs/stdlib.md).
+`stdlib/stdlib.ax`, so the self-host fixed point is untouched. A module that
+reached for one platform's API only would link nowhere else, so the
+platform-touching ones declare both and pick with `target_os()` — the rule
+and its trap are written up in [`docs/stdlib.md`](docs/stdlib.md), which is
+also the per-module reference for the Python deltas and the traps (UCRT
+symbol collisions, the zero-extended sentinel).
 
 ### v0.43.0 on the surface — modules you can name
 
@@ -614,16 +619,17 @@ program. It also compiles the real stdlib and the full `examples/` suite. See
 
 ## Testing & CI
 
-`cargo test` runs the end-to-end suite — **289 tests** in the compiler
+`cargo test` runs the end-to-end suite — **290 tests** in the compiler
 workspace (pipeline 154, compiler unit tests 18, installer stub 3, TypeScript
 front end 34, UI 14, install layout 6, CSS assets 21, CSS assets v0.36 18,
 symbol export 8, OpenAI SDK 2, Anthropic SDK 2, and one driver test per
-v0.44.0 stdlib module group: hashlib, datetime, math, pathlib, containers,
-os+glob, json file-IO — plus `stdlib_defect_pins`, the v0.48.0 regression
+v0.44.0 stdlib module group: hashlib, math, pathlib, containers, os+glob,
+json file-IO — plus `datetime`, which carries two since v0.50.1 (one driver
+plus the two-platform clock pin), `stdlib_defect_pins`, the v0.48.0 regression
 suite for the JSON builder corruption and the quadratic loops, and
 `stdlib_perf_pins`, the v0.50.0 pins for the `len()`-is-`strlen` and
 concatenation-in-a-loop rewrites) plus the `aoxn-pkg` crate's 94 via
-`bash run_pkg_tests.sh` — **383 in total** — where every pipeline test
+`bash run_pkg_tests.sh` — **384 in total** — where every pipeline test
 compiles `.ax` to an executable, runs it and asserts stdout + exit code. The
 suite includes the self-hosting fixed point: the stage-1 and stage-2
 compilers must emit byte-identical C and object files for the same program
@@ -644,7 +650,10 @@ build and not the next release. `ubuntu-latest` (v0.46.0) runs the same
 suite on Linux — proving the compiler, the dual-platform stdlib and the
 fixed point on a second host — and then builds
 `examples/ui_probe_x11.ax` with `-l X11 -l Xft` and drives it for 30 real
-frames under Xvfb, the link-and-run check for the X11 UI backend. Release
+frames under Xvfb, the link-and-run check for the X11 UI backend. That job
+is what keeps the stdlib honest about platforms: a module that names only one
+OS's API compiles and links fine on the other job's absence of that symbol,
+which is how `time.ax` and `datetime.ax` reached v0.50.1. Release
 tags publish `Aoxn-<version>-Setup.exe` (see
 [`.github/workflows/release.yml`](.github/workflows/release.yml)).
 
@@ -762,10 +771,35 @@ Full reference, including limits: [`docs/css-assets.md`](docs/css-assets.md).
 
 ## Status
 
-**v0.50.0** · **the second stdlib audit: the `len()`-is-`strlen` sweep
-finished, and the concatenation-in-a-loop sweep that followed it** · 383
-tests green (289 in the compiler workspace + 94 in `aoxn-pkg`; the IDE adds
+**v0.50.1** · **the stdlib clock modules stopped being Windows-only** · 384
+tests green (290 in the compiler workspace + 94 in `aoxn-pkg`; the IDE adds
 36 Rust + 62 frontend tests of its own) ·
+
+**`stdlib/time.ax` and `stdlib/datetime.ax` could not link on Linux** — both
+called the Win32 clocks with no guard at all (`GetLocalTime`,
+`QueryPerformanceCounter`, `GetSystemTimeAsFileTime`, `GetTickCount64`,
+`Sleep`), so every program importing them died at the link step on
+`ubuntu-latest` with `undefined reference to 'GetLocalTime'` and no
+diagnostic pointing at the cause. Invisible on Windows, where those symbols
+exist. Both are dual-platform now, the shape `os.ax` has used since v0.46.0:
+POSIX `clock_gettime` / `nanosleep` / `localtime_r` selected by
+`target_os()`, with the glibc `struct tm` offsets documented in the source ·
+
+**and the guard has to sit in the function that makes the call, not in its
+caller** — the first version of the fix guarded the six public entry points
+and put the POSIX clocks in shared helpers, and failed on *Windows* instead
+(`undefined symbol: clock_gettime`). The compiler emits every function body,
+so an unguarded helper drags its platform's symbols into the link no matter
+which branch reaches it. The branch itself is not the compiler's doing: it is
+emitted as `__builtin_strcmp("windows", "linux") == 0`, which clang
+constant-folds *before* code generation, so the branch not taken never
+becomes a call — at `-O0` as well as at `-O3`. That is what makes the
+"declare both platforms, call one" idiom work at all, and it is now pinned
+by reading a real object's undefined-symbol table in both directions ·
+
+**the previous milestone** (v0.50.0) — **the second stdlib audit: the
+`len()`-is-`strlen` sweep finished, and the concatenation-in-a-loop sweep
+that followed it** —
 
 **thirteen loops re-scanned a string once per character** (v0.50.0) —
 `len()` on a string is `strlen` emitted inline at every use site, and a loop
@@ -933,7 +967,7 @@ Apache-2.0 — see [`LICENSE`](LICENSE).
 ### 一个 exe 装全部（Windows）
 
 从 [releases 页面](https://github.com/AlonechatWorkspace/Aoxn-language/releases)
-下载 **`Aoxn-0.50.0-Setup.exe`**，双击即可。**这一个 exe 里就带着编译器、标准库、
+下载 **`Aoxn-0.50.1-Setup.exe`**，双击即可。**这一个 exe 里就带着编译器、标准库、
 UI 工具箱和示例程序**——不用再下载别的，也不用自己解压：
 
 ```console
@@ -1048,14 +1082,18 @@ def main() -> int:
 ```
 
 本批模块：`math`（CRT 三角/指数 + 数值库等了很久的 `fdiv`/`NaN()`/`is_nan`
-工具箱）、`time`（QPC 单调钟 + FILETIME 墙上钟）、`datetime`（Hinnant 民用
-历数学、手写 `strftime` 子集）、`calendar`、`pathlib`、`base64`（编码**和**
+工具箱）、`time`（单调钟 + UTC 墙上钟：Windows 上是 QueryPerformanceCounter 与
+FILETIME，Linux 上是 `clock_gettime`）、`datetime`（Hinnant 民用历数学、
+手写 `strftime` 子集，本地时间走 `GetLocalTime` / `localtime_r`）、`calendar`、
+`pathlib`、`base64`（编码**和**
 解码、标准 + URL-safe 两套字母表）、`hashlib`（SHA-256/SHA-1/MD5，一次性 +
 增量，纯 Aoxn 位运算）、`hmac`、`os`（文件系统核心：Windows 全宽字符、Linux 直走 libc——
 环境变量、工作目录、listdir）、`glob`（Python 的 dotfile 规则、排序输出）、`json`
 （DOM 自 `net/` 提升 + 文件 I/O）、`bisect`、`heapq`。没有一个碰
-`stdlib/stdlib.ax`，自举固定点不动。逐模块 API、与 Python 的差异以及各种坑
-（UCRT 链接符号冲突、零扩展哨兵值）：[`docs/stdlib.md`](docs/stdlib.md)。
+`stdlib/stdlib.ax`，自举固定点不动。只伸向某一个平台 API 的模块换个平台就链接
+不上，所以碰到平台的那几个都两个平台都声明再用 `target_os()` 选一边——这条规则
+连同它的陷阱写在 [`docs/stdlib.md`](docs/stdlib.md)，那里也是逐模块 API、与
+Python 的差异以及各种坑（UCRT 链接符号冲突、零扩展哨兵值）的参考。
 
 ### v0.43.0 在语言面上加了什么——可以点名的模块
 
@@ -1127,7 +1165,11 @@ def main() -> int:
 `pathlib`、`base64`、`hashlib`、`hmac`、`os`、`glob`、`json`、`bisect`、
 `heapq`——各自独立成文件、按名字导入，参考文档在
 [`docs/stdlib.md`](docs/stdlib.md)，配套 `examples/*_demo.ax` 示例与
-`tests/*.rs` 驱动测试。
+`tests/*.rs` 驱动测试。其中会碰到平台 API 的模块（`os`、`time`、
+`datetime`，以及 `stdlib.ax` 的 `exe_path`）**两个平台的 extern 都声明，
+再用 `target_os()` 选一边**：只写一个平台的 API 就等于只在一个平台链接得上
+（这正是 `time.ax` / `datetime.ax` 在 v0.50.1 之前的状况）。这条规则连同它的
+陷阱写在 [`docs/stdlib.md`](docs/stdlib.md)。
 
 自 v0.27.0 起标准库带有 **Qt 风格的立即模式 UI 工具箱**（纯 Aoxn + 原始
 FFI），v0.29.3 升到 **Qt 级**：布局管理器（vbox/hbox/grid +
@@ -1341,11 +1383,12 @@ Web 服务同样能打：[`web/`](web/README.md) 套件用 Aoxn 写了 HTTP/1.1 
 
 ## 测试与 CI
 
-`cargo test` 跑端到端测试套件——编译器工作区 **289 个**（pipeline 154、编译器
+`cargo test` 跑端到端测试套件——编译器工作区 **290 个**（pipeline 154、编译器
 单元测试 18、安装器 stub 3、TypeScript 前端 34、UI 14、安装布局 6、CSS 资产
 21、CSS 资产 v0.36 18、符号导出 8、OpenAI SDK 2、Anthropic SDK 2，以及
-v0.44.0 标准库模块组各一个驱动测试：hashlib、datetime、math、pathlib、
-containers、os+glob、json 文件 I/O——外加 `stdlib_defect_pins`（v0.48.0 为 JSON 构建器堆损坏与三处二次方循环加的回归套件）与 `stdlib_perf_pins`（v0.50.0 为 len() 即 strlen 与循环拼接两族改写加的钉子），另有 `aoxn-pkg` crate 的 94 个经 `bash run_pkg_tests.sh` 运行——**合计 383 个**——每个 pipeline 测试都是
+v0.44.0 标准库模块组各一个驱动测试：hashlib、math、pathlib、
+containers、os+glob、json 文件 I/O——外加自 v0.50.1 起带两个的 `datetime`（驱动测试
++ 双平台时钟钉子）、`stdlib_defect_pins`（v0.48.0 为 JSON 构建器堆损坏与三处二次方循环加的回归套件）与 `stdlib_perf_pins`（v0.50.0 为 len() 即 strlen 与循环拼接两族改写加的钉子），另有 `aoxn-pkg` crate 的 94 个经 `bash run_pkg_tests.sh` 运行——**合计 384 个**——每个 pipeline 测试都是
 .ax → 可执行文件 → 运行 → 断言 stdout 与退出码。其中含自举固定点：
 stage-1 与 stage-2 编译器对同一程序必须产出逐字节一致的 C 文本与目标文件
 （目标文件比较会屏蔽 clang 写入每个 Windows 目标文件的 COFF 时间戳）。
@@ -1361,7 +1404,9 @@ CI 每次 push 跑**两个任务**。`windows-latest` 跑全套件，然后打�
 构建时失败，而不是等到发版。`ubuntu-latest`（v0.46.0）在 Linux 上跑同一套
 件——证明编译器、双平台标准库与自举固定点在第二台宿主上同样成立——随后用
 `-l X11 -l Xft` 构建 `examples/ui_probe_x11.ax` 并在 Xvfb 下驱动 30 个真实
-帧，作为 X11 UI 后端的链接与运行检查。打 tag 发布
+帧，作为 X11 UI 后端的链接与运行检查。正是这个任务让标准库对平台保持诚实：
+只写了一个操作系统 API 的模块，在另一个任务上会链接失败——`time.ax` 与
+`datetime.ax` 正是这样走到 v0.50.1 的。打 tag 发布
 `Aoxn-<version>-Setup.exe`（见
 [`.github/workflows/release.yml`](.github/workflows/release.yml)）。
 
@@ -1468,9 +1513,30 @@ print(asset_path(styles_fingerprint()))   # …\assets\82b4fb25….css
 
 ## 现状
 
-**v0.50.0** · **第二次标准库审计：`len()` 即 `strlen` 的一族清扫完毕，
-以及在循环里做拼接的一族随之清扫** · 383 测试全绿
-（编译器工作区 289 + `aoxn-pkg` 94；IDE 另有 36 个 Rust + 62 个前端测试）·
+**v0.50.1** · **标准库时钟模块不再是 Windows 专属** · 384 测试全绿
+（编译器工作区 290 + `aoxn-pkg` 94；IDE 另有 36 个 Rust + 62 个前端测试）·
+
+**`stdlib/time.ax` 与 `stdlib/datetime.ax` 在 Linux 上链接不了**——两者都
+毫无保护地调用 Win32 时钟（`GetLocalTime`、`QueryPerformanceCounter`、
+`GetSystemTimeAsFileTime`、`GetTickCount64`、`Sleep`），于是任何 import 它们的
+程序都会在 `ubuntu-latest` 上死在链接一步：
+`undefined reference to 'GetLocalTime'`，且没有任何诊断指向原因。在 Windows
+上看不见——那些符号本来就存在。两者现在都是双平台的，形状与 `os.ax` 自
+v0.46.0 起一直在用的相同：用 `target_os()` 在 POSIX 的 `clock_gettime` /
+`nanosleep` / `localtime_r` 之间选择，glibc `struct tm` 的字段偏移写在源码注释里 ·
+
+**而且这个 guard 必须待在「发调用」的那个函数里，不能只在调用方**——这次修复的
+第一版给六个公开入口都加了 guard，并把 POSIX 时钟放进共用 helper，结果它是在
+**Windows** 上失败的（`undefined symbol: clock_gettime`）。编译器会发射每一个函数
+体，所以没有保护的 helper 不管被哪条分支走到，都会把它那个平台的符号拖进链接。
+分支本身并不是编译器做的：它被发射成
+`__builtin_strcmp("windows", "linux") == 0`，clang 在**代码生成之前**就常量折叠了
+它，所以没走到的分支永远不会变成调用——`-O0` 与 `-O3` 皆然。正是这一点让
+「两个平台都声明、只调一边」这套写法得以成立；现在两个方向都靠读真实目标文件的
+未定义符号表钉住 ·
+
+**上一个里程碑**（v0.50.0）——**第二次标准库审计：`len()` 即 `strlen` 的一族清扫完毕，
+以及在循环里做拼接的一族随之清扫**——
 
 **十三个循环曾逐字符重扫整串**（v0.50.0）——`len()` 作用在 string 上就是
 `strlen`，且在每个使用点内联发射；只**读**字符串的循环会被 clang 当成循环

@@ -1,19 +1,20 @@
 # Aoxn standard library — datetime (v0.44.0, docs/stdlib-todo.md #6).
 #
-# Calendar math as pure integer arithmetic plus two Win32 clock externs.
-# The civil-date conversions are Howard Hinnant's algorithms (days_from_civil
-# / civil_from_days): they are valid for every year, negative included, which
-# is why all divisions that see possibly-negative values go through
-# floor_div — C's `/` truncates toward zero and would corrupt pre-1970 and
-# BC dates otherwise.
+# Calendar math as pure integer arithmetic plus the two platform clock
+# externs. The civil-date conversions are Howard Hinnant's algorithms
+# (days_from_civil / civil_from_days): they are valid for every year,
+# negative included, which is why all divisions that see possibly-negative
+# values go through floor_div — C's `/` truncates toward zero and would
+# corrupt pre-1970 and BC dates otherwise.
 #
 # No strftime: `wcsftime` goes through the CRT and depends on the locale
 # (docs/stdlib-todo.md #6) — datetime_format parses the format string itself
 # and supports the numeric subset plus %A/%a/%B/%b/%j/%%.
 #
-# datetime_now() is LOCAL time (GetLocalTime — what a user means by "now");
-# datetime_utcnow() is UTC (FILETIME via stdlib/time.ax). Weekdays follow
-# Python: Monday == 0 .. Sunday == 6.
+# datetime_now() is LOCAL time (GetLocalTime on Windows, localtime_r on
+# Linux — what a user means by "now"); datetime_utcnow() is UTC (the FILETIME
+# clock through stdlib/time.ax, which is clock_gettime(CLOCK_REALTIME) there).
+# Weekdays follow Python: Monday == 0 .. Sunday == 6.
 #
 # Plain Aoxn only (no dict/None/fn-ptr/raise): self-host compilable.
 
@@ -27,7 +28,15 @@ struct DateTime:
     minute: int
     second: int
 
+# ---- Win32 extern (kernel32) ----
+
 extern def GetLocalTime(st: int)
+
+# ---- POSIX extern (libc; prototype only — see stdlib/os.ax) ----
+
+# localtime_r(clock, tm) fills a POSIX `struct tm` and returns it (NULL on
+# failure). `time_t` is a pointer argument, so it is an int here.
+extern def localtime_r(clock: int, tm: int) -> int
 
 # ---- floor division (b > 0): C `/` truncates toward zero ----
 
@@ -108,19 +117,53 @@ def datetime_from_unix(u: int) -> DateTime:
 def st_word(p: int, i: int) -> int:
     return load_u8(p, i * 2) + load_u8(p, i * 2 + 1) * 256
 
+# one field of a POSIX `struct tm`, by INDEX: tm_sec 0, tm_min 1, tm_hour 2,
+# tm_mday 3, tm_mon 4, tm_year 5.
+#
+# glibc x86-64 (and every other little-endian 64-bit glibc) puts the nine
+# ints first, 4 bytes apart, so field i starts at i * 4; tm_gmtoff is at 40
+# and tm_zone at 48, which is why the block is allocated 56 bytes wide. The
+# load is 8 bytes and is masked down to 32: on little-endian the low half IS
+# the field, and a pre-1970 tm_year arrives sign-extended, where `%`
+# (truncating toward zero, like C) keeps it negative — which is exactly what
+# makes the + 1900 below come out right for 1899.
+def tm_field(p: int, i: int) -> int:
+    return load_i64(p + i * 4) % 4294967296
+
 # local wall-clock time
 def datetime_now() -> DateTime:
-    st = malloc(16)
-    GetLocalTime(st)
-    dt = DateTime(
-        year=st_word(st, 0),
-        month=st_word(st, 1),
-        day=st_word(st, 3),
-        hour=st_word(st, 4),
-        minute=st_word(st, 5),
-        second=st_word(st, 6),
-    )
-    free(st)
+    if target_os() == "windows":
+        st = malloc(16)
+        GetLocalTime(st)
+        dt = DateTime(
+            year=st_word(st, 0),
+            month=st_word(st, 1),
+            day=st_word(st, 3),
+            hour=st_word(st, 4),
+            minute=st_word(st, 5),
+            second=st_word(st, 6),
+        )
+        free(st)
+        return dt
+    # Linux: localtime_r over the UTC wall clock from stdlib/time.ax
+    clk = malloc(8)
+    tm = malloc(56)
+    store_i64(clk, time_unix())
+    if localtime_r(clk, tm) == 0:
+        dt = DateTime(
+            year=tm_field(tm, 5) + 1900,
+            month=tm_field(tm, 4) + 1,
+            day=tm_field(tm, 3),
+            hour=tm_field(tm, 2),
+            minute=tm_field(tm, 1),
+            second=tm_field(tm, 0),
+        )
+    else:
+        # a refused conversion is not a crash: UTC is what a box with no
+        # usable zone database answers anyway
+        dt = datetime_from_unix(time_unix())
+    free(tm)
+    free(clk)
     return dt
 
 # UTC wall-clock time

@@ -976,6 +976,24 @@ crates/aoxn-pkg       package manager crate (its own dependency set; see above)
 - **None of the new modules may be imported into `stdlib/stdlib.ax`** (the
   self-host critical path). All are plain Aoxn EXCEPT `hmac.ax` (fn-ptr —
   header-marked `selfhost 尚不可编译`, off the fixed-point path).
+- **A stdlib module that NAMES one platform's API and nothing else does not
+  link on the other one** (v0.50.1 fixed exactly this in `time.ax` +
+  `datetime.ax`: `clang: error: linker command failed` with `undefined
+  reference to 'GetLocalTime'`). The idiom is `os.ax`'s: **declare every
+  platform's externs and branch on `target_os()`** — the backend emits
+  `__builtin_strcmp("windows", "linux") == 0`, which clang constant-folds
+  BEFORE codegen, so the branch not taken never becomes a call and its
+  symbols never reach the object file. Verified at `-O0` as well as `-O3`
+  (a standalone clang probe, and the real object's undefined-symbol table).
+  **The guard belongs in the FUNCTION THAT MAKES THE CALL, not only in its
+  caller**: the compiler emits EVERY function body, so a shared POSIX helper
+  reached from a dead branch still drags `clock_gettime` into a Windows link
+  (that was the first attempt's failure, and it failed on Windows instead of
+  Linux). `tests/datetime.rs::clock_modules_reference_only_this_platform`
+  pins both directions by reading the object file. `os.ax`, `stdlib.ax`
+  (`exe_path`), `time.ax` and `datetime.ax` are the dual-platform modules;
+  `ui_win.ax` / `net/http.ax` are Windows-only by design and their tests are
+  `#![cfg(windows)]`.
 - **UCRT symbol collisions are a LINK-TIME trap**: a lowercase `nan`,
   `inf` or `copysign` DEFINITION duplicates UCRT symbols (the math externs
   share object files with them) → `lld-link: duplicate symbol`. That is why

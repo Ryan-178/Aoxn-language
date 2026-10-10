@@ -230,3 +230,84 @@ stderr:
         );
     }
 }
+
+/// The platform clock modules must link on BOTH platforms, and the way they
+/// manage that is not obvious: `stdlib/time.ax` and `stdlib/datetime.ax`
+/// declare every platform's externs and pick one side with
+/// `if target_os() == "windows"`, which the backend emits as
+/// `__builtin_strcmp("windows", "windows") == 0`. clang constant-folds that
+/// BEFORE code generation, so the branch not taken never becomes a call and
+/// its symbols never reach the object file.
+///
+/// That only works while the guard sits in the function that makes the call.
+/// v0.44.0 spelled the Win32 clocks with no guard at all, which is invisible
+/// on Windows and is a hard link error on Linux ("undefined reference to
+/// GetLocalTime"); and a first attempt at the fix guarded only the CALLERS,
+/// which failed on Windows instead ("undefined symbol: clock_gettime") —
+/// because the compiler emits every function body, so an unguarded helper
+/// drags its platform's symbols into the link no matter who calls it.
+///
+/// The object file is the ground truth for that, so read it: it must name
+/// this platform's clock symbols and must NOT name the other platform's.
+/// Running the same assertion on Linux CI is what makes it a two-way pin.
+#[test]
+fn clock_modules_reference_only_this_platform() {
+    if aoxn::find_clang().is_none() {
+        eprintln!("skipping: clang not found (set AOXN_CLANG or add clang to PATH)");
+        return;
+    }
+    std::env::set_var("AOXN_STDLIB", abs("stdlib"));
+    let dir = std::env::temp_dir().join(format!("aoxn-clock-platforms-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let src_path = dir.join("clock_platforms.ax");
+    let obj = dir.join(format!("clock_platforms{}", if cfg!(windows) { ".obj" } else { ".o" }));
+    // every clock entry point, so nothing can hide behind a dead call
+    std::fs::write(
+        &src_path,
+        r#"import * from "stdlib/datetime.ax"
+import * from "stdlib/time.ax"
+
+def main() -> int:
+    print(datetime_iso(datetime_now()))
+    print(datetime_iso(datetime_utcnow()))
+    print(str(time_now_ns()))
+    print(str(time_now_us()))
+    print(str(time_mono_ms()))
+    print(str(time_unix_ft()))
+    time_sleep_ms(1)
+    return 0
+"#,
+    )
+    .unwrap();
+    aoxn::compile_paths_to_object(&[src_path.display().to_string()], &obj, true)
+        .unwrap_or_else(|d| panic!("driver failed to compile: {d:?}"));
+    let bytes = std::fs::read(&obj).expect("object file");
+    // symbol names live in the object's string table in plain bytes on both
+    // COFF and ELF, so a substring scan is enough and needs no nm/objdump
+    let text = String::from_utf8_lossy(&bytes).into_owned();
+
+    let (own, foreign): (&[&str], &[&str]) = if cfg!(windows) {
+        (
+            &["GetLocalTime", "QueryPerformanceCounter", "GetSystemTimeAsFileTime", "Sleep"],
+            &["clock_gettime", "nanosleep", "localtime_r"],
+        )
+    } else {
+        (
+            &["clock_gettime", "nanosleep", "localtime_r"],
+            &["GetLocalTime", "QueryPerformanceCounter", "GetSystemTimeAsFileTime", "Sleep"],
+        )
+    };
+    for sym in own {
+        assert!(
+            text.contains(sym),
+            "object must reference this platform's {sym} — the clock module never got here"
+        );
+    }
+    for sym in foreign {
+        assert!(
+            !text.contains(sym),
+            "object references the OTHER platform's {sym}: a platform guard is missing \
+             or sits in the caller instead of in the function that calls {sym}"
+        );
+    }
+}
