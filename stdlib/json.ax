@@ -457,21 +457,22 @@ def J_MAX_EXP() -> int:
 def j_num_float(s: string) -> float:
     i = 0
     neg = False
+    sn = len(s)
     if load_u8(s, 0) == 45:
         neg = True
         i = 1
     m = 0.0
-    while i < len(s):
+    while i < sn:
         c = load_u8(s, i)
         if c >= 48 and c <= 57:
             m = m * 10.0 + to_float(c - 48)
             i = i + 1
         else:
             break
-    if i < len(s) and load_u8(s, i) == 46:
+    if i < sn and load_u8(s, i) == 46:
         i = i + 1
         scale = 0.1
-        while i < len(s):
+        while i < sn:
             c = load_u8(s, i)
             if c >= 48 and c <= 57:
                 m = m + to_float(c - 48) * scale
@@ -479,17 +480,17 @@ def j_num_float(s: string) -> float:
                 i = i + 1
             else:
                 break
-    if i < len(s) and (load_u8(s, i) == 101 or load_u8(s, i) == 69):
+    if i < sn and (load_u8(s, i) == 101 or load_u8(s, i) == 69):
         i = i + 1
         eneg = False
-        if i < len(s) and load_u8(s, i) == 43:
+        if i < sn and load_u8(s, i) == 43:
             i = i + 1
         else:
-            if i < len(s) and load_u8(s, i) == 45:
+            if i < sn and load_u8(s, i) == 45:
                 eneg = True
                 i = i + 1
         e = 0
-        while i < len(s):
+        while i < sn:
             c = load_u8(s, i)
             if c >= 48 and c <= 57:
                 # Clamp while accumulating. A double saturates to inf/0 long
@@ -554,15 +555,20 @@ def jp_num(p: JParse) -> JParse:
                 p.pos = p.pos + 1
             else:
                 break
-    text = str_sub(p.src, start, p.pos)
+    # buf_str, not str_sub: the token's span is already known, and
+    # str_sub pays len(p.src) -- a strlen of the WHOLE document -- to clamp
+    # bounds that cannot fire here. One such scan per number made a
+    # 20 000-number array cost 1 s at -O3 (measured before the fix).
+    text = buf_str(as_ptr(p.src) + start, p.pos - start)
     if isf == 0:
         v = 0
         neg = 0
         i = 0
+        tn = len(text)
         if load_u8(text, 0) == 45:
             neg = 1
             i = 1
-        while i < len(text):
+        while i < tn:
             v = v * 10 + (load_u8(text, i) - 48)
             i = i + 1
         if neg == 1:

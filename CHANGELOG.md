@@ -5,6 +5,115 @@ minor bumps while pre-1.0: each minor version is a language milestone.
 
 ## [Unreleased]
 
+## [0.50.0] - 2026-10-10
+
+Theme: **the second stdlib audit — the `len()`-is-`strlen` sweep finished,
+and the `out = out + ...` sweep that followed it.** v0.48.0 found the trap
+three times in the JSON DOM; this pass found it in thirteen more places,
+plus a whole second family: loops that GROW a string by concatenation.
+One new crash class surfaced during the rewrites, and it is pinned by name
+(`msg-text-empty`).
+
+### Fixed: the write-pointer aliasing trap, in thirteen places
+
+`len()` on a string is `__builtin_strlen`, emitted INLINE at every use site
+(`codegen_c.rs:1973`). A loop that only READS its string gets that strlen
+hoisted out by clang as loop-invariant — which is why `css_has_quote` was
+always fast. A loop that WRITES through another pointer, or calls anything
+opaque, does NOT: clang cannot prove the store does not alias the string,
+so the whole string is re-scanned once per character. Every site below is
+one of those:
+
+| site | what it cost before | after |
+|---|---|---|
+| `os_utf16_write` (os.ax) | 1950 µs/call @ 4096 chars | 10 µs |
+| `net_utf16_write` (net/codec.ax) | 2209 µs/call | 12 µs |
+| `net_to_wide` (the wrapper both SDKs use) | 1959 µs/call | 9 µs |
+| `net_url_encode` | 141 µs/call @ 1024 | 9 µs |
+| `an_msgs_json` | 2105 ms @ 200 msgs / 1.6 MB | ~3 ms |
+| `oa_body_chat` | 1394 ms | ~8 ms |
+| `j_parse` (numbers doc, 149 KB) | 1018 ms | 7–13 ms |
+| `datetime_format` | 1552 µs/call @ 2000 | ~240–360 µs |
+| `path_norm` | 108 µs/call @ 65 parts | ~39 µs |
+
+`os_utf16_write` and `net_utf16_write` are the twins of the `utf16_write`
+fixed in v0.49.0 in `ui.ax` — the same function, deliberately duplicated
+(AGENTS.md), fixed in one copy only. `os_utf16_write` sits under EVERY
+`os_*` call that takes a path.
+
+The rule, now recorded where it is violated: **hoist `len()` in the source,
+once, before the first store** — do not rely on the optimizer's aliasing
+proof, because one added pointer-store turns a hoisted strlen back into a
+per-character scan with no test noticing.
+
+### Fixed: JSON numbers re-scanned the whole document per token
+
+`jp_num` extracted each number's text with `str_sub(p.src, start, p.pos)`,
+and `str_sub` pays `len(p.src)` to clamp bounds that cannot fire inside
+the parser. One whole-document strlen per number: a 20 000-number array
+cost 1 s. The span is already known, so the extraction is now
+`buf_str(as_ptr(p.src) + start, p.pos - start)` — a pointer-plus-length
+copy that scans nothing. `j_num_float`'s three loops and the integer
+fast path hoist their bounds the same way. 266 KB of mixed JSON is
+unaffected; strings were already direct.
+
+### Changed: ten loops stopped building strings with `out = out + ...`
+
+Concatenation allocates a fresh buffer per step and abandons the old one,
+so an n-step build costs O(n²) allocations AND O(n²) leaked bytes (strings
+leak by design — that is the language's contract, not a bug). Rewritten
+into byte sinks that grow geometrically: `an_msgs_json`, `an_blocks_json`,
+`an_body*`'s joins, `an_msg_text`, `an_msg_thinking`, `oa_body_chat`,
+`oa_body_embeddings`, `oa_responses_text`, `datetime_format`,
+`net_url_encode_pairs` and the `path_norm` join. The SDKs route through
+`json.ax`'s existing `JOut` (one escaping implementation, already
+imported); `datetime` and `pathlib` use the new `StrBuf` in `stdlib.ax`
+rather than pulling the JSON DOM — and through it `net/codec.ax` — into
+every program that formats a date.
+
+**No output changed.** Every rewrite is pinned byte-for-byte
+(`stdlib_perf_pins`, plus new markers in the two SDK suites).
+
+### New: `buf_str(p, n)` and `StrBuf` / `sb_*` in stdlib.ax
+
+`buf_str` is the pointer-plus-length escape from strlen: callers that
+already know a span (a parser token, an SSE line inside a bigger buffer)
+copy exactly those bytes and scan nothing. `StrBuf` is a small growable
+byte sink (`sb_new` / `sb_byte` / `sb_str` / `sb_text`), threaded by value
+like `Vec` — the language has no address-of. `net_sse_next` uses `buf_str`
+for its per-line extraction, which used to `strlen` the whole network
+buffer per line.
+
+`stdlib.ax` is on the self-host critical path, so both additions are plain
+Aoxn with no v0.40.0 constructs; the fixed point
+(`selfhost_driver_self_compiles`) re-verifies byte-identical stage-1 /
+stage-2 output against them.
+
+### Fixed: a sink that never appended crashed on its final NUL
+
+Found by the rewrites themselves, on the FIRST run of `an_msg_text`: the
+three joiners whose result can legitimately be EMPTY (`an_msg_text`,
+`an_msg_thinking`, `oa_responses_text`) started from
+`JOut(buf=0, n=0, cap=0)` and ended with `store_u8(w.buf, w.n, 0)`. A
+response with no text block is NORMAL — a pure tool call, an empty
+accumulator — and there `w.buf` is still NULL: a write through a null
+pointer, surfacing later as `0xC0000005` on some unrelated heap operation.
+The old `out = ""` spelling answered `""`. All three now answer `""`
+(`msg-text-empty` is the pin; it fails on the buggy rewrite by crashing).
+
+### Tests
+
+- `tests/stdlib_perf_pins.rs` — 16 driver checks: the empty-sink answers,
+  byte-identical bodies and formats, `path_norm` root shapes, JSON number
+  extraction, percent-encoding, UTF-16 byte counts (both encoders
+  byte-equal), `str_sub` clamping, `buf_str`, `StrBuf` growth, the hoisted
+  glob matcher, and the SSE line extraction.
+- `anthropic_sdk.rs` / `openai_sdk.rs` — new markers
+  `msg-text-empty`, `msg-text-two`, `body-chat-empty`,
+  `responses-text-empty`, `responses-text-two`.
+- The full suite: 289 tests, all green; the self-hosting fixed point
+  included.
+
 ## [0.49.0] - 2026-10-09
 
 Theme: **the UI toolkit's remaining silent failures, and the fifteen copies of

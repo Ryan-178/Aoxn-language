@@ -589,30 +589,42 @@ def an_find_tool_use(r: AnResp) -> int:
 
 # every text block joined with "\n". Empty when the model answered with
 # only a tool call, which is normal and not an error.
+#
+# Joined into the serializer's sink: the per-block `out = out + ...`
+# re-copied the joined text once per block.
 def an_msg_text(r: AnResp) -> string:
-    out = ""
+    w = JOut(buf=0, n=0, cap=0)
     n = an_block_count(r)
     i = 0
     while i < n:
         if an_block_type(r, i) == "text":
-            if len(out) > 0:
-                out = out + "\n"
-            out = out + an_block_text_at(r, i)
+            if w.n > 0:
+                w = jw_byte(w, 10)
+            w = jw_str(w, an_block_text_at(r, i))
         i = i + 1
-    return out
+    # a sink that never appended still has buf == 0: the final NUL would
+    # write through NULL (a response with no text block is normal -- a
+    # pure tool call -- and must come back as "")
+    if w.buf == 0:
+        return ""
+    store_u8(w.buf, w.n, 0)
+    return as_string(w.buf)
 
 # the concatenated thinking blocks ("" when thinking is off)
 def an_msg_thinking(r: AnResp) -> string:
-    out = ""
+    w = JOut(buf=0, n=0, cap=0)
     n = an_block_count(r)
     i = 0
     while i < n:
         if an_block_type(r, i) == "thinking":
-            if len(out) > 0:
-                out = out + "\n"
-            out = out + an_block_thinking_at(r, i)
+            if w.n > 0:
+                w = jw_byte(w, 10)
+            w = jw_str(w, an_block_thinking_at(r, i))
         i = i + 1
-    return out
+    if w.buf == 0:
+        return ""
+    store_u8(w.buf, w.n, 0)
+    return as_string(w.buf)
 
 # ---- usage ----
 

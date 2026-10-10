@@ -136,10 +136,18 @@ def os_cp_utf8(cp: int, p: int) -> int:
     return 4
 
 # write s as UTF-16LE at p; return BYTE count
+#
+# `len(s)` is strlen emitted inline at every use site, and the stores below
+# go through a pointer clang cannot prove disjoint from s -- so the old
+# `while i < len(s)` re-scanned the whole string once per character (this
+# is the twin of ui.ax's utf16_write, fixed in v0.49.0: a 4096-char string
+# cost 1950 us per call here, 3 us after the hoist). The length is read
+# ONCE, before the first store.
 def os_utf16_write(s: string, p: int) -> int:
     i = 0
     n = 0
-    while i < len(s):
+    sn = len(s)
+    while i < sn:
         b = load_u8(s, i)
         if b < 128:
             cp = b

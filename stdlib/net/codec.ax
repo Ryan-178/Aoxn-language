@@ -44,10 +44,17 @@ def net_cp_utf8(cp: int, p: int) -> int:
 # ---- UTF-8 -> UTF-16LE ----
 
 # write s as UTF-16LE (surrogate pairs included) at p; return BYTE count
+#
+# Same hoist as os.utf16_write's twin and ui.ax's v0.49.0 fix: the length
+# is read once, because `while i < len(s)` re-scans the string per
+# character (the stores below alias s as far as clang can tell, so the
+# strlen is NOT loop-invariant). Every wide-string parameter WinHTTP takes
+# comes through here via net_to_wide.
 def net_utf16_write(s: string, p: int) -> int:
     i = 0
     n = 0
-    while i < len(s):
+    sn = len(s)
+    while i < sn:
         b = load_u8(s, i)
         if b < 128:
             cp = b
@@ -175,10 +182,11 @@ def net_hex_digit(n: int) -> int:
 # Space is %20 (not `+`), matching the OpenAI server's expectations.
 def net_url_encode(s: string) -> string:
     # worst case: every byte becomes three (``%XX``)
-    out = malloc(len(s) * 3 + 1)
+    sn = len(s)
+    out = malloc(sn * 3 + 1)
     oi = 0
     i = 0
-    while i < len(s):
+    while i < sn:
         c = load_u8(s, i)
         if (c >= 48 and c <= 57) or (c >= 65 and c <= 90) or (c >= 97 and c <= 122) or c == 45 or c == 95 or c == 46 or c == 126:
             store_u8(out, oi, c)
@@ -197,13 +205,15 @@ def net_url_encode(s: string) -> string:
 # with an empty value still emits `key=`; this matches the Python SDK, which
 # lets the caller pass `""` deliberately.
 def net_url_encode_pairs(keys: Vec, vals: Vec) -> string:
-    out = ""
+    w = sb_new(64)
     i = 0
     while i < keys.len:
         if i > 0:
-            out = out + "&"
+            w = sb_byte(w, 38)
         k = net_url_encode(vec_get_str(keys, i))
         v = net_url_encode(vec_get_str(vals, i))
-        out = out + k + "=" + v
+        w = sb_str(w, k)
+        w = sb_byte(w, 61)
+        w = sb_str(w, v)
         i = i + 1
-    return out
+    return sb_text(w)

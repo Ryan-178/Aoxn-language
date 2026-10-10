@@ -16,8 +16,8 @@ minors do not.
 
 | Version | Supported |
 |---|---|
-| `0.49.x` (current) | ✅ yes |
-| `0.48.x` and earlier | ❌ no — please reproduce on `main` or the latest release |
+| `0.50.x` (current) | ✅ yes |
+| `0.49.x` and earlier | ❌ no — please reproduce on `main` or the latest release |
 | `main` (development) | ✅ yes, fixes land here first |
 
 Fix versions are always noted in [`CHANGELOG.md`](CHANGELOG.md). If you need a
@@ -123,7 +123,15 @@ the information needed to protect users even if the reporter disagrees.
   project directory is a vulnerability.
 - **Denial of service that is not just "a bad program"** — a small, well-formed
   input that hangs the compiler indefinitely or exhausts memory catastrophically
-  is worth reporting; see the note below on where the line is.
+  is worth reporting; see the note below on where the line is. Quadratic
+  behavior on attacker-chosen length counts as this class too, and since
+  v0.50.0 the stdlib is audited for it: loops that re-scan or re-copy per
+  input character (the len()-is-strlen family) and loops that grow strings
+  by concatenation were swept out of the stdlib modules, including the
+  os/WinHTTP path encoder, the URL and header scanners, the JSON number
+  path, the SSE framer and both SDK request builders. A re-introduction
+  against hostile input (a long path, a long response, a long
+  conversation) is a DoS defect, not a slow program.
 - **Parse-time expansion of the Python-parity forms** (since v0.29.7:
   augmented assignment, `//`, unary `+`, chained comparison) — these desugar
   into nodes the checker and the emitter already understood, so they inherit
@@ -216,7 +224,18 @@ the information needed to protect users even if the reporter disagrees.
   the response-header lookup scans a block whose length comes from the
   server. The SDK test suites feed hostile fixtures offline precisely so
   these paths stay provable; the SDKs never run inside the compiler
-  process and add no compiler-side surface.
+  process and add no compiler-side surface. Two v0.50.0 additions to
+  that standing: quadratic scaling on hostile length is the DoS class
+  above (the os/WinHTTP path encoder, the URL and header scanners, the
+  JSON number path, the SSE framer and both SDK request builders all
+  re-scanned or re-copied per input character before the sweep), and a
+  byte sink whose result may stay EMPTY must answer the empty string
+  rather than write its final NUL through a buffer that was never
+  allocated -- an_msgs_json's joiners wrote through NULL on a response
+  with no text block (a pure tool call, a normal answer). New stdlib
+  string builders use buf_str(p, n) for known spans and a geometric
+  sink (JOut / StrBuf) for joins, and both must keep the empty case
+  answered.
 - **The stdlib parsers over hostile files and directories**
   (`stdlib/os.ax` — v0.44.0 on Windows, dual-platform since v0.46.0, where
   the same hand-written converters and directory walk serve the libc path
@@ -259,6 +278,8 @@ though a bug report about the *documentation* is welcome.
   arithmetic on their arguments is intentional.
 - **Memory growth from string concatenation.** Concat results are never freed
   (immutable strings, no GC yet). It is stated behavior, not a leak bug.
+  (Since v0.50.0 the stdlib itself no longer builds strings this way in
+  loops; see docs/stdlib.md. User-level concatenation behaves as documented.)
 - **Where an unquoted import specifier resolves (v0.43.0).** `import util`
   looks in the *importing file's own directory* first, then `aox_modules/`,
   then the installed stdlib. The quoted spelling (`import * from "util"`)
@@ -371,8 +392,8 @@ Aoxn 处于 pre-1.0 阶段：只有最新的版本线接收安全修复，旧的
 
 | 版本 | 支持情况 |
 |---|---|
-| `0.49.x`（当前） | ✅ 支持 |
-| `0.48.x` 及更早 | ❌ 不支持——请在 `main` 或最新发布上复现 |
+| `0.50.x`（当前） | ✅ 支持 |
+| `0.49.x` 及更早 | ❌ 不支持——请在 `main` 或最新发布上复现 |
 | `main`（开发线） | ✅ 支持，修复最先落在这里 |
 
 修复版本永远记在 [`CHANGELOG.md`](CHANGELOG.md)。如需把修复反向移植到旧
@@ -456,7 +477,13 @@ tag，请在报告里说明，我们再商量。
   验证，且只接受根目录带 `aoxn.json` 的包。能让文件落到 `vendor/` 之外的
   穿越条目、绕过完整性校验、或把路径依赖记录逃逸出项目目录的行为，均属漏洞。
 - **不只是"坏程序"的拒绝服务** —— 一个小的、格式良好的输入让编译器无限挂起
-  或灾难性耗尽内存的，值得报告；界线见下文。
+  或灾难性耗尽内存的，值得报告；界线见下文。**敌意长度下的二次方代价同样算
+  这一类**，且 v0.50.0 起标准库就是按这个标准审计的：按输入长度逐字符重复
+  扫描或重复拷贝的循环（len() 即 strlen 家族）、以及在循环里用拼接增长字符串
+  的写法，已从标准库各模块中清除——覆盖 os/WinHTTP 路径编码、URL 与请求头
+  扫描、JSON 数字路径、SSE 分帧与两个 SDK 的请求体构造。针对敌意输入（超长
+  路径、超长响应、超长对话）重新引入此类写法，属于拒绝服务缺陷，而不是
+  程序慢。
 - **Python 对标语法的解析期展开**（v0.29.7 起：增强赋值、`//`、一元 `+`、
   链式比较）—— 它们降级成类型检查与代码生成本就理解的节点，因此沿用其规则。
   链式比较与增强赋值会把用到两次的那个操作数复制一份（`a < b < c` 会求值两次
@@ -520,7 +547,14 @@ tag，请在报告里说明，我们再商量。
    会把它直接喂给另一个访问器（无保护时它会读到 slab 之前）；`jb_set_raw` /
    `jb_push_raw` 把解析出的片段拼进已有的 slab，因此 realloc 之前的旧指针绝不可再用；
    响应头查找扫描的块，其长度来自服务器。SDK 测试套件离线投喂敌意 fixture，正是为了
-   让这些路径保持可证明；SDK 从不在编译器进程内运行，也不新增编译器侧攻击面。
+    让这些路径保持可证明；SDK 从不在编译器进程内运行，也不新增编译器侧攻击面。
+    v0.50.0 为这一待遇添了两条：其一，敌意长度下的二次方伸缩即上文的拒绝服务
+    类（os/WinHTTP 路径编码、URL 与请求头扫描、JSON 数字路径、SSE 分帧与两个
+    SDK 请求体构造在本次清扫前都会逐字符重复扫描或拷贝）；其二，结果可能为**空**
+    的字节 sink 必须返回空串，而不是把收尾的 NUL 写进一个从未分配的缓冲区——
+    无 text 块的响应（纯工具调用，一种正常回答）曾让 an_msgs_json 的连接函数
+    写过 NULL。标准库新的字符串构造对已知片段用 buf_str(p, n)，对拼接用几何
+    增长的 sink（JOut / StrBuf），且两者都必须保持空用例有答案。
 - **标准库中解析敌意文件与目录的解析器**（`stdlib/os.ax`——v0.44.0 在
    Windows 落地，v0.46.0 起双平台、同一套手写转换器与目录遍历以
    `opendir`/`readdir` 服务 libc 路径——以及 `stdlib/glob.ax`、
@@ -550,7 +584,8 @@ tag，请在报告里说明，我们再商量。
   `load_u8`、`store_u8`、`as_ptr`、`as_string`）。它们是自举逃生舱，设计上
   就不安全；对其参数做不检查的指针运算是有意为之。
 - **字符串拼接的内存增长。** 拼接结果永不释放（不可变字符串，尚无 GC）。这是
-  成文行为，不是泄漏 bug。
+  成文行为，不是泄漏 bug。（v0.50.0 起标准库自身已不再在循环里这样构造字符串，
+  见 docs/stdlib.md；用户侧的拼接行为如上文所述不变。）
 - **不带引号的 import 说明符去哪里找（v0.43.0）。** `import util` 会**先**在
   导入文件自己的目录里找，然后才是 `aox_modules/`，最后是已安装的标准库；
   而加引号的写法（`import * from "util"`）跳过同目录探测，解析行为与此前完全

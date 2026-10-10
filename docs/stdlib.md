@@ -272,6 +272,61 @@ A binary min-heap over an int `Vec`, Python's shape:
 `heap_from_vec` (heapify in place), `heap_sorted` (full drain into an
 ascending Vec). Ints only; `bisect.ax` shows the float pattern.
 
+## The two string rules (v0.50.0)
+
+Two audit families, both now documented as rules. Every defect was
+REPRODUCED (compiled probes at `-O3`, before/after wall clock) before the fix;
+`tests/stdlib_perf_pins.rs` pins the rewrites byte-for-byte.
+
+**1. `len()` on a string is `strlen`, emitted inline at every use site.**
+A loop that only READS its string gets that strlen hoisted out by clang as
+loop-invariant — `css_has_quote` was always fast, and looking at it proves
+nothing. A loop that WRITES through another pointer, or calls anything
+opaque, does NOT: clang cannot prove the store does not alias the string,
+so the string is re-scanned once per character. The write-pointer traps
+found and hoisted: `os_utf16_write` / `net_utf16_write` (the twins of
+`ui.ax`'s `utf16_write`, fixed in v0.49.0 in one copy only — every `os_*`
+path call and every WinHTTP wide string went through the other two),
+`net_url_encode`, `net_url_split`, `net_ieq`, `glob_match_at`,
+`glob_class_end`, `glob_has_wild`, `glob_split`, `path_norm`,
+`j_num_float`, `jp_num`, `str_sub` (its clamp asked twice), and
+`css_has_quote` (hoisted in the SOURCE so it does not depend on the
+optimizer's aliasing proof). Measured on this machine: `os_utf16_write`
+1950 → 10 µs per 4096-char call, `net_to_wide` 1959 → 9 µs,
+`net_url_encode` 141 → 9 µs per 1024.
+
+`jp_num` additionally extracted each number's text with
+`str_sub(p.src, start, p.pos)`, paying a whole-document strlen per number
+(20 000 numbers: 1 s). The span is already known, so it is now
+`buf_str(as_ptr(p.src) + start, p.pos - start)` — **`buf_str(p, n)` is the
+pointer-plus-length escape**: copy exactly n bytes, scan nothing.
+`net_sse_next` uses it per SSE line, where `str_sub(as_string(s.buf), …)`
+used to `strlen` the whole network buffer per line.
+
+**2. Never grow a string in a loop with `out = out + …`.** Concatenation
+allocates a fresh buffer per step and abandons the old one: O(n²)
+allocations and O(n²) leaked bytes (strings leak by design — that is the
+contract, the waste is not). Rewritten into byte sinks: `an_msgs_json`,
+`an_blocks_json`, `an_msg_text`, `an_msg_thinking`, `oa_body_chat`,
+`oa_body_embeddings`, `oa_responses_text`, `datetime_format`,
+`net_url_encode_pairs`, the `path_norm` join — 200 messages of 8 KB went
+from 2105 ms to ~3 ms. The SDKs route through `json.ax`'s existing `JOut`
+(one escaping implementation); `datetime` and `pathlib` use `StrBuf`
+(`sb_new`/`sb_byte`/`sb_str`/`sb_text`, threaded by value like `Vec`)
+rather than pulling the JSON DOM — and through it `net/codec.ax` — into
+every program that formats a date. **Output is unchanged; every rewrite is
+pinned byte-identical.**
+
+**The trap the rewrites exposed:** a sink that may stay EMPTY must not end
+with `store_u8(w.buf, w.n, 0)`. `JOut(buf=0, n=0, cap=0)` has a NULL
+buffer until the first append, so a response with no text block — a pure
+tool call, an empty accumulator — wrote its final NUL through NULL and
+died later with `0xC0000005`. `an_msg_text`, `an_msg_thinking` and
+`oa_responses_text` now return `""`; `msg-text-empty` is the pin. The
+other sinks always write a literal first byte (`[`, `{"model":`), and
+`sb_new`/`path_norm` allocate up front — those are safe by construction,
+and the comment in each rewrite says which case it is.
+
 ## Vec[T] status (stdlib-todo §0.3)
 
 The "generic heap container" that `collections`/`itertools` were waiting

@@ -276,15 +276,21 @@ def an_block_web_search_result(tool_use_id: string, results: Vec) -> string:
 
 # join block JSON texts into a JSON array. An empty Vec renders as [], which
 # is a legal (if useless) content array — the caller asked for it.
+#
+# Joined into the JSON serializer's sink (JOut): `out = out + ...` per
+# block re-copied the whole array, quadratic in the total block text.
 def an_blocks_json(blocks: Vec) -> string:
-    out = "["
+    w = JOut(buf=0, n=0, cap=0)
+    w = jw_byte(w, 91)
     i = 0
     while i < blocks.len:
         if i > 0:
-            out = out + ","
-        out = out + vec_get_str(blocks, i)
+            w = jw_byte(w, 44)
+        w = jw_str(w, vec_get_str(blocks, i))
         i = i + 1
-    return out + "]"
+    w = jw_byte(w, 93)
+    store_u8(w.buf, w.n, 0)
+    return as_string(w.buf)
 
 # ============================================================
 # the message list
@@ -317,15 +323,26 @@ def an_msgs_push_blocks(m: AnMsgs, role: string, blocks: Vec) -> AnMsgs:
     return m
 
 # the message list as a JSON array
+#
+# One pass into the serializer's sink. The per-message `out = out + ...`
+# re-copied the whole rendered conversation per message: 200 messages of
+# 8 KB measured 2.1 s at -O3 (and leaked every intermediate).
 def an_msgs_json(m: AnMsgs) -> string:
-    out = "["
+    w = JOut(buf=0, n=0, cap=0)
+    w = jw_byte(w, 91)
     i = 0
     while i < m.roles.len:
         if i > 0:
-            out = out + ","
-        out = out + "{\"role\":" + j_quote(vec_get_str(m.roles, i)) + ",\"content\":" + vec_get_str(m.contents, i) + "}"
+            w = jw_byte(w, 44)
+        w = jw_str(w, "{\"role\":")
+        w = jw_quote(w, vec_get_str(m.roles, i))
+        w = jw_str(w, ",\"content\":")
+        w = jw_str(w, vec_get_str(m.contents, i))
+        w = jw_byte(w, 125)
         i = i + 1
-    return out + "]"
+    w = jw_byte(w, 93)
+    store_u8(w.buf, w.n, 0)
+    return as_string(w.buf)
 
 def an_msgs_len(m: AnMsgs) -> int:
     return m.roles.len

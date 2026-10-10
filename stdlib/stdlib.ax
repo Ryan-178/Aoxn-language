@@ -246,11 +246,16 @@ def str_get(s: string, i: int) -> int:
 # Caret movement stayed in ui.ax: it is a UTF-8 UI concern.
 
 # bytes [from, to) of s as a fresh NUL-terminated string
+#
+# `len(s)` is strlen, so the clamp reads it ONCE: the old spelling asked
+# twice, and every `str_sub` on a long source paid for both (JSON numbers
+# extracted one substring per token from the whole document).
 def str_sub(s: string, from: int, to: int) -> string:
+    sl = len(s)
     if from < 0:
         from = 0
-    if to > len(s):
-        to = len(s)
+    if to > sl:
+        to = sl
     if to < from:
         to = from
     n = to - from
@@ -261,6 +266,77 @@ def str_sub(s: string, from: int, to: int) -> string:
         i = i + 1
     store_u8(p, n, 0)
     return as_string(p)
+
+# the n bytes at p as a fresh NUL-terminated string. The pointer-plus-
+# length spelling is the escape from strlen: callers that already KNOW the
+# length (a parser's token span, an SSE line inside a bigger buffer) must
+# not pay an O(remaining) scan per call, which is what made
+# `str_sub(as_string(buf), pos, end)` quadratic in the buffer size.
+def buf_str(p: int, n: int) -> string:
+    if n < 0:
+        n = 0
+    out = malloc(n + 1)
+    i = 0
+    while i < n:
+        store_u8(out, i, load_u8(p, i))
+        i = i + 1
+    store_u8(out, n, 0)
+    return as_string(out)
+
+# ---- a growable byte buffer for building strings ----
+#
+# `out = out + piece` in a loop allocates a fresh buffer per step and
+# abandons the old one: n steps cost O(n^2) allocations AND O(n^2) leaked
+# bytes (strings are never freed by design). This is the same sink json.ax
+# carries as `JOut` for the DOM serializer; it lives here too because
+# pathlib and datetime must not pull the JSON DOM (and through it
+# net/codec.ax) into every program that formats a date or normalizes a
+# path. Threaded BY VALUE — the language has no address-of, so the cursor
+# is handed back, exactly like `Vec`.
+#
+# Plain Aoxn only: stdlib.ax is on the self-host critical path.
+
+struct StrBuf:
+    buf: int
+    n: int
+    cap: int
+
+def sb_new(cap: int) -> StrBuf:
+    if cap < 16:
+        cap = 16
+    return StrBuf(buf=malloc(cap), n=0, cap=cap)
+
+def sb_reserve(w: StrBuf, need: int) -> StrBuf:
+    if w.n + need + 1 <= w.cap:
+        return w
+    newcap = w.cap * 2
+    if newcap < w.n + need + 1:
+        newcap = w.n + need + 1
+    w.buf = realloc(w.buf, newcap)
+    w.cap = newcap
+    return w
+
+def sb_byte(w: StrBuf, c: int) -> StrBuf:
+    w = sb_reserve(w, 1)
+    store_u8(w.buf, w.n, c)
+    w.n = w.n + 1
+    return w
+
+def sb_str(w: StrBuf, s: string) -> StrBuf:
+    # len() once: the stores below go through a pointer clang cannot
+    # prove disjoint from s, so an inline strlen is not loop-invariant.
+    n = len(s)
+    w = sb_reserve(w, n)
+    i = 0
+    while i < n:
+        store_u8(w.buf, w.n + i, load_u8(s, i))
+        i = i + 1
+    w.n = w.n + n
+    return w
+
+def sb_text(w: StrBuf) -> string:
+    store_u8(w.buf, w.n, 0)
+    return as_string(w.buf)
 
 def str_remove(s: string, from: int, to: int) -> string:
     return str_sub(s, 0, from) + str_sub(s, to, len(s))
@@ -315,8 +391,14 @@ def css_check(key: string, value: string) -> string:
     return key + ": " + value
 
 def css_has_quote(s: string) -> bool:
+    # len() read once: this loop only READS s, so clang hoists the strlen
+    # anyway -- but that invariance is one added pointer-store away from
+    # silently becoming quadratic (the trap ui.ax and the two UTF-16
+    # encoders hit). Source-level hoisting does not depend on the
+    # optimizer's aliasing proof.
+    sn = len(s)
     i = 0
-    while i < len(s):
+    while i < sn:
         c = str_get(s, i)
         if c == 34 or c == 39:
             return True

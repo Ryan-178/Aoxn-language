@@ -114,7 +114,12 @@ def net_url_split(url: string) -> NetUrl:
     # the host scan below cannot be fooled by a ':' or '/' inside it.
     qi = -1
     i = 0
-    while i < len(rest):
+    # Each scan below hoists its bound: `len()` is strlen emitted inline at
+    # every use site, and the loop bodies write through pointers clang
+    # cannot prove disjoint from the string -- so the bound was re-scanned
+    # per character, three times over the URL per request.
+    rn = len(rest)
+    while i < rn:
         if load_u8(rest, i) == 63 and qi == -1:
             qi = i
         i = i + 1
@@ -124,7 +129,8 @@ def net_url_split(url: string) -> NetUrl:
     slash = -1
     colon = -1
     i = 0
-    while i < len(hostzone):
+    hn = len(hostzone)
+    while i < hn:
         c = load_u8(hostzone, i)
         if c == 47 and slash == -1:
             slash = i
@@ -135,21 +141,22 @@ def net_url_split(url: string) -> NetUrl:
     path = "/"
     if slash >= 0:
         hostpart = str_sub(hostzone, 0, slash)
-        path = str_sub(hostzone, slash, len(hostzone))
+        path = str_sub(hostzone, slash, hn)
     if qi >= 0:
-        path = path + str_sub(rest, qi, len(rest))
+        path = path + str_sub(rest, qi, rn)
     host = hostpart
     port = dport
     if colon >= 0:
         host = str_sub(hostpart, 0, colon)
-        ptxt = str_sub(hostpart, colon + 1, len(hostpart))
+        ptxt = str_sub(hostpart, colon + 1, hn)
         port = 0
         i = 0
-        while i < len(ptxt):
+        pn = len(ptxt)
+        while i < pn:
             c = load_u8(ptxt, i)
             if c < 48 or c > 57:
                 port = 0
-                i = len(ptxt)
+                i = pn
             else:
                 port = port * 10 + (c - 48)
                 i = i + 1
@@ -293,10 +300,11 @@ def net_lower(c: int) -> int:
 
 # `name` equals `s[a..b)`, ignoring ASCII case
 def net_ieq(s: string, a: int, b: int, name: string) -> bool:
-    if b - a != len(name):
+    kn = len(name)
+    if b - a != kn:
         return False
     i = 0
-    while i < len(name):
+    while i < kn:
         if net_lower(load_u8(s, a + i)) != net_lower(load_u8(name, i)):
             return False
         i = i + 1

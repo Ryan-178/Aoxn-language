@@ -176,6 +176,18 @@ def main() -> int:
     print("PASS msgs-len " + str(an_msgs_len(m)))
     print("PASS msgs " + an_msgs_json(m))
     print("PASS msgs-empty " + an_msgs_json(an_msgs_new()))
+    # a response with NO text block is normal (a pure tool call): the
+    # joined text must be "" -- the v0.50.0 sink rewrite of an_msg_text
+    # wrote its final NUL through a NULL buffer here and died with
+    # 0xC0000005, so this pin is the regression
+    nt = "{\"id\":\"m\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"c\",\"content\":[{\"type\":\"tool_use\",\"id\":\"t1\",\"name\":\"w\",\"input\":{}}],\"stop_reason\":\"tool_use\",\"stop_sequence\":null,\"usage\":{\"input_tokens\":1,\"output_tokens\":1}}"
+    ntp = j_parse(nt)
+    nr = AnResp(status=200, dom=ntp.dom, pok=1, pmsg="", raw=nt, request_id="", terr=0, tmsg="", retries=0)
+    print("PASS msg-text-empty [" + an_msg_text(nr) + "][" + an_msg_thinking(nr) + "]")
+    mx = "{\"id\":\"m\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"c\",\"content\":[{\"type\":\"text\",\"text\":\"a\"},{\"type\":\"text\",\"text\":\"b\"}],\"stop_reason\":\"end_turn\",\"stop_sequence\":null,\"usage\":{\"input_tokens\":1,\"output_tokens\":1}}"
+    mxp = j_parse(mx)
+    mr = AnResp(status=200, dom=mxp.dom, pok=1, pmsg="", raw=mx, request_id="", terr=0, tmsg="", retries=0)
+    print("PASS msg-text-two [" + an_msg_text(mr) + "]")
     # ---- schema builder: property NAMES must survive ----
     sc = an_schema_new()
     sc = an_schema_str(sc, "city", "City name")
@@ -437,6 +449,8 @@ fn anthropic_sdk_pure_layers() {
         "msgs-len 4",
         "msgs [{\"role\":\"user\",\"content\":\"hello\"},{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"look\"},{\"type\":\"image\",\"source\":{\"type\":\"url\",\"url\":\"https://e.com/a.png\"}}]},{\"role\":\"assistant\",\"content\":[{\"type\":\"tool_use\",\"id\":\"toolu_1\",\"name\":\"w\",\"input\":{}}]},{\"role\":\"user\",\"content\":[{\"type\":\"tool_result\",\"tool_use_id\":\"toolu_1\",\"content\":\"ok\"}]}]",
         "msgs-empty []",
+        "msg-text-empty [][]",
+        "msg-text-two [a\nb]",
         // tools
         "schema {\"type\":\"object\",\"properties\":{\"city\":{\"type\":\"string\",\"description\":\"City name\"},\"unit\":{\"type\":\"string\",\"description\":\"c or f\",\"enum\":[\"c\",\"f\"]},\"days\":{\"type\":\"integer\",\"description\":\"forecast days\"},\"tags\":{\"type\":\"array\",\"description\":\"labels\",\"items\":{\"type\":\"string\"}},\"meta\":{\"type\":\"object\"}},\"required\":[\"city\",\"days\"]}",
         "schema-empty {\"type\":\"object\",\"properties\":{}}",

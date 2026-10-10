@@ -49,7 +49,7 @@ def main() -> int:
 
 ### Install (one file, Windows)
 
-Download **`Aoxn-0.49.0-Setup.exe`** from the
+Download **`Aoxn-0.50.0-Setup.exe`** from the
 [releases page](https://github.com/AlonechatWorkspace/Aoxn-language/releases)
 and double-click it. That single executable carries the compiler, the
 standard library, the UI toolkit and the examples — nothing else to download,
@@ -339,6 +339,23 @@ into `ui_press` / `ui_press_claim` / `ui_press_release` / `ui_pressed`, and
 replaced the text box's whole-field measure (an O(n) content hash per frame
 to learn a constant line height) with a cached `ui_font_height`.
 
+**v0.50.0 was the second stdlib performance audit** and it swept the whole
+tree, not one module: `len()` on a string is `strlen` emitted inline at
+every use site, and a loop that WRITES through a pointer (rather than only
+reading its string) loses clang's loop-invariance hoist — so the two UTF-16
+encoders under every `os_*` path call and every WinHTTP wide string were
+re-scanning the string per character (1950 µs → 10 µs per 4096-char call),
+and a second family of loops that grew strings with `out = out + …` paid
+O(n²) allocations and O(n²) leaked bytes (rendering a 200-message
+conversation: 2105 ms → ~3 ms). Ten loops now build into byte sinks
+(`JOut` / the new `StrBuf`), JSON numbers no longer re-`strlen` the whole
+document per token (1018 ms → 7–13 ms for 20 000 numbers), and the
+rewrites exposed one new crash class — pinned as `msg-text-empty` — where
+an empty result wrote its final NUL through a NULL buffer. The two rules
+are written up in [`docs/stdlib.md`](docs/stdlib.md); the self-hosting
+fixed point re-verifies byte-identical stage-1/stage-2 output against the
+changed `stdlib.ax`.
+
 **The toolkit is three portable files plus one backend per platform** — a
 portable core (`ui.ax`), a platform-neutral widget layer (`ui_draw.ax`),
 and ONE of `ui_win.ax` (Win32/GDI) or `ui_x11.ax` (Xlib + Xft, v0.46.0) —
@@ -597,15 +614,16 @@ program. It also compiles the real stdlib and the full `examples/` suite. See
 
 ## Testing & CI
 
-`cargo test` runs the end-to-end suite — **288 tests** in the compiler
+`cargo test` runs the end-to-end suite — **289 tests** in the compiler
 workspace (pipeline 154, compiler unit tests 18, installer stub 3, TypeScript
 front end 34, UI 14, install layout 6, CSS assets 21, CSS assets v0.36 18,
 symbol export 8, OpenAI SDK 2, Anthropic SDK 2, and one driver test per
 v0.44.0 stdlib module group: hashlib, datetime, math, pathlib, containers,
 os+glob, json file-IO — plus `stdlib_defect_pins`, the v0.48.0 regression
-suite for the JSON builder corruption and the quadratic loops) plus the
-`aoxn-pkg` crate's 94 via
-`bash run_pkg_tests.sh` — **382 in total** — where every pipeline test
+suite for the JSON builder corruption and the quadratic loops, and
+`stdlib_perf_pins`, the v0.50.0 pins for the `len()`-is-`strlen` and
+concatenation-in-a-loop rewrites) plus the `aoxn-pkg` crate's 94 via
+`bash run_pkg_tests.sh` — **383 in total** — where every pipeline test
 compiles `.ax` to an executable, runs it and asserts stdout + exit code. The
 suite includes the self-hosting fixed point: the stage-1 and stage-2
 compilers must emit byte-identical C and object files for the same program
@@ -744,37 +762,44 @@ Full reference, including limits: [`docs/css-assets.md`](docs/css-assets.md).
 
 ## Status
 
-**v0.49.0** · **the UI toolkit's remaining silent failures, and the fifteen
-copies of its input cycle** · 382 tests green
-(288 in the compiler workspace + 94 in `aoxn-pkg`; the IDE adds 36 Rust +
-62 frontend tests of its own) ·
+**v0.50.0** · **the second stdlib audit: the `len()`-is-`strlen` sweep
+finished, and the concatenation-in-a-loop sweep that followed it** · 383
+tests green (289 in the compiler workspace + 94 in `aoxn-pkg`; the IDE adds
+36 Rust + 62 frontend tests of its own) ·
 
-**a 9th layout level silently popped the 8th** (v0.49.0) — `lay_push` refused a
-box past the 8-level cap by returning without pushing, but `ui_layout_end`
-decremented anyway, so the 9th nesting level popped its own 8th and every later
-end unwound a level too deep: the rest of the frame's widgets landed in the
-wrong box with nothing reporting it. A refused push now balances its own end
-against a separate counter, and `ui_layout_overflow(c)` says it happened ·
-**`itoa10` returned UTF-16 on its escape path** (v0.49.0) — the arena path
-writes ASCII digits, which is what the draw path expects, but the
-arena-exhaustion escape returned `ui_utf16(str(v))`, so whenever the bump arena
-filled up `ui_label_int` drew a number with a NUL after every digit and both
-`len()` and `as_string()` stopped at the first one (`1/1` → `12345/5`) ·
-**`utf16_write` was O(n²)** (v0.49.0) — `while i < len(s)`, and `len()` on a
-string is `strlen` emitted inline at every use site, so the encoder re-scanned
-the entire string once per character: 626 µs → 3 µs per 2048-char call. The
-same trap v0.48.0 found three times in the JSON DOM; `ui.ax` had its own copy ·
-**the X11 clip stack could pop a rect it never pushed** (v0.49.0) — the push
-stored the rect and incremented the depth inside one `if depth < 30` branch
-while the pop decremented unconditionally, so a 31-deep nest walked the stack
-off its own base. The depth now always advances; only the storage saturates ·
-**and the fifteen copies of the press-claim/click-release cycle are one cycle
-now** (v0.49.0) — `ui_press` / `ui_press_claim` / `ui_press_release` /
-`ui_pressed`, with the two load-bearing details (an overlay-eaten press is
-never stolen; the slot stays claimed for the whole hold) documented where they
-live. No widget signature changed. The text box also stopped measuring its
-whole field every frame to learn a constant line height — that was an O(n)
-content hash per frame under the v0.47.0 measure cache.
+**thirteen loops re-scanned a string once per character** (v0.50.0) —
+`len()` on a string is `strlen` emitted inline at every use site, and a loop
+that WRITES through another pointer — rather than only reading its string —
+loses clang's loop-invariance hoist, so the whole string is re-scanned per
+character. The worst copies sat under every `os_*` path call and every
+WinHTTP wide string (the UTF-16 encoders: 1950 µs → 10 µs per 4096-char
+call); the URL and header scanners, the JSON number path (1018 ms → 7–13 ms
+for 20 000 numbers) and the glob and pathlib scanners were the rest ·
+**ten loops built strings with `out = out + …`** (v0.50.0) — concatenation
+allocates a fresh buffer per step and abandons the old one, so rendering a
+200-message conversation cost 2.1 s with every intermediate leaked: ~3 ms
+now, into `json.ax`'s existing `JOut` and the new `StrBuf` in `stdlib.ax`.
+No output changed; every rewrite is pinned byte-identical ·
+**the rewrites exposed one new crash class** (v0.50.0) — a byte sink whose
+result may stay EMPTY wrote its final NUL through a buffer that was never
+allocated (`0xC0000005` on a response with no text block — a pure tool call,
+a normal answer). All three joiners answer `""` now; `msg-text-empty` is the
+pin ·
+**new primitives** (v0.50.0): `buf_str(p, n)`, the pointer-plus-length escape
+from strlen for callers that already know a span (a parser token, an SSE
+line), and `StrBuf` / `sb_*`, a small geometric byte sink. `stdlib.ax` is on
+the self-host critical path, so both are plain Aoxn; the fixed point
+re-verifies byte-identical stage-1/stage-2 output against the changed file.
+
+**the previous milestone** (v0.49.0) — the UI toolkit's remaining silent
+failures and the fifteen copies of its input cycle: a 9th layout level used
+to pop the 8th (the rest of the frame landed in the wrong box, with nothing
+reporting it), `itoa10`'s arena-exhaustion escape returned UTF-16 where the
+draw path expects ASCII (so `ui_label_int` drew one digit once the arena
+filled), `utf16_write` was O(n²) (626 µs → 3 µs per 2048-char call — the
+trap v0.50.0 then found in its two twins), the X11 clip stack could pop a
+rect it never pushed, and the press-claim/click-release cycle is one
+`ui_press` family now. No widget signature changed ·
 
 **the JSON builder could shrink a parsed node's buffer under you** (v0.48.0) —
 the parser adopts a `Vec`'s child buffer but leaves the node's capacity at 0,
@@ -908,7 +933,7 @@ Apache-2.0 — see [`LICENSE`](LICENSE).
 ### 一个 exe 装全部（Windows）
 
 从 [releases 页面](https://github.com/AlonechatWorkspace/Aoxn-language/releases)
-下载 **`Aoxn-0.49.0-Setup.exe`**，双击即可。**这一个 exe 里就带着编译器、标准库、
+下载 **`Aoxn-0.50.0-Setup.exe`**，双击即可。**这一个 exe 里就带着编译器、标准库、
 UI 工具箱和示例程序**——不用再下载别的，也不用自己解压：
 
 ```console
@@ -1316,13 +1341,11 @@ Web 服务同样能打：[`web/`](web/README.md) 套件用 Aoxn 写了 HTTP/1.1 
 
 ## 测试与 CI
 
-`cargo test` 跑端到端测试套件——编译器工作区 **288 个**（pipeline 154、编译器
+`cargo test` 跑端到端测试套件——编译器工作区 **289 个**（pipeline 154、编译器
 单元测试 18、安装器 stub 3、TypeScript 前端 34、UI 14、安装布局 6、CSS 资产
 21、CSS 资产 v0.36 18、符号导出 8、OpenAI SDK 2、Anthropic SDK 2，以及
 v0.44.0 标准库模块组各一个驱动测试：hashlib、datetime、math、pathlib、
-containers、os+glob、json 文件 I/O——外加 `stdlib_defect_pins`，即 v0.48.0
-为 JSON 构建器堆损坏与三处二次方循环加的回归套件），另有 `aoxn-pkg` crate 的
-94 个经 `bash run_pkg_tests.sh` 运行——**合计 382 个**——每个 pipeline 测试都是
+containers、os+glob、json 文件 I/O——外加 `stdlib_defect_pins`（v0.48.0 为 JSON 构建器堆损坏与三处二次方循环加的回归套件）与 `stdlib_perf_pins`（v0.50.0 为 len() 即 strlen 与循环拼接两族改写加的钉子），另有 `aoxn-pkg` crate 的 94 个经 `bash run_pkg_tests.sh` 运行——**合计 383 个**——每个 pipeline 测试都是
 .ax → 可执行文件 → 运行 → 断言 stdout 与退出码。其中含自举固定点：
 stage-1 与 stage-2 编译器对同一程序必须产出逐字节一致的 C 文本与目标文件
 （目标文件比较会屏蔽 clang 写入每个 Windows 目标文件的 COFF 时间戳）。
@@ -1445,33 +1468,38 @@ print(asset_path(styles_fingerprint()))   # …\assets\82b4fb25….css
 
 ## 现状
 
-**v0.49.0** · **UI 工具箱剩余的静默错误，以及它的输入周期的十五份拷贝**
-· 382 测试全绿
-（编译器工作区 288 + `aoxn-pkg` 94；IDE 另有 36 个 Rust + 62 个前端测试）·
+**v0.50.0** · **第二次标准库审计：`len()` 即 `strlen` 的一族清扫完毕，
+以及在循环里做拼接的一族随之清扫** · 383 测试全绿
+（编译器工作区 289 + `aoxn-pkg` 94；IDE 另有 36 个 Rust + 62 个前端测试）·
 
-**第 9 层布局会静默弹掉第 8 层**（v0.49.0）——`lay_push` 对超出 8 层上限的
-盒子是「返回但不 push」，而 `ui_layout_end` 照样递减深度，于是第 9 层嵌套
-弹掉了它自己的第 8 层，此后每个 `ui_layout_end` 都多弹一层：该帧余下控件
-落进错误的盒子里，且无处报告。现在被拒绝的 push 用独立计数器（st 559）与
-自己的 `ui_layout_end` 对冲，8 个存活层级不可触碰，`ui_layout_overflow(c)`
-告诉你发生了什么 ·
-**`itoa10` 的逃逸路径返回 UTF-16**（v0.49.0）——arena 路径写的是 ASCII 数字，
-正是绘制路径所期望的（`plat_text_sub` 会把字节再过一遍 UTF-8 编码器），
-但 arena 耗尽逃逸返回 `ui_utf16(str(v))`：于是 arena 一满，`ui_label_int`
-画出的数字每位后面跟一个 NUL，`len()` 与 `as_string()` 都停在第一个上
-（`1/1` → `12345/5`）·
-**`utf16_write` 是 O(n²)**（v0.49.0）——`while i < len(s)`，而 `len()` 作用在
-string 上就是 `strlen` 且在每个使用点内联发射，编码器逐字符重扫整串：
-2048 字符一次 626 µs → 3 µs。这正是 v0.48.0 在 JSON DOM 里挖出三次的同一个
-陷阱，`ui.ax` 自己也有一份 ·
-**X11 裁剪栈可能弹出一个从未 push 过的矩形**（v0.49.0）——push 把存矩形和
-递增深度放在同一个 `if depth < 30` 分支里，而 pop 无条件递减，于是 31 层嵌套
-会把栈弹穿自己的基底。现在深度始终推进，只有存储会饱和 ·
-**press-claim/click-release 周期的十五份拷贝现在是一个周期**（v0.49.0）——
-`ui_press` / `ui_press_claim` / `ui_press_release` / `ui_pressed`，两处承重
-细节（被浮层吃掉的 press 绝不被偷走；整个按住期间槽位保持占用）写在它们
-所在之处。控件签名一个没变。文本框也不再每帧测量整段字段只为读一个常量行高
-——在 v0.47.0 测量缓存之下，那仍是每帧 O(n) 的内容哈希。
+**十三个循环曾逐字符重扫整串**（v0.50.0）——`len()` 作用在 string 上就是
+`strlen`，且在每个使用点内联发射；只**读**字符串的循环会被 clang 当成循环
+不变量提升，而通过另一个指针**写**的循环不会： clang 无法证明那笔写入不会
+与字符串重叠，于是整串每字符重扫一遍。最狠的两份就在每个 `os_*` 路径调用与
+每个 WinHTTP 宽字符串的身后（UTF-16 编码器：4096 字符 1950 µs → 10 µs）；
+URL 与请求头扫描、JSON 数字路径（2 万个数字 1018 ms → 7–13 ms）、glob 与
+pathlib 的扫描是其余 ·
+**十个循环曾用 `out = out + …` 增长字符串**（v0.50.0）——拼接每一步都新分配
+一块缓冲并丢弃旧的，于是一次 200 条消息的会话渲染要 2.1 s，且每一步的中间
+产物都在泄漏（字符串本就按设计不释放，浪费在步数）：现在约 3 ms，写进
+`json.ax` 既有的 `JOut` 与 `stdlib.ax` 新增的 `StrBuf`。输出一字节未变，
+每处改写都有逐字节钉子 ·
+**改写本身逼出一个新的崩溃类**（v0.50.0）——结果可能为**空**的字节 sink，
+会把收尾的 NUL 写进一个从未分配的缓冲区（`0xC0000005`：一个没有 text 块的
+响应——纯工具调用，一种正常回答）。三处连接函数现在都返回 `""`，
+`msg-text-empty` 是钉子 ·
+**新原语**（v0.50.0）：`buf_str(p, n)`——已知片段长（解析器 token、SSE 一行）
+时绕开 strlen 的「指针 + 长度」写法；以及 `StrBuf` / `sb_*`，一个小型几何
+增长字节 sink。`stdlib.ax` 在自举关键路径上，两者都是纯 Aoxn；固定点针对
+改动后的文件重新验证 stage-1/stage-2 逐字节一致。
+
+**上一个里程碑**（v0.49.0）——UI 工具箱剩余的静默错误与输入周期的十五份
+拷贝：第 9 层布局曾弹掉第 8 层（该帧余下控件落进错误的盒子且无处报告），
+`itoa10` 的 arena 逃逸在绘制路径期望 ASCII 处返回 UTF-16（arena 一满，
+`ui_label_int` 只画一位数字），`utf16_write` 是 O(n²)（2048 字符一次
+626 µs → 3 µs——v0.50.0 随后在它的两个孪生兄弟里找到了同一个陷阱），
+X11 裁剪栈可能弹出从未 push 过的矩形，press-claim/click-release 周期现在是
+`ui_press` 家族。控件签名一个没变 ·
 
 **JSON 构建器可能在你脚下把已解析节点的缓冲区改小**（v0.48.0）——解析器会
 接管 `Vec` 的子缓冲区，却把节点的容量槽留成 0，而扩容逻辑把 0 读成「默认 8」，

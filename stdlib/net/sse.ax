@@ -80,7 +80,10 @@ def net_sse_next(s: NetSse) -> NetSse:
         end = i
         if end > s.pos and load_u8(s.buf, end - 1) == 13:
             end = end - 1    # strip CR of a CRLF ending
-        line = str_sub(as_string(s.buf), s.pos, end)
+        # `str_sub(as_string(s.buf), ...)` read len() of the WHOLE buffer
+        # (strlen, inline, per line) -- the pointer-plus-length spelling
+        # copies exactly the line's bytes and scans nothing.
+        line = buf_str(s.buf + s.pos, end - s.pos)
         s.pos = i + 1
         if len(line) == 0:
             # blank line: dispatch the accumulated frame

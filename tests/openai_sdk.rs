@@ -129,6 +129,19 @@ def main() -> int:
     ins = vec_push_str(ins, "b")
     print("PASS body-emb-many " + oa_body_embeddings("e3-small", "", True, ins))
     print("PASS body-mod " + oa_body_moderations("", "x"))
+    # an empty message list is a legal body -- the v0.50.0 sink rewrite
+    # answered it, and the old concat spelling did too
+    print("PASS body-chat-empty " + oa_body_chat("m", vec_new(), vec_new(), False, 0.0, 0, 0))
+    # oa_responses_text: the empty case must be "" (the sink starts NULL;
+    # the old `out = ""` spelling answered "", and a response with no
+    # output_text part is normal)
+    ze = j_parse("{\"output\":[]}")
+    rz = OaResp(status=200, dom=ze.dom, pok=1, pmsg="", raw="", request_id="", terr=0, tmsg="", retries=0)
+    zt = oa_responses_text(rz)
+    print("PASS responses-text-empty [" + zt + "]")
+    tw = j_parse("{\"output\":[{\"content\":[{\"type\":\"output_text\",\"text\":\"x\"}]},{\"content\":[{\"type\":\"output_text\",\"text\":\"y\"}]}]}")
+    rw = OaResp(status=200, dom=tw.dom, pok=1, pmsg="", raw="", request_id="", terr=0, tmsg="", retries=0)
+    print("PASS responses-text-two [" + oa_responses_text(rw) + "]")
     # ---- SSE ----
     s = net_sse_new()
     f1 = "data: {\"a\":1}\n\ndata: {\"b\":2}\n\ndata: [DONE]\n\n"
@@ -251,6 +264,9 @@ fn openai_sdk_pure_layers() {
         "hdr-auth true", "hdr-ctype true", "hdr-org truetrue",
         "retry 500,1000,-1,-1,30000,500",
         "body-chat {\"model\":\"gpt-4o\",\"messages\":[{\"role\":\"system\",\"content\":\"Terse.\"},{\"role\":\"user\",\"content\":\"Say \\\"hi\\\"\"}],\"temperature\":0.7}",
+        "body-chat-empty {\"model\":\"m\",\"messages\":[]}",
+        "responses-text-empty []",
+        "responses-text-two [x\ny]",
         "body-chat-stream {\"model\":\"gpt-4o\",\"messages\":[{\"role\":\"system\",\"content\":\"Terse.\"},{\"role\":\"user\",\"content\":\"Say \\\"hi\\\"\"}],\"max_tokens\":256,\"stream\":true}",
         "body-resp {\"model\":\"gpt-4o\",\"input\":\"haiku\",\"instructions\":\"be brief\"}",
         "body-emb {\"model\":\"e3-small\",\"input\":\"hello\"}",

@@ -31,21 +31,26 @@ def glob_match(pat: string, name: string) -> bool:
     return glob_match_at(pat, 0, name, 0)
 
 def glob_match_at(p: string, pi: int, s: string, si: int) -> bool:
-    while pi < len(p):
+    # Both bounds are hoisted once: the recursive call below is opaque to
+    # clang, so a `len()` inside either loop condition was re-scanned per
+    # character of the pattern AND of the name, at every recursion level.
+    plen = len(p)
+    slen = len(s)
+    while pi < plen:
         c = str_get(p, pi)
         if c == 42:
             # collapse consecutive stars, then let one star eat any run
             while str_get(p, pi) == 42:
                 pi = pi + 1
-                if pi == len(p):
+                if pi == plen:
                     return True
             k = si
-            while k <= len(s):
+            while k <= slen:
                 if glob_match_at(p, pi, s, k):
                     return True
                 k = k + 1
             return False
-        if si >= len(s):
+        if si >= slen:
             return False
         if c == 63:
             si = si + 1
@@ -72,12 +77,13 @@ def glob_match_at(p: string, pi: int, s: string, si: int) -> bool:
 
 # index one past the closing ']' of the class at start, -1 when unterminated
 def glob_class_end(p: string, start: int) -> int:
+    plen = len(p)
     i = start + 1
-    if i < len(p) and (str_get(p, i) == 33 or str_get(p, i) == 94):
+    if i < plen and (str_get(p, i) == 33 or str_get(p, i) == 94):
         i = i + 1
-    if i < len(p) and str_get(p, i) == 93:
+    if i < plen and str_get(p, i) == 93:
         i = i + 1  # a leading ']' is a literal member
-    while i < len(p):
+    while i < plen:
         if str_get(p, i) == 93:
             return i + 1
         i = i + 1
@@ -107,8 +113,9 @@ def glob_class_hit(p: string, start: int, end: int, ch: int) -> bool:
     return hit
 
 def glob_has_wild(seg: string) -> bool:
+    n = len(seg)
     i = 0
-    while i < len(seg):
+    while i < n:
         c = str_get(seg, i)
         if c == 42 or c == 63 or c == 91:
             return True
@@ -119,10 +126,11 @@ def glob_has_wild(seg: string) -> bool:
 
 def glob_split(p: string) -> Vec:
     segs = vec_new()
+    n = len(p)
     i = 0
-    while i < len(p):
+    while i < n:
         j = i
-        while j < len(p) and not path_is_sep(str_get(p, j)):
+        while j < n and not path_is_sep(str_get(p, j)):
             j = j + 1
         if j > i:
             segs = vec_push_str(segs, str_sub(p, i, j))

@@ -50,7 +50,8 @@ def path_is_abs(p: string) -> bool:
         return True
     # "C:" or "C:\..." — a colon before the first separator
     i = 0
-    while i < len(p) and i < 3:
+    pn = len(p)
+    while i < pn and i < 3:
         c = str_get(p, i)
         if c == 58:
             return True
@@ -135,9 +136,10 @@ def path_norm(p: string) -> string:
                 i = i + 1
     # split the rest, drop "." and resolve ".." against a stack of parts
     parts = vec_new()
-    while i <= len(p):
+    pn = len(p)
+    while i <= pn:
         j = i
-        while j < len(p) and not path_is_sep(str_get(p, j)):
+        while j < pn and not path_is_sep(str_get(p, j)):
             j = j + 1
         if j > i:
             part = str_sub(p, i, j)
@@ -149,16 +151,21 @@ def path_norm(p: string) -> string:
             elif part != ".":
                 parts = vec_push_str(parts, part)
         i = j + 1
-    out = prefix
+    # join. The old spelling appended with `out = out + ...` per part,
+    # which is two allocations (separator + part) copying the whole
+    # accumulated path each time: a 65-part path spent ~130 mallocs here
+    # and measured 108 us. One sink, a couple of geometric reallocs.
+    w = sb_new(len(prefix) + 16)
+    w = sb_str(w, prefix)
     k = 0
     while k < parts.len:
-        if len(out) > 0 and not path_is_sep(str_get(out, len(out) - 1)):
-            out = out + "\\"
-        out = out + vec_get_str(parts, k)
+        if w.n > 0 and not path_is_sep(load_u8(w.buf, w.n - 1)):
+            w = sb_byte(w, 92)
+        w = sb_str(w, vec_get_str(parts, k))
         k = k + 1
-    if len(out) == 0:
+    if w.n == 0:
         return "."
-    return out
+    return sb_text(w)
 
 # (directory, file name) split at the LAST separator — Python's
 # os.path.split; the directory keeps no trailing separator except at root
