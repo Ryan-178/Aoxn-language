@@ -1023,8 +1023,15 @@ crates/aoxn-pkg       package manager crate (its own dependency set; see above)
   the mirror image of the clock one: **a test that hardcodes the expected
   spelling pins the bug instead of catching it** — `tests/pathlib.rs` and
   `tests/osglob.rs` both asserted `"a\\b"`, so they would have failed on
-  Linux even after the code was correct. Build expectations from
-  `path_sep()`.
+  Linux even after the code was correct, and `tests/stdlib_perf_pins.rs`
+  pinned `"C:\\a\\c"` the same way and did not surface until v0.50.6. Build
+  expectations from `path_sep()`. **A literal backslash in a test is only a
+  bug when it is an EXPECTED value produced by a path builder; as an INPUT
+  (`path_name("C:\\x\\y")`, `glob_split("a\\b\\c")`) it is legitimate
+  Windows-path coverage**, because `path_is_sep` accepts both separators on
+  the way in. That distinction is a review-time judgement no mechanical pin
+  can decide - which is why this one recurred after the stdlib scan was
+  already in place.
 - **`as_string` is a CAST, not a copy** (`codegen_c.rs` emits `((char*)(x))`),
   so its result ALIASES the buffer it is given — freeing that buffer is a
   use-after-free, and the language's own rule is that strings leak by design.

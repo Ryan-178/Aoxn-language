@@ -59,12 +59,24 @@ def main() -> int:
         fails = fails + 1
 
     # ---- 2. path_norm: root shapes survive the sink rewrite ----------
+    # Expected spellings are built from path_sep(): path_norm is a PATH
+    # BUILDER, so it answers in the platform's spelling (v0.50.4). v0.50.5
+    # found these three still hardcoded to "C:\\a\\c" and friends, which
+    # passed on Windows and failed on Linux for the spelling alone.
+    sep = path_sep()
     n1 = path_norm("C:\\a\\b\\..\\c")
     n2 = path_norm("\\\\srv\\share\\x")
     n3 = path_norm("a\\.\\b")
     n4 = path_norm("..")
     n5 = path_norm("")
-    if n1 == "C:\\a\\c" and n2 == "\\\\srv\\share\\x" and n3 == "a\\b" and n4 == ".." and n5 == ".":
+    # a UNC root ("\\server\share") is a Windows shape only; on Linux `//` is
+    # the root spelled twice and collapses, exactly like Python's
+    # PurePosixPath("//srv/share/x")
+    if target_os() == "windows":
+        unc = sep + sep + "srv" + sep + "share" + sep + "x"
+    else:
+        unc = sep + "srv" + sep + "share" + sep + "x"
+    if n1 == "C:" + sep + "a" + sep + "c" and n2 == unc and n3 == "a" + sep + "b" and n4 == ".." and n5 == ".":
         print("PASS path-norm-shapes")
     else:
         print("FAIL path-norm-shapes n1=" + n1 + " n2=" + n2 + " n3=" + n3 + " n4=" + n4 + " n5=" + n5)

@@ -5,6 +5,34 @@ minor bumps while pre-1.0: each minor version is a language milestone.
 
 ## [Unreleased]
 
+## [0.50.6] - 2026-10-10
+
+### Fixed
+
+- **`tests/stdlib_perf_pins.rs` still pinned the Windows spelling of
+  `path_norm`.** v0.50.4 made the path BUILDERS platform-native; this driver
+  was the last place still asserting a literal `"C:\\a\\c"`, so on Linux it
+  failed on the spelling alone:
+
+  ```
+  FAIL path-norm-shapes n1=C:/a/c n2=/srv/share/x n3=a/b n4=.. n5=.
+  ```
+
+  The three expectations are now built from `path_sep()`, and the UNC case
+  branches on `target_os()`: `\\server\share` is a Windows shape, while on
+  Linux `//` is the root spelled twice and collapses — what Python's
+  `PurePosixPath("//srv/share/x")` does. `n4` (`..`) and `n5` (`.`) were
+  never affected.
+
+- **Audited the rest of the suite for the same class.** Every other
+  backslash in `tests/` is an **input** string — `path_name("C:\\x\\y")`,
+  `glob_split("a\\b\\c")`, `path_join("a\\", "b")`'s pass-through arm — and
+  `path_is_sep` accepts both separators on input, so those are platform-
+  neutral by construction. This is the distinction that separates a real
+  finding from noise here: **a literal `"\\"` in a test is only a bug when it
+  is an EXPECTED value produced by a path builder; as an input it is
+  legitimate Windows-path coverage.**
+
 ## [0.50.5] - 2026-10-10
 
 ### Fixed

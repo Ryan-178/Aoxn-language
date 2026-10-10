@@ -49,7 +49,7 @@ def main() -> int:
 
 ### Install (one file, Windows)
 
-Download **`Aoxn-0.50.5-Setup.exe`** from the
+Download **`Aoxn-0.50.6-Setup.exe`** from the
 [releases page](https://github.com/AlonechatWorkspace/Aoxn-language/releases)
 and double-click it. That single executable carries the compiler, the
 standard library, the UI toolkit and the examples — nothing else to download,
@@ -768,9 +768,27 @@ Full reference, including limits: [`docs/css-assets.md`](docs/css-assets.md).
 
 ## Status
 
-**v0.50.5** · **`os_cwd()` handed back a pointer into memory it had already
-freed** · 385 tests green (291 in the compiler workspace + 94 in `aoxn-pkg`;
-the IDE adds 36 Rust + 62 frontend tests of its own) ·
+**v0.50.6** · **the last test still pinning the Windows spelling of a path** ·
+385 tests green (291 in the compiler workspace + 94 in `aoxn-pkg`; the IDE
+adds 36 Rust + 62 frontend tests of its own) ·
+
+**`tests/stdlib_perf_pins.rs` still asserted `"C:\\a\\c"`** for `path_norm`,
+long after the path builders became platform-native in v0.50.4 — so on Linux
+it failed on the spelling alone (`FAIL path-norm-shapes n1=C:/a/c
+n2=/srv/share/x n3=a/b`). The expectations are now built from `path_sep()`,
+and the UNC case branches on `target_os()`: `\\server\share` is a Windows
+shape, while on Linux `//` is the root spelled twice and collapses, which is
+what Python’s `PurePosixPath("//srv/share/x")` does ·
+**a literal backslash in a test is only a bug when it is an EXPECTED value
+coming out of a path builder** — as an *input* (`path_name("C:\\x\\y")`,
+`glob_split("a\\b\\c")`) it is legitimate Windows-path coverage, because
+`path_is_sep` accepts both separators on the way in. That distinction is a
+review-time judgement no mechanical pin can decide, which is why this one
+recurred after the stdlib scan was already in place. Audited the rest of the
+suite while fixing it; the other backslashes are all inputs ·
+
+**the previous milestone** (v0.50.5) — **`os_cwd()` handed back a pointer
+into memory it had already freed** —
 
 **one use-after-free, nine reported failures** — on Linux it did not crash so
 much as lie. The instrumented CI run said it outright:
@@ -1063,7 +1081,7 @@ Apache-2.0 — see [`LICENSE`](LICENSE).
 ### 一个 exe 装全部（Windows）
 
 从 [releases 页面](https://github.com/AlonechatWorkspace/Aoxn-language/releases)
-下载 **`Aoxn-0.50.5-Setup.exe`**，双击即可。**这一个 exe 里就带着编译器、标准库、
+下载 **`Aoxn-0.50.6-Setup.exe`**，双击即可。**这一个 exe 里就带着编译器、标准库、
 UI 工具箱和示例程序**——不用再下载别的，也不用自己解压：
 
 ```console
@@ -1603,10 +1621,22 @@ print(asset_path(styles_fingerprint()))   # …\assets\82b4fb25….css
 
 ## 现状
 
-**v0.50.4** · **标准库用硬编码的 `\` 拼路径** ·
-**v0.50.5** · **`os_cwd()` 返回了指向已释放内存的指针** · 385 测试全绿
-（编译器工作区 291 + `aoxn-pkg` 94；IDE 另有 36 个 Rust + 62 个前端测试）·
+**v0.50.6** · **最后一个仍在把路径钉成 Windows 拼写的测试** ·
+385 测试全绿（编译器工作区 291 + `aoxn-pkg` 94；IDE 另有 36 个 Rust + 62 个前端测试）·
 
+**`tests/stdlib_perf_pins.rs` 仍在断言 `path_norm` 等于 `"C:\\a\\c"`**——早在
+v0.50.4 把路径**构造器**改成平台原生拼写之后，它就是最后一处还写死 Windows 拼写的地方，
+于是在 Linux 上纯粹因为拼写而失败（`FAIL path-norm-shapes n1=C:/a/c
+n2=/srv/share/x n3=a/b`）。期望值现在由 `path_sep()` 构造，UNC 分支则按
+`target_os()` 分开：`\\server\share` 是 Windows 形状，而在 Linux 上 `//` 只是根目录
+写了两遍，会折叠——这正是 Python 的 `PurePosixPath("//srv/share/x")` 的行为 ·
+**测试里的一个字面反斜杠，只有在它是路径构造器产出的**期望值**时才是 bug**——作为
+**输入**（`path_name("C:\\x\\y")`、`glob_split("a\\b\\c")`）它是正当的 Windows 路径
+覆盖，因为 `path_is_sep` 在入口处两种分隔符都接受。这个区分是评审时的判断，机械钉子
+做不了——所以标准库扫描钉子已经在位之后，这一类还是又冒出来了。修它的同时把整个套件
+审了一遍：其余反斜杠全是输入 ·
+
+**上一个里程碑**（v0.50.5）——**`os_cwd()` 返回了指向已释放内存的指针**——
 **一处 use-after-free，九个失败标记**——在 Linux 上它不崩溃，而是说谎。带诊断的
 CI 直接说了：`FAIL chdir-no-move …/sandbox`，意思是 `os_cwd()` 在那次本该产生
 `sandbox` 的 `chdir` **之前**就回答了 `.../sandbox`，之后又回答了同一个字符串。
