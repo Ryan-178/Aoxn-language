@@ -994,6 +994,22 @@ crates/aoxn-pkg       package manager crate (its own dependency set; see above)
   (`exe_path`), `time.ax` and `datetime.ax` are the dual-platform modules;
   `ui_win.ax` / `net/http.ax` are Windows-only by design and their tests are
   `#![cfg(windows)]`.
+- **Getting the clock module to LINK is not getting it to be RIGHT.** The
+  symbol pin passed on the Linux job while the module answered 369 years in
+  the future (v0.50.3). `time_unix_ft` returns 100 ns ticks from the **1970**
+  origin on BOTH platforms — the Windows branch subtracts the 1601 gap from
+  `GetSystemTimeAsFileTime`, and `clock_gettime(CLOCK_REALTIME)` is already
+  on 1970, so the POSIX branch subtracts nothing. v0.50.1 read the name
+  (`..._ft`, `FT_UNIX_EPOCH`) as "raw FILETIME" and ADDED the gap. Two
+  lessons: (1) a function named after a C type is not that C type — read
+  what the code does, and when a comment contradicts its own body, believe
+  the body and FIX THE COMMENT; (2) a symbol-table test proves linkage,
+  never values. The value pins are `time-unix-sane` (absolute) and the
+  v0.50.3 `now-is-local-and-coherent` (round-trips `datetime_now()` through
+  `datetime_to_unix`, which is the only thing that can catch a wrong POSIX
+  `struct tm` offset — a shifted field still yields a well-formed date).
+  `time-unix-ms-agrees` is RELATIVE (two readings of one clock) and is
+  blind to any constant offset; do not read it as a sanity check.
 - **UCRT symbol collisions are a LINK-TIME trap**: a lowercase `nan`,
   `inf` or `copysign` DEFINITION duplicates UCRT symbols (the math externs
   share object files with them) → `lld-link: duplicate symbol`. That is why

@@ -5,6 +5,53 @@ minor bumps while pre-1.0: each minor version is a language milestone.
 
 ## [Unreleased]
 
+## [0.50.3] - 2026-10-10
+
+### Fixed
+
+- **On Linux the stdlib clock answered 369 years in the future.** v0.50.1 made
+  `time.ax` / `datetime.ax` dual-platform and the link error went away — the
+  CI symbol pin passed — but `time_unix_ft` came back wrong:
+
+  ```
+  FAIL now-year 2395 / FAIL utcnow-year 2395 / FAIL time-unix-sane 13436106024
+  ```
+
+  `GetSystemTimeAsFileTime` counts 100 ns units from **1601**, and
+  `time_unix_ft` **subtracts** the epoch gap, so what it returns is ticks
+  from **1970**. `clock_gettime(CLOCK_REALTIME)` counts from 1970 already,
+  so the POSIX branch had nothing to subtract — and v0.50.1 "converted" it
+  into FILETIME shape by **adding** the gap. Every consumer divides that
+  value, so `time_unix`, `time_unix_ms`, `datetime_utcnow` and
+  `datetime_now` were all off by 11644473600 s: `13436106024` instead of
+  `1791632424`. The Windows branch is unchanged and was always right.
+
+  The one-line fix is in `time_posix_ft`; the rest is in the comments,
+  because the failure was a **misreading of the contract**, not a typo: the
+  function is named `..._ft`, its sibling is called `FT_UNIX_EPOCH`, and its
+  comment said "raw 100 ns FILETIME ticks since 1601-01-01" — which was
+  wrong for Windows too, since the code right below it subtracts the gap.
+  The header, the `time_posix_ft` comment, the `time_unix_ft` comment and
+  `docs/stdlib.md` now state the normalisation and name the 369-year gap as
+  the cost of reading it backwards.
+
+- **`time-unix-ms-agrees` was blind to it, by construction.** It compares
+  `time_unix_ms` against `time_unix` — two readings of the same clock — so
+  it passes under ANY constant offset, and did. It still checks what it was
+  written for (ms and s must not disagree); the absolute check is
+  `time-unix-sane`, and that is the one that caught this. The comment now
+  says so, so the next reader does not trust it as a clock sanity test.
+
+- **New driver check `now-is-local-and-coherent`**, because nothing covered
+  the POSIX `struct tm` field offsets. `datetime_now()` reads a LOCAL time
+  from either `GetLocalTime`'s SYSTEMTIME words or a `struct tm`, and a
+  wrong field offset still yields a well-formed `DateTime` — shifting the
+  day field by 9 leaves `now-year`, `now-iso-len` and `utcnow-year` all
+  green (verified: that perturbation is exactly what this check catches).
+  The new check round-trips `datetime_now()` back through
+  `datetime_to_unix` and requires it to land within a day of `time_unix()`,
+  which is the UTC offset and nothing else.
+
 ## [0.50.1] - 2026-10-10
 
 ### Fixed

@@ -42,7 +42,7 @@ link. That is the shape of the bug v0.50.1 fixed.
 | module | file | one-liner |
 |---|---|---|
 | `math` | `stdlib/math.ax` | CRT trig/exp externs + the NaN/Inf toolkit |
-| `time` | `stdlib/time.ax` | QPC/`clock_gettime` monotonic clock, FILETIME/`CLOCK_REALTIME` wall clock |
+| `time` | `stdlib/time.ax` | QPC/`clock_gettime` monotonic clock, UTC wall clock normalised to the 1970 origin |
 | `datetime` | `stdlib/datetime.ax` | civil calendar math + strftime subset |
 | `calendar` | `stdlib/calendar.ax` | month ranges, grids, weekday queries |
 | `pathlib` | `stdlib/pathlib.ax` | pure path string operations |
@@ -93,10 +93,18 @@ Three clocks, three purposes:
   separately, because the naive `c * 1e9 / f` overflows i64 after ~292 days
   at 10 MHz); Linux reads `clock_gettime(CLOCK_MONOTONIC)`.
 - `time_unix()` / `time_unix_ms()` / `time_unix_ft()` — wall clock UTC.
-  Windows: `GetSystemTimeAsFileTime` (100 ns ticks since 1601, minus the
-  epoch gap). Linux: `clock_gettime(CLOCK_REALTIME)`, put into the same
-  FILETIME shape by `time_posix_ft` so `time_unix_ft` means one thing on
-  both.
+  Windows reads `GetSystemTimeAsFileTime`, whose raw value counts 100 ns
+  units from **1601**; `time_unix_ft` **subtracts** the epoch gap, so what
+  it returns is 100 ns ticks from **1970**. Linux reads
+  `clock_gettime(CLOCK_REALTIME)`, which counts from 1970 already — so the
+  POSIX branch subtracts nothing. **Both sides answer on the 1970 origin,
+  which is the whole contract of `time_unix_ft`** (everything above divides
+  it). Reading the name the other way round and "converting" the POSIX clock
+  *into* FILETIME shape costs exactly the gap: v0.50.1 did that and the
+  module answered 369 years in the future (`time_unix` = 13436106024
+  instead of 1791632424). Note that `time-unix-ms-agrees` could not see it —
+  it compares two readings of the same clock and is blind to a constant
+  offset; `time-unix-sane` is the absolute check that did.
 - `time_mono_ms()` — cheap monotonic milliseconds since boot
   (`GetTickCount64` / the monotonic clock divided down).
 - `time_sleep(sec: float)` / `time_sleep_ms(ms: int)` — `Sleep` on Windows,

@@ -1,15 +1,17 @@
 # Aoxn standard library — time (v0.44.0, docs/stdlib-todo.md #5; dual
-# platform since v0.51.0 — the module was Windows-only and would not LINK on
+# platform since v0.50.1 — the module was Windows-only and would not LINK on
 # Linux, because an extern a program calls unconditionally is a symbol
 # reference in the object file, whatever the rest of the source says).
 #
 # Clocks, prefixed `time_`. Windows has three sources, three purposes:
 #   - QueryPerformanceCounter  — monotonic, for measuring elapsed time
-#   - GetSystemTimeAsFileTime  — wall clock UTC, 100 ns units since 1601
+#   - GetSystemTimeAsFileTime  — wall clock UTC (the raw value counts 100 ns
+#                               units from 1601; this module renormalises it
+#                               to the 1970 origin, see time_posix_ft)
 #   - GetTickCount64           — cheap monotonic milliseconds since boot
 # Linux answers the same two clocks with one call:
 #   - clock_gettime(CLOCK_MONOTONIC) — the monotonic one
-#   - clock_gettime(CLOCK_REALTIME)  — the wall clock one
+#   - clock_gettime(CLOCK_REALTIME)  — the wall clock one, already on 1970
 # `Sleep` is the sleeper on Windows and `nanosleep` on Linux (milliseconds;
 # Python's time.sleep takes seconds, so time_sleep does the conversion).
 #
@@ -91,11 +93,18 @@ def time_posix_clock_ns(clk: int) -> int:
     free(ts)
     return sec * 1000000000 + nsec
 
-# the POSIX FILETIME-shaped wall clock: 100 ns ticks since 1601-01-01
+# 100 ns ticks on the UNIX (1970) timeline — the SAME normalisation the
+# Windows branch applies, and NOT the raw FILETIME value.
+#
+# The raw value is what GetSystemTimeAsFileTime writes and what a POSIX
+# clock_gettime cannot produce (it counts from 1970), so the Windows branch
+# subtracts the gap and the POSIX branch has nothing to subtract. Getting
+# this backwards is silent and costs exactly the gap: a wall clock 369 years
+# in the future (v0.50.1 read `t_unix` as 13436106024 instead of 1791632424).
 def time_posix_ft() -> int:
     if target_os() == "windows":
         return 0
-    return FT_UNIX_EPOCH() + time_posix_clock_ns(0) / 100
+    return time_posix_clock_ns(0) / 100
 
 # monotonic nanoseconds. The naive `c * 1e9 / f` overflows i64 after ~292
 # days at a 10 MHz QPC, so the seconds part and the remainder are converted
@@ -136,7 +145,10 @@ def time_unix() -> int:
 def time_unix_ms() -> int:
     return time_unix_ft() / 10000
 
-# raw 100 ns FILETIME ticks since 1601-01-01
+# 100 ns ticks on the UNIX (1970) timeline. Both platforms are normalised to
+# this origin, so it is NOT the raw FILETIME count from 1601 — see
+# time_posix_ft, where reading the name the other way round cost the 369-year
+# gap. Every consumer below divides this, so it has to mean one thing.
 def time_unix_ft() -> int:
     if target_os() == "windows":
         ft = malloc(8)

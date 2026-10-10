@@ -49,7 +49,7 @@ def main() -> int:
 
 ### Install (one file, Windows)
 
-Download **`Aoxn-0.50.2-Setup.exe`** from the
+Download **`Aoxn-0.50.3-Setup.exe`** from the
 [releases page](https://github.com/AlonechatWorkspace/Aoxn-language/releases)
 and double-click it. That single executable carries the compiler, the
 standard library, the UI toolkit and the examples — nothing else to download,
@@ -217,17 +217,22 @@ def main() -> int:
 ```
 
 The batch: `math` (CRT trig/exp + the `fdiv`/`NaN()`/`is_nan` toolkit the
-numeric libraries were waiting for), `time` (QPC monotonic + FILETIME wall
-clock), `datetime` (Hinnant civil-date math, hand-parsed `strftime` subset),
-`calendar`, `pathlib`, `base64` (encode **and** decode, std + URL-safe),
+numeric libraries were waiting for), `time` (monotonic + UTC wall clock:
+QueryPerformanceCounter / `clock_gettime`), `datetime` (Hinnant civil-date
+math, hand-parsed `strftime` subset, local time through `GetLocalTime` /
+`localtime_r`), `calendar`, `pathlib`,
+`base64` (encode **and** decode, std + URL-safe),
 `hashlib` (SHA-256/SHA-1/MD5, one-shot + incremental, pure Aoxn bitwise),
 `hmac`, `os` (filesystem core: all-wide UTF-16 on Windows, plain libc on Linux —
 env, cwd, listdir),
 `glob` (Python's dotfile rule, sorted output), `json` (the DOM promoted out
 of `net/` + file I/O), `bisect`, `heapq`. None of them touches
-`stdlib/stdlib.ax`, so the self-host fixed point is untouched. Reference —
-per-module APIs, Python deltas and the traps (UCRT symbol collisions, the
-zero-extended sentinel): [`docs/stdlib.md`](docs/stdlib.md).
+`stdlib/stdlib.ax`, so the self-host fixed point is untouched. A module that
+reached for one platform's API only would link nowhere else, so the
+platform-touching ones declare both and pick with `target_os()` — the rule
+and its trap are written up in [`docs/stdlib.md`](docs/stdlib.md), which is
+also the per-module reference for the Python deltas and the traps (UCRT
+symbol collisions, the zero-extended sentinel).
 
 ### v0.43.0 on the surface — modules you can name
 
@@ -614,16 +619,17 @@ program. It also compiles the real stdlib and the full `examples/` suite. See
 
 ## Testing & CI
 
-`cargo test` runs the end-to-end suite — **289 tests** in the compiler
+`cargo test` runs the end-to-end suite — **290 tests** in the compiler
 workspace (pipeline 154, compiler unit tests 18, installer stub 3, TypeScript
 front end 34, UI 14, install layout 6, CSS assets 21, CSS assets v0.36 18,
 symbol export 8, OpenAI SDK 2, Anthropic SDK 2, and one driver test per
-v0.44.0 stdlib module group: hashlib, datetime, math, pathlib, containers,
-os+glob, json file-IO — plus `stdlib_defect_pins`, the v0.48.0 regression
-suite for the JSON builder corruption and the quadratic loops, and
+v0.44.0 stdlib module group: hashlib, math, pathlib, containers, os+glob,
+json file-IO — plus `datetime`, which carries two since v0.50.1 (the driver
+plus the two-platform clock-symbol pin), `stdlib_defect_pins`, the v0.48.0
+regression suite for the JSON builder corruption and the quadratic loops, and
 `stdlib_perf_pins`, the v0.50.0 pins for the `len()`-is-`strlen` and
 concatenation-in-a-loop rewrites) plus the `aoxn-pkg` crate's 94 via
-`bash run_pkg_tests.sh` — **383 in total** — where every pipeline test
+`bash run_pkg_tests.sh` — **384 in total** — where every pipeline test
 compiles `.ax` to an executable, runs it and asserts stdout + exit code. The
 suite includes the self-hosting fixed point: the stage-1 and stage-2
 compilers must emit byte-identical C and object files for the same program
@@ -762,9 +768,38 @@ Full reference, including limits: [`docs/css-assets.md`](docs/css-assets.md).
 
 ## Status
 
-**v0.50.2** · **the seven open Dependabot alerts: six closed, one with
-nothing to bump** · 384 tests green (290 in the compiler workspace + 94 in
+**v0.50.3** · **the stdlib clock linked on Linux and still told the wrong time:
+369 years ahead** · 384 tests green (290 in the compiler workspace + 94 in
 `aoxn-pkg`; the IDE adds 36 Rust + 62 frontend tests of its own) ·
+
+**`time_unix_ft` returns 100 ns ticks from the 1970 origin on BOTH
+platforms** — the Windows branch subtracts the 1601 gap from
+`GetSystemTimeAsFileTime`, and `clock_gettime(CLOCK_REALTIME)` is already on
+1970, so the POSIX branch subtracts nothing. v0.50.1 read the name (`..._ft`,
+`FT_UNIX_EPOCH`) as "raw FILETIME" and **added** the gap instead. Every
+consumer divides that value, so `time_unix`, `time_unix_ms`,
+`datetime_utcnow` and `datetime_now` were all 11644473600 s out:
+`13436106024` instead of `1791632424`. The Windows branch was always right ·
+**a symbol-table test proves linkage, never values** — the v0.50.1 CI pin
+(read the object's undefined symbols) passed while the module answered
+`FAIL now-year 2395`. Worse, `time-unix-ms-agrees` passed too: it compares
+two readings of the same clock, so it is blind to ANY constant offset. The
+absolute check, `time-unix-sane`, is the one that caught it, and it is now
+labelled as such ·
+**the failure was a misread contract, so the comments were the real bug**:
+`time_unix_ft`'s doc said "raw 100 ns FILETIME ticks since 1601-01-01",
+which was wrong for Windows too — the code right below it subtracts the
+gap. Header, function comments and `docs/stdlib.md` now state the
+normalisation and name the 369-year cost of reading it backwards ·
+**new check `now-is-local-and-coherent`**, because nothing covered the POSIX
+`struct tm` field offsets. A wrong offset still yields a *well-formed*
+`DateTime` — shifting the day field by 9 leaves `now-year`, `now-iso-len`
+and `utcnow-year` all green, which is exactly what the new check catches by
+round-tripping `datetime_now()` through `datetime_to_unix` and demanding it
+land within a day of `time_unix()` ·
+
+**the previous milestone** (v0.50.2) — **the seven open Dependabot alerts:
+six closed, one with nothing to bump** —
 
 **two Next.js cache-poisoning advisories** (v0.50.2) — an SSG/ISR cache
 poison that becomes cross-user content substitution and a persistent DoS in
@@ -975,7 +1010,7 @@ Apache-2.0 — see [`LICENSE`](LICENSE).
 ### 一个 exe 装全部（Windows）
 
 从 [releases 页面](https://github.com/AlonechatWorkspace/Aoxn-language/releases)
-下载 **`Aoxn-0.50.2-Setup.exe`**，双击即可。**这一个 exe 里就带着编译器、标准库、
+下载 **`Aoxn-0.50.3-Setup.exe`**，双击即可。**这一个 exe 里就带着编译器、标准库、
 UI 工具箱和示例程序**——不用再下载别的，也不用自己解压：
 
 ```console
@@ -1090,14 +1125,18 @@ def main() -> int:
 ```
 
 本批模块：`math`（CRT 三角/指数 + 数值库等了很久的 `fdiv`/`NaN()`/`is_nan`
-工具箱）、`time`（QPC 单调钟 + FILETIME 墙上钟）、`datetime`（Hinnant 民用
-历数学、手写 `strftime` 子集）、`calendar`、`pathlib`、`base64`（编码**和**
+工具箱）、`time`（单调钟 + UTC 墙上钟：Windows 上是 QueryPerformanceCounter，
+Linux 上是 `clock_gettime`）、`datetime`（Hinnant 民用历数学、手写 `strftime`
+子集，本地时间走 `GetLocalTime` / `localtime_r`）、`calendar`、
+`pathlib`、`base64`（编码**和**
 解码、标准 + URL-safe 两套字母表）、`hashlib`（SHA-256/SHA-1/MD5，一次性 +
 增量，纯 Aoxn 位运算）、`hmac`、`os`（文件系统核心：Windows 全宽字符、Linux 直走 libc——
 环境变量、工作目录、listdir）、`glob`（Python 的 dotfile 规则、排序输出）、`json`
 （DOM 自 `net/` 提升 + 文件 I/O）、`bisect`、`heapq`。没有一个碰
-`stdlib/stdlib.ax`，自举固定点不动。逐模块 API、与 Python 的差异以及各种坑
-（UCRT 链接符号冲突、零扩展哨兵值）：[`docs/stdlib.md`](docs/stdlib.md)。
+`stdlib/stdlib.ax`，自举固定点不动。只伸向某一个平台 API 的模块换个平台就链接
+不上，所以碰到平台的那几个都两个平台都声明再用 `target_os()` 选一边——这条规则
+连同它的陷阱写在 [`docs/stdlib.md`](docs/stdlib.md)，那里也是逐模块 API、与
+Python 的差异以及各种坑（UCRT 链接符号冲突、零扩展哨兵值）的参考。
 
 ### v0.43.0 在语言面上加了什么——可以点名的模块
 
@@ -1386,8 +1425,9 @@ Web 服务同样能打：[`web/`](web/README.md) 套件用 Aoxn 写了 HTTP/1.1 
 `cargo test` 跑端到端测试套件——编译器工作区 **290 个**（pipeline 154、编译器
 单元测试 18、安装器 stub 3、TypeScript 前端 34、UI 14、安装布局 6、CSS 资产
 21、CSS 资产 v0.36 18、符号导出 8、OpenAI SDK 2、Anthropic SDK 2，以及
-v0.44.0 标准库模块组各一个驱动测试：hashlib、datetime、math、pathlib、
-containers、os+glob、json 文件 I/O——外加 `stdlib_defect_pins`（v0.48.0 为 JSON 构建器堆损坏与三处二次方循环加的回归套件）与 `stdlib_perf_pins`（v0.50.0 为 len() 即 strlen 与循环拼接两族改写加的钉子），另有 `aoxn-pkg` crate 的 94 个经 `bash run_pkg_tests.sh` 运行——**合计 384 个**——每个 pipeline 测试都是
+v0.44.0 标准库模块组各一个驱动测试：hashlib、math、pathlib、
+containers、os+glob、json 文件 I/O——外加自 v0.50.1 起带两个的 `datetime`（驱动测试
++ 双平台时钟符号钉子）、`stdlib_defect_pins`（v0.48.0 为 JSON 构建器堆损坏与三处二次方循环加的回归套件）与 `stdlib_perf_pins`（v0.50.0 为 len() 即 strlen 与循环拼接两族改写加的钉子），另有 `aoxn-pkg` crate 的 94 个经 `bash run_pkg_tests.sh` 运行——**合计 384 个**——每个 pipeline 测试都是
 .ax → 可执行文件 → 运行 → 断言 stdout 与退出码。其中含自举固定点：
 stage-1 与 stage-2 编译器对同一程序必须产出逐字节一致的 C 文本与目标文件
 （目标文件比较会屏蔽 clang 写入每个 Windows 目标文件的 COFF 时间戳）。
@@ -1510,8 +1550,32 @@ print(asset_path(styles_fingerprint()))   # …\assets\82b4fb25….css
 
 ## 现状
 
-**v0.50.2** · **七条 Dependabot 告警：六条已清，一条无版本可升** · 384 测试全绿
-（编译器工作区 290 + `aoxn-pkg` 94；IDE 另有 36 个 Rust + 62 个前端测试）·
+**v0.50.3** · **标准库时钟在 Linux 上链接通了，却仍在报 369 年后的时间** ·
+384 测试全绿（编译器工作区 290 + `aoxn-pkg` 94；IDE 另有 36 个 Rust + 62 个前端
+测试）·
+
+**`time_unix_ft` 在两个平台上都返回从 1970 起算的 100 纳秒数**——Windows 那一支
+从 `GetSystemTimeAsFileTime` 减掉 1601 的纪元差，而 `clock_gettime(CLOCK_REALTIME)`
+本来就在 1970 上，所以 POSIX 那一支无需再减。v0.50.1 把函数名（`..._ft`、
+`FT_UNIX_EPOCH`）读成了「原始 FILETIME」，于是**反过来加**了那段差。所有调用方都
+要除这个值，于是 `time_unix`、`time_unix_ms`、`datetime_utcnow` 与
+`datetime_now` 统统偏了 11644473600 秒：`13436106024` 而不是 `1791632424`。
+Windows 那一支一直是对的 ·
+**符号表测试只能证明「链接得上」，永远证明不了「值对」**——v0.50.1 的 CI 钉子
+（读目标文件的未定义符号）在模块报出 `FAIL now-year 2395` 的同时依然通过。更糟的是
+`time-unix-ms-agrees` 也通过了：它比较的是同一个时钟的两次读数，对**任何**常量偏移
+都是盲的。真正抓住它的是绝对检查 `time-unix-sane`，现在也已如此标注 ·
+**这次失败是一次对契约的误读，所以注释才是真正的 bug**：`time_unix_ft` 的文档写着
+「raw 100 ns FILETIME ticks since 1601-01-01」，而这对 Windows 同样是错的——紧挨着
+的代码就在做减法。文件头、函数注释与 `docs/stdlib.md` 现在都写明这层归一化，并把
+「读反了要付 369 年」写在里面 ·
+**新增检查 `now-is-local-and-coherent`**：POSIX `struct tm` 的字段偏移此前无人覆盖。
+偏移读错仍会得到一个**格式完好**的 `DateTime`——把 day 字段偏移 9，`now-year`、
+`now-iso-len` 与 `utcnow-year` 依然全绿（这正是新检查要抓的）。新检查把
+`datetime_now()` 经 `datetime_to_unix` 往返回来，要求它落在 `time_unix()` 的一天
+之内——那正好只是 UTC 偏移量 ·
+
+**上一个里程碑**（v0.50.2）——**七条 Dependabot 告警：六条已清，一条无版本可升**——
 
 **两条 Next.js 缓存投毒告警**（v0.50.2）——SSG/ISR 缓存投毒在自托管应用里会
 变成跨用户内容替换与持久拒绝服务。基准应用从 15.5.26 升到 **15.5.27**（官方

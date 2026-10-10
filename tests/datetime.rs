@@ -111,6 +111,19 @@ def main() -> int:
     else:
         print("FAIL utcnow-year " + str(u.year))
         fails = fails + 1
+    # datetime_now() reads the platform's LOCAL time — GetLocalTime's
+    # SYSTEMTIME words on Windows, a POSIX `struct tm`'s field OFFSETS on
+    # Linux. Reading the wrong offset produces a DateTime that is still a
+    # well-formed date (year 1905, month 13, ...), so the checks above cannot
+    # see it; round-tripping it back through datetime_to_unix does. The gap
+    # is whatever the UTC offset is, bounded by a day either way.
+    local = datetime_to_unix(datetime_now())
+    utc = time_unix()
+    if local - utc < 93600 and utc - local < 93600:
+        print("PASS now-is-local-and-coherent")
+    else:
+        print("FAIL now-is-local-and-coherent " + str(local) + " vs " + str(utc))
+        fails = fails + 1
     # time module
     t = time_unix()
     if t > 1750000000 and t < 2000000000:
@@ -118,6 +131,10 @@ def main() -> int:
     else:
         print("FAIL time-unix-sane " + str(t))
         fails = fails + 1
+    # NB this one is purely RELATIVE — it compares time_unix_ms against
+    # time_unix, both from the same clock, so it cannot see a constant offset
+    # and passed while the whole module answered 369 years in the future.
+    # `time-unix-sane` below is the absolute check that did catch it.
     ms = time_unix_ms()
     if ms > t * 1000 - 2000 and ms < t * 1000 + 60000:
         print("PASS time-ms-agrees")
@@ -216,6 +233,7 @@ stderr:
         "now-year",
         "now-iso-len",
         "utcnow-year",
+        "now-is-local-and-coherent",
         "time-unix-sane",
         "time-ms-agrees",
         "qpc-sleep-50ms",
