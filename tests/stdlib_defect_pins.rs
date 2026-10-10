@@ -259,3 +259,86 @@ fn stdlib_defect_pins() {
         );
     }
 }
+/// A path-BUILDING expression in a cross-platform module may not contain a
+/// hardcoded separator.
+///
+/// v0.50.3, the Linux CI job: `stdlib/glob.ax` and `stdlib/pathlib.ax`
+/// spelled every joined path with a literal `"\\"`, so on Linux
+/// `glob("sandbox/sub/*.txt")` walked `os_exists("sandbox\\sub")` — false —
+/// and returned nothing, while `path_join` handed callers a path that named
+/// no file. Four sites: `glob_join`, `path_join`, `path_with_suffix`,
+/// `path_with_name`, plus `path_norm`'s join byte.
+///
+/// What is legal is the module being honest about which platform it serves:
+/// a Windows-only module (`ui_win.ax`, `net/http.ax`, `os_listdir`'s own
+/// `path + "\\*"` arm) may name `\` freely, and so may a doc comment. This
+/// check therefore runs on the modules that are meant to work on BOTH, and
+/// it strips `#` comments first. Building uses `path_sep()`, which is the
+/// one way to spell a separator here.
+#[test]
+fn cross_platform_modules_never_hardcode_a_path_separator() {
+    let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("stdlib");
+    // dual-platform modules: these serve Windows AND Linux
+    let modules = [
+        "stdlib.ax",
+        "os.ax",
+        "glob.ax",
+        "pathlib.ax",
+        "math.ax",
+        "time.ax",
+        "datetime.ax",
+        "calendar.ax",
+        "base64.ax",
+        "hashlib.ax",
+        "bisect.ax",
+        "heapq.ax",
+        "json.ax",
+        "ui.ax",
+        "ui_draw.ax",
+    ];
+    // a separator glued onto a path: `... + "\"` or `"\" + ...`
+    // (the raw-byte form gets its own rule below, below `for`)
+    let needles = [r#"" + "\\""#, r#""\\" +"#];
+    for m in modules {
+        let path = root.join(m);
+        let src = std::fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("{} must exist: {e}", path.display()));
+        // strip `#` comments: prose about separators is allowed, code is not
+        let code: String = src
+            .lines()
+            .map(|l| match l.find('#') {
+                Some(i) => &l[..i],
+                None => l,
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        for needle in needles {
+            assert!(
+                !code.contains(needle),
+                "{}: hardcoded path separator {needle:?} in cross-platform code.\n\
+                 A joined path must be spelled with path_sep() (stdlib/pathlib.ax), \
+                 or path_sep_byte() when a raw byte is needed.\n\
+                 Found near:\n{}",
+                m,
+                code.lines()
+                    .find(|l| l.contains(needle))
+                    .unwrap_or("<unknown>")
+                    .trim()
+            );
+        }
+
+        // the same mistake in raw-byte form, which is what path_norm did
+        // (`w = sb_byte(w, 92)`). Scoped to a sink push, because a bare 92
+        // is also a perfectly good JSON `\\` escape - json.ax writes one.
+        if let Some(bad) = code
+            .lines()
+            .find(|l| l.contains("sb_byte(") && l.contains(", 92)"))
+        {
+            panic!(
+                "{}: hardcoded separator byte in a byte-sink push — use path_sep_byte():\n{}",
+                m,
+                bad.trim()
+            );
+        }
+    }
+}

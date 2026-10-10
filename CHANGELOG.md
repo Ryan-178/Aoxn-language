@@ -5,6 +5,52 @@ minor bumps while pre-1.0: each minor version is a language milestone.
 
 ## [Unreleased]
 
+## [0.50.4] - 2026-10-10
+
+### Fixed
+
+- **`stdlib/glob.ax` and `stdlib/pathlib.ax` spelled every joined path with a
+  literal `"\\"`**, so on Linux a nested glob walked a path that names
+  nothing. `glob("sandbox/sub/*.txt")` reached
+  `os_exists("sandbox\\sub")` — false — and returned an empty result;
+  `path_join` handed callers a string no file answers to. Invisible on
+  Windows, where `\` is the separator. Five sites: `glob_join`, `glob`'s two
+  root branches, `path_join`, `path_with_suffix`, `path_with_name`, and
+  `path_norm`'s join byte.
+
+  pathlib now publishes **`path_sep()` / `path_sep_byte()`** and every
+  builder goes through them. The asymmetry is the design: `path_is_sep`
+  accepts BOTH separators on input, because a Windows path may carry
+  either, but what a function BUILDS must be spelled the way the platform
+  spells paths or it is a different path.
+
+- **The tests pinned the bug.** `tests/pathlib.rs` asserted
+  `path_join("a","b") == "a\\b"` and `tests/osglob.rs` compared glob hits
+  against `"sandbox\\a.txt"` — so on Windows they passed *and* on Linux they
+  would have failed on the spelling even once the code was right. Both build
+  the expected string from `path_sep()` now.
+
+- **New `cross_platform_modules_never_hardcode_a_path_separator`** in
+  `tests/stdlib_defect_pins.rs`: strips `#` comments, then scans the
+  dual-platform modules for `" + "\"` / `"\" + "` and for a `sb_byte(..., 92)`
+  sink push. A Windows-only module may still name `\` freely — `os_listdir`'s
+  own `path + "\\*"` arm is fine, because it is inside `target_os() ==
+  "windows"`. The byte rule is scoped to a sink push rather than a bare `92`
+  precisely because `json.ax` writes a legitimate JSON `\\` escape as
+  `store_u8(out, oi, 92)`, which the first draft of this check flagged.
+
+### Diagnostics
+
+- **`tests/osglob.rs` said only `FAIL chdir`**, which cannot distinguish
+  "os_cwd() returned nothing" / "the chdir call failed" / "the cwd did not
+  move" / "the file is not there" — and everything failing after it (every
+  glob result empty, all three json file-I/O checks) was equally consistent
+  with the process having stayed inside the sandbox. The check now reports
+  which term failed and prints the path, and the json checks print the err
+  code, the dumped length, a reachability probe and the values read back.
+  **These are open questions the next Linux run answers, not closed ones** —
+  see the note in AGENTS.md.
+
 ## [0.50.3] - 2026-10-10
 
 ### Fixed

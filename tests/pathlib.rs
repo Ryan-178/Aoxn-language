@@ -41,22 +41,27 @@ def main() -> int:
     else:
         print("FAIL path-stem")
         fails = fails + 1
-    if path_join("a", "b") == "a\\b" and path_join("a\\", "b") == "a\\b" and path_join("a", "C:\\b") == "C:\\b":
+    # What a path-BUILDING function emits is platform-native: `path_sep()`.
+    # v0.50.3 — these four expectations were hardcoded to "a\\b", which both
+    # PINNED the Windows-only separator and meant the module could only ever
+    # be right on one platform. Input still accepts either separator.
+    sep = path_sep()
+    if path_join("a", "b") == "a" + sep + "b" and path_join("a\\", "b") == "a\\b" and path_join("a", "C:\\b") == "C:\\b":
         print("PASS path-join")
     else:
-        print("FAIL path-join")
+        print("FAIL path-join " + path_join("a", "b"))
         fails = fails + 1
     if path_is_abs("C:\\x") and path_is_abs("\\root") and not path_is_abs("x/y") and not path_is_abs(""):
         print("PASS path-is-abs")
     else:
         print("FAIL path-is-abs")
         fails = fails + 1
-    if path_norm("a//b\\./c\\..\\d") == "a\\b\\d" and path_norm("..\\keep") == "..\\keep" and path_norm(".") == ".":
+    if path_norm("a//b\\./c\\..\\d") == "a" + sep + "b" + sep + "d" and path_norm("..\\keep") == ".." + sep + "keep" and path_norm(".") == ".":
         print("PASS path-norm")
     else:
         print("FAIL path-norm " + path_norm("a//b\\./c\\..\\d"))
         fails = fails + 1
-    if path_with_suffix("a/b.txt", ".md") == "a\\b.md" and path_with_name("a/b.txt", "c.txt") == "a\\c.txt":
+    if path_with_suffix("a/b.txt", ".md") == "a" + sep + "b.md" and path_with_name("a/b.txt", "c.txt") == "a" + sep + "c.txt":
         print("PASS path-with")
     else:
         print("FAIL path-with")

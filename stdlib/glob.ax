@@ -14,6 +14,11 @@
 #   - a segment without wildcards is only descended into when it exists.
 # NOT supported: `**` (no cross-segment recursion) — documented gap.
 #
+# Input accepts either separator (path_is_sep does), but every path this
+# module BUILDS is spelled with the platform's own — `glob_join` and the
+# absolute-pattern roots go through `path_sep()`. Hardcoding "\" here is
+# invisible on Windows and returns paths that name nothing on Linux.
+#
 # glob() returns a Vec of path strings (vec_get_str to read; strings leak by
 # the language's design). All recursion returns the grown Vec (the write-back
 # discipline — vec_push invalidates every older copy of the handle).
@@ -137,12 +142,15 @@ def glob_split(p: string) -> Vec:
         i = j + 1
     return segs
 
+# a joined path is spelled the PLATFORM's way. A result is meant to be handed
+# straight back to os_* / opened, so "sandbox\a.txt" is a different path from
+# "sandbox/a.txt" — and on Linux only the latter names anything.
 def glob_join(prefix: string, seg: string) -> string:
     if len(prefix) == 0:
         return seg
     if path_is_sep(str_get(prefix, len(prefix) - 1)):
         return prefix + seg
-    return prefix + "\\" + seg
+    return prefix + path_sep() + seg
 
 # every matched path under prefix for segments idx..; RETURNS the grown out
 def glob_walk(prefix: string, segs: Vec, idx: int, out: Vec) -> Vec:
@@ -186,7 +194,7 @@ def glob(pattern: string) -> Vec:
     elif len(p) >= 2 and path_is_sep(str_get(p, 0)) and path_is_sep(str_get(p, 1)):
         segs = glob_split(str_sub(p, 2, len(p)))
         if segs.len >= 2:
-            base = "\\\\" + vec_get_str(segs, 0) + "\\" + vec_get_str(segs, 1)
+            base = path_sep() + path_sep() + vec_get_str(segs, 0) + path_sep() + vec_get_str(segs, 1)
             rest = vec_new()
             i = 2
             while i < segs.len:
@@ -194,7 +202,10 @@ def glob(pattern: string) -> Vec:
                 i = i + 1
             out = glob_walk(base, rest, 0, out)
     elif len(p) >= 1 and path_is_sep(str_get(p, 0)):
-        out = glob_walk("\\", glob_split(str_sub(p, 1, len(p))), 0, out)
+        # an absolute pattern: the root is spelled the platform's way, so
+        # "/tmp/*" starts walking at "/" and not at "\" (which exists on no
+        # platform that uses "/" anyway)
+        out = glob_walk(path_sep(), glob_split(str_sub(p, 1, len(p))), 0, out)
     else:
         out = glob_walk("", glob_split(p), 0, out)
     return glob_sort(out)

@@ -147,11 +147,17 @@ Monday-first like Python's default.
 
 Pure string operations, no filesystem access (that is `os.ax`): `path_name`
 `path_parent` `path_stem` `path_suffix` `path_join` `path_norm`
-`path_is_abs` `path_with_suffix` `path_with_name` `path_split`. Both
-separators are recognized everywhere; `path_join` inserts `\` and defers to
-an absolute right side; `path_norm` collapses separators and resolves `.`/`..`
-lexically (no symlink awareness — same as Python's PurePath); a leading dot
-does not make a suffix (`.gitignore` has none).
+`path_is_abs` `path_with_suffix` `path_with_name` `path_split`, plus
+**`path_sep()` / `path_sep_byte()`** — the platform's own separator. Both
+separators are recognized on **input** everywhere; what a function **builds**
+is platform-native, and that asymmetry is deliberate: a joined path has to
+name something, and `os_exists("sandbox\\sub")` is false on Linux.
+`path_join` inserts `path_sep()` and defers to an absolute right side;
+`path_norm` collapses separators and resolves `.`/`..` lexically (no symlink
+awareness — same as Python's PurePath) and keeps the root, spelled the
+platform's way (`/` stays `/` on Linux; the `\\server\share` UNC form exists
+only on Windows); a leading dot does not make a suffix (`.gitignore` has
+none).
 
 ## base64
 
@@ -239,9 +245,17 @@ network layer; keep the copies in sync):
 `glob(pattern) -> Vec` — the sorted, deterministic directory walk over
 `os_listdir`. Python parity kept: `*`/`?` do not match a leading `.` unless
 the pattern segment starts with one; no-wildcard segments are only
-descended when they exist; `C:`/`\`/UNC roots are preserved. NOT supported:
+descended when they exist; `C:`/UNC roots are preserved. NOT supported:
 `**` cross-segment recursion (documented gap). All walk recursion returns
 the grown Vec (the write-back discipline).
+
+**Results are spelled the platform's way.** A pattern accepts either
+separator, but every path the walk BUILDS goes through `path_sep()`, roots
+included — so on Linux `glob("sandbox/sub/*.txt")` returns `sandbox/sub/c.txt`
+and that string can be handed straight to `os_*`. v0.50.3 had a literal
+`"\\"` in `glob_join` and in the two root branches, which made a nested
+pattern walk `os_exists("sandbox\\sub")`, find nothing, and return an empty
+result on Linux while passing on Windows.
 
 ## json
 

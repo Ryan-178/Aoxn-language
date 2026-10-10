@@ -49,7 +49,7 @@ def main() -> int:
 
 ### Install (one file, Windows)
 
-Download **`Aoxn-0.50.3-Setup.exe`** from the
+Download **`Aoxn-0.50.4-Setup.exe`** from the
 [releases page](https://github.com/AlonechatWorkspace/Aoxn-language/releases)
 and double-click it. That single executable carries the compiler, the
 standard library, the UI toolkit and the examples — nothing else to download,
@@ -619,7 +619,7 @@ program. It also compiles the real stdlib and the full `examples/` suite. See
 
 ## Testing & CI
 
-`cargo test` runs the end-to-end suite — **290 tests** in the compiler
+`cargo test` runs the end-to-end suite — **291 tests** in the compiler
 workspace (pipeline 154, compiler unit tests 18, installer stub 3, TypeScript
 front end 34, UI 14, install layout 6, CSS assets 21, CSS assets v0.36 18,
 symbol export 8, OpenAI SDK 2, Anthropic SDK 2, and one driver test per
@@ -629,7 +629,7 @@ plus the two-platform clock-symbol pin), `stdlib_defect_pins`, the v0.48.0
 regression suite for the JSON builder corruption and the quadratic loops, and
 `stdlib_perf_pins`, the v0.50.0 pins for the `len()`-is-`strlen` and
 concatenation-in-a-loop rewrites) plus the `aoxn-pkg` crate's 94 via
-`bash run_pkg_tests.sh` — **384 in total** — where every pipeline test
+`bash run_pkg_tests.sh` — **385 in total** — where every pipeline test
 compiles `.ax` to an executable, runs it and asserts stdout + exit code. The
 suite includes the self-hosting fixed point: the stage-1 and stage-2
 compilers must emit byte-identical C and object files for the same program
@@ -768,9 +768,35 @@ Full reference, including limits: [`docs/css-assets.md`](docs/css-assets.md).
 
 ## Status
 
-**v0.50.3** · **the stdlib clock linked on Linux and still told the wrong time:
-369 years ahead** · 384 tests green (290 in the compiler workspace + 94 in
-`aoxn-pkg`; the IDE adds 36 Rust + 62 frontend tests of its own) ·
+**v0.50.4** · **the stdlib built paths with a hardcoded `\`** · 385 tests
+green (291 in the compiler workspace + 94 in `aoxn-pkg`; the IDE adds 36 Rust
++ 62 frontend tests of its own) ·
+
+**`glob.ax` and `pathlib.ax` spelled every joined path with `"\\"`**, so on
+Linux a nested glob walked a path that names nothing:
+`glob("sandbox/sub/*.txt")` reached `os_exists("sandbox\\sub")` — false — and
+returned empty, while `path_join` handed callers a string no file answers to.
+Five sites: `glob_join`, `glob`'s two root branches, `path_join`,
+`path_with_suffix`, `path_with_name`, and `path_norm`'s join byte. pathlib now
+publishes **`path_sep()` / `path_sep_byte()`**, and the asymmetry is the
+design: `path_is_sep` accepts BOTH separators on INPUT (a Windows path may
+carry either), but what a function BUILDS must be spelled the way the
+platform spells paths, or it is a different path ·
+**and the tests were pinning the bug, not catching it** — `tests/pathlib.rs`
+asserted `path_join("a","b") == "a\\b"` and `tests/osglob.rs` compared glob
+hits against `"sandbox\\a.txt"`, so on Windows they passed, and on Linux they
+would have failed on the *spelling* even after the code was right. Both build
+their expectations from `path_sep()` now, and a new
+`cross_platform_modules_never_hardcode_a_path_separator` pin scans the
+dual-platform modules for the construct (comment-stripping, Windows-only
+modules exempt because they name `\` inside a `target_os()` arm) ·
+**open, and instrumented rather than guessed**: `osglob`'s `chdir` check and
+three json file-I/O checks are still unexplained on Linux, and the driver now
+reports which term failed instead of a bare `FAIL chdir`, so one more CI run
+settles it ·
+
+**the previous milestone** (v0.50.3) — **the stdlib clock linked on Linux and
+still told the wrong time: 369 years ahead** —
 
 **`time_unix_ft` returns 100 ns ticks from the 1970 origin on BOTH
 platforms** — the Windows branch subtracts the 1601 gap from
@@ -1010,7 +1036,7 @@ Apache-2.0 — see [`LICENSE`](LICENSE).
 ### 一个 exe 装全部（Windows）
 
 从 [releases 页面](https://github.com/AlonechatWorkspace/Aoxn-language/releases)
-下载 **`Aoxn-0.50.3-Setup.exe`**，双击即可。**这一个 exe 里就带着编译器、标准库、
+下载 **`Aoxn-0.50.4-Setup.exe`**，双击即可。**这一个 exe 里就带着编译器、标准库、
 UI 工具箱和示例程序**——不用再下载别的，也不用自己解压：
 
 ```console
@@ -1422,7 +1448,7 @@ Web 服务同样能打：[`web/`](web/README.md) 套件用 Aoxn 写了 HTTP/1.1 
 
 ## 测试与 CI
 
-`cargo test` 跑端到端测试套件——编译器工作区 **290 个**（pipeline 154、编译器
+`cargo test` 跑端到端测试套件——编译器工作区 **291 个**（pipeline 154、编译器
 单元测试 18、安装器 stub 3、TypeScript 前端 34、UI 14、安装布局 6、CSS 资产
 21、CSS 资产 v0.36 18、符号导出 8、OpenAI SDK 2、Anthropic SDK 2，以及
 v0.44.0 标准库模块组各一个驱动测试：hashlib、math、pathlib、
@@ -1551,10 +1577,29 @@ print(asset_path(styles_fingerprint()))   # …\assets\82b4fb25….css
 ## 现状
 
 **v0.50.3** · **标准库时钟在 Linux 上链接通了，却仍在报 369 年后的时间** ·
-384 测试全绿（编译器工作区 290 + `aoxn-pkg` 94；IDE 另有 36 个 Rust + 62 个前端
-测试）·
+**v0.50.4** · **标准库用硬编码的 `\` 拼路径** · 385 测试全绿（编译器工作区 291 +
+`aoxn-pkg` 94；IDE 另有 36 个 Rust + 62 个前端测试）·
 
-**`time_unix_ft` 在两个平台上都返回从 1970 起算的 100 纳秒数**——Windows 那一支
+**`glob.ax` 与 `pathlib.ax` 把每一条拼出来的路径都写成了 `"\\"`**，于是 Linux 上
+嵌套 glob 去 walk 一个什么也不指的路径：`glob("sandbox/sub/*.txt")` 走到
+`os_exists("sandbox\\sub")`——false——返回空；而 `path_join` 交给调用方一个没有
+任何文件会应答的字符串。共五处：`glob_join`、`glob` 的两个 root 分支、
+`path_join`、`path_with_suffix`、`path_with_name`，以及 `path_norm` 那个 join
+字节。pathlib 现在提供 **`path_sep()` / `path_sep_byte()`**，而这种不对称正是
+设计：`path_is_sep` 在**输入**上接受两种分隔符（Windows 路径可能带任一种），
+但函数**产出**的路径必须按本平台拼写路径的方式拼，否则它就是另一条路径 ·
+**而且测试当时钉住的是 bug、不是抓 bug**——`tests/pathlib.rs` 断言
+`path_join("a","b") == "a\\b"`，`tests/osglob.rs` 拿 `"sandbox\\a.txt"` 比对
+glob 命中：在 Windows 上它们通过，而在 Linux 上即使代码改对了也会因为**拼写**
+而失败。两者现在都用 `path_sep()` 构造期望值，并新增
+`cross_platform_modules_never_hardcode_a_path_separator` 钉子扫描双平台模块里
+这种写法（先剥注释；Windows 专属模块天然豁免，因为它们只在 `target_os()` 分支
+里写 `\`）·
+**仍是开放问题，已经改成可诊断而非靠猜**：`osglob` 的 `chdir` 检查与三处 json
+文件 I/O 在 Linux 上仍未解释，驱动现在会报出究竟是哪一项失败，而不是一句
+`FAIL chdir`，下一次 CI 即可定论 ·
+
+**上一个里程碑**（v0.50.3）——**标准库时钟在 Linux 上链接通了，却仍在报 369 年后的时间**——
 从 `GetSystemTimeAsFileTime` 减掉 1601 的纪元差，而 `clock_gettime(CLOCK_REALTIME)`
 本来就在 1970 上，所以 POSIX 那一支无需再减。v0.50.1 把函数名（`..._ft`、
 `FT_UNIX_EPOCH`）读成了「原始 FILETIME」，于是**反过来加**了那段差。所有调用方都

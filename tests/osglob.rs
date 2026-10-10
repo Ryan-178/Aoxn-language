@@ -134,13 +134,33 @@ def main() -> int:
         fails = fails + 1
     os_unsetenv("AOXN_STDLIB_TEST_LONG")
     # ---- working directory ----
+    # Each term is reported on its own. v0.50.3 printed a bare "FAIL chdir"
+    # on Linux, which cannot say WHICH of "os_cwd() gave nothing", "the
+    # chdir failed", "the cwd did not change" or "the file is not there" —
+    # and the failures after it (every glob hit empty, json file I/O dead)
+    # were all consistent with the process having STAYED in the sandbox, so
+    # the bare marker left the real question open.
+    sep = path_sep()
     before = os_cwd()
-    if len(before) > 0 and os_chdir("sandbox") and os_cwd() != before and os_isfile("a.txt"):
-        print("PASS chdir")
-    else:
-        print("FAIL chdir")
+    if len(before) == 0:
+        print("FAIL chdir-cwd-empty")
         fails = fails + 1
-    os_chdir(before)
+    else:
+        ok_chdir = os_chdir("sandbox")
+        if not ok_chdir:
+            print("FAIL chdir-call " + before)
+            fails = fails + 1
+        else:
+            after = os_cwd()
+            if after == before:
+                print("FAIL chdir-no-move " + after)
+                fails = fails + 1
+            elif not os_isfile("a.txt"):
+                print("FAIL chdir-file-missing " + after)
+                fails = fails + 1
+            else:
+                print("PASS chdir")
+        os_chdir(before)
     # ---- glob matcher (pure) ----
     if glob_match("*.ax", "foo.ax") and not glob_match("*.ax", "foo.c") and glob_match("a?c", "abc") and not glob_match("a?c", "abbc"):
         print("PASS match-star-q")
@@ -163,8 +183,12 @@ def main() -> int:
         print("FAIL match-unterminated-class")
         fails = fails + 1
     # ---- glob walk ----
+    # Results are joined with the PLATFORM's separator (path_sep), so the
+    # expected spelling is built rather than written as "sandbox\\a.txt" —
+    # v0.50.3 hardcoded the Windows spelling here, which pinned glob to one
+    # platform in the test while glob itself only ever produced the other.
     hits = glob("sandbox/*.txt")
-    if hits.len == 1 and vec_get_str(hits, 0) == "sandbox\\a.txt":
+    if hits.len == 1 and vec_get_str(hits, 0) == "sandbox" + sep + "a.txt":
         print("PASS glob-star-txt")
     else:
         print("FAIL glob-star-txt " + str(hits.len))
@@ -174,25 +198,25 @@ def main() -> int:
             i = i + 1
         fails = fails + 1
     allf = glob("sandbox/*")
-    if vec_has(allf, "sandbox\\a.txt") and vec_has(allf, "sandbox\\sub") and vec_has(allf, "sandbox\\.hidden") == False:
+    if vec_has(allf, "sandbox" + sep + "a.txt") and vec_has(allf, "sandbox" + sep + "sub") and vec_has(allf, "sandbox" + sep + ".hidden") == False:
         print("PASS glob-dotfile-rule")
     else:
         print("FAIL glob-dotfile-rule " + str(allf.len))
         fails = fails + 1
     dots = glob("sandbox/.*")
-    if vec_has(dots, "sandbox\\.hidden"):
+    if vec_has(dots, "sandbox" + sep + ".hidden"):
         print("PASS glob-explicit-dot")
     else:
         print("FAIL glob-explicit-dot")
         fails = fails + 1
     rec = glob("sandbox/sub/*.txt")
-    if rec.len == 1 and vec_get_str(rec, 0) == "sandbox\\sub\\c.txt":
+    if rec.len == 1 and vec_get_str(rec, 0) == "sandbox" + sep + "sub" + sep + "c.txt":
         print("PASS glob-subdir")
     else:
         print("FAIL glob-subdir")
         fails = fails + 1
     exact = glob("sandbox/b.ax")
-    if exact.len == 1 and vec_get_str(exact, 0) == "sandbox\\b.ax":
+    if exact.len == 1 and vec_get_str(exact, 0) == "sandbox" + sep + "b.ax":
         print("PASS glob-exact")
     else:
         print("FAIL glob-exact")
@@ -216,17 +240,22 @@ def main() -> int:
         print("FAIL glob-sorted")
         fails = fails + 1
     # ---- json file I/O ----
+    # v0.50.3 printed only the err code, which cannot separate "the path did
+    # not resolve" (wrong cwd) from "the write failed" or "the file held the
+    # wrong bytes". The reachability probe and the dumped length answer both
+    # in one run.
     p = j_parse("{\"name\":\"aoxn\",\"n\":7,\"tags\":[\"a\",\"b\"]}")
+    text = j_dumps(p.dom, p.dom.last)
     if p.err == 0 and j_write_file("sandbox/doc.json", p.dom, p.dom.last):
         print("PASS json-write")
     else:
-        print("FAIL json-write " + str(p.err))
+        print("FAIL json-write err=" + str(p.err) + " len=" + str(len(text)) + " reachable=" + str(j_readable("sandbox/doc.json")))
         fails = fails + 1
     p2 = j_read_file("sandbox/doc.json")
     if p2.err == 0 and j_get_str(p2.dom, p2.dom.last, "name", "?") == "aoxn" and j_get_int(p2.dom, p2.dom.last, "n", -1) == 7:
         print("PASS json-read")
     else:
-        print("FAIL json-read " + str(p2.err))
+        print("FAIL json-read err=" + str(p2.err) + " name=" + j_get_str(p2.dom, p2.dom.last, "name", "?") + " n=" + str(j_get_int(p2.dom, p2.dom.last, "n", -1)))
         fails = fails + 1
     arr = j_obj_get(p2.dom, p2.dom.last, "tags")
     if j_len(p2.dom, arr) == 2 and j_arr_str(p2.dom, arr, 1, "?") == "b":

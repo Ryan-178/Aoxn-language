@@ -2,9 +2,16 @@
 #
 # Path manipulation as PURE STRING OPERATIONS — no filesystem access lives
 # here (that is stdlib/os.ax). Both separators (`/` and `\`) are recognized
-# everywhere, because a Windows path may carry either; results never change
-# what they do not touch. Python-parity names: parent / name / stem / suffix
-# / join, spelled `path_*` (Aoxn's flat namespace).
+# everywhere on INPUT, because a Windows path may carry either; results
+# never change what they do not touch. Python-parity names: parent / name /
+# stem / suffix / join, spelled `path_*` (Aoxn's flat namespace).
+#
+# What a function BUILDS is platform-native, though, and that asymmetry is
+# the whole point: `path_is_sep` accepts both separators, but a path that
+# JOINS two components must come out spelled the way the platform spells
+# paths, or it names a different path — `os_exists("sandbox\sub")` is false
+# on Linux. Every join below therefore goes through `path_sep()`. Writing a
+# literal `"\\"` into a join is how v0.50.3 found four of them.
 #
 # A `Path` struct wrapper adds nothing over the functions (Aoxn structs are
 # plain data and the functions are already chainable), so this module ships
@@ -22,6 +29,20 @@ def SEP_B() -> int:
 
 def path_is_sep(c: int) -> bool:
     return c == SEP_F() or c == SEP_B()
+
+# the separator this platform's paths are spelled with, as a byte
+def path_sep_byte() -> int:
+    if target_os() == "windows":
+        return SEP_B()
+    return SEP_F()
+
+# ...and as a one-character string. The language has no chr(), and the byte
+# is written through a two-byte buffer the way dt_chr does it in datetime.ax.
+def path_sep() -> string:
+    p = malloc(2)
+    store_u8(p, 0, path_sep_byte())
+    store_u8(p, 1, 0)
+    return as_string(p)
 
 # the final component, "" when the path ends in a separator
 def path_name(p: string) -> string:
@@ -71,7 +92,7 @@ def path_join(a: string, b: string) -> string:
         return b
     if path_is_sep(str_get(a, len(a) - 1)):
         return a + b
-    return a + "\\" + b
+    return a + path_sep() + b
 
 # the suffix WITH its dot (".txt"), or "" when the final component has no
 # extension; a leading dot ("." ".." ".gitignore") is a name, not a suffix
@@ -104,35 +125,41 @@ def path_with_suffix(p: string, suffix: string) -> string:
     parent = path_parent(p)
     if len(parent) == 0:
         return stem + suffix
-    return parent + "\\" + stem + suffix
+    return parent + path_sep() + stem + suffix
 
 # the path with its final component replaced
 def path_with_name(p: string, name: string) -> string:
     parent = path_parent(p)
     if len(parent) == 0:
         return name
-    return parent + "\\" + name
+    return parent + path_sep() + name
 
 # collapse `//` and `\`, resolve `.` and `..` lexically (no filesystem
 # access, no symlink awareness — `..` after a directory the OS may have
 # aliased is NOT special-cased, which Python's PurePath does either)
 def path_norm(p: string) -> string:
-    # keep the root exactly as given: "\\", UNC "\\\\", or drive "C:"/"C:\"
+    # keep the root exactly as given, but SPELLED the platform's way: a `/`
+    # root stays `/` on Linux and a `\` root stays `\` on Windows, and the
+    # UNC form (`\\server\share`) exists only on Windows — on Linux `//` is
+    # just the root spelled twice, so it collapses to one separator.
     prefix = ""
     i = 0
     if path_is_abs(p):
         if path_is_sep(str_get(p, 0)):
             if len(p) > 1 and path_is_sep(str_get(p, 1)):
-                prefix = "\\\\"
+                if target_os() == "windows":
+                    prefix = path_sep() + path_sep()
+                else:
+                    prefix = path_sep()
                 i = 2
             else:
-                prefix = "\\"
+                prefix = path_sep()
                 i = 1
         else:
             prefix = str_sub(p, 0, 2)
             i = 2
             if i < len(p) and path_is_sep(str_get(p, i)):
-                prefix = prefix + "\\"
+                prefix = prefix + path_sep()
                 i = i + 1
     # split the rest, drop "." and resolve ".." against a stack of parts
     parts = vec_new()
@@ -160,7 +187,7 @@ def path_norm(p: string) -> string:
     k = 0
     while k < parts.len:
         if w.n > 0 and not path_is_sep(load_u8(w.buf, w.n - 1)):
-            w = sb_byte(w, 92)
+            w = sb_byte(w, path_sep_byte())
         w = sb_str(w, vec_get_str(parts, k))
         k = k + 1
     if w.n == 0:

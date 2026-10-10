@@ -1010,6 +1010,33 @@ crates/aoxn-pkg       package manager crate (its own dependency set; see above)
   `struct tm` offset — a shifted field still yields a well-formed date).
   `time-unix-ms-agrees` is RELATIVE (two readings of one clock) and is
   blind to any constant offset; do not read it as a sanity check.
+- **A path a stdlib function BUILDS is platform-native; a path it READS
+  may carry either separator** (v0.50.4: `glob_join`, `path_join`,
+  `path_with_suffix`, `path_with_name`, `path_norm`'s join byte and
+  `glob`'s two root branches all hardcoded `"\\"`, so on Linux a nested
+  glob walked `os_exists("sandbox\\sub")` and found nothing). Use
+  `path_sep()` / `path_sep_byte()` from pathlib — they are the only legal
+  spelling in a dual-platform module, and
+  `stdlib_defect_pins::cross_platform_modules_never_hardcode_a_path_separator`
+  enforces it (comment-stripping, Windows-only modules exempt by
+  construction since they name `\` inside a `target_os()` arm). The trap is
+  the mirror image of the clock one: **a test that hardcodes the expected
+  spelling pins the bug instead of catching it** — `tests/pathlib.rs` and
+  `tests/osglob.rs` both asserted `"a\\b"`, so they would have failed on
+  Linux even after the code was correct. Build expectations from
+  `path_sep()`.
+- **OPEN as of v0.50.4, for the next Linux CI run to settle**: on
+  `ubuntu-latest`, `osglob`'s `chdir` check fails and every glob result is
+  EMPTY (`glob-star-txt 0`) while `glob-empty` and `glob-sorted` PASS — the
+  last two pass vacuously on an empty list. The separator bug explains the
+  empty glob, but not a `glob("sandbox/*.txt")` returning **0** where the
+  trace says 1, nor `json-read` reporting err 0 (a missing file is err 2 —
+  `json-read-missing` proves it) while `json-write` failed. Both are
+  consistent with the process having stayed in `sandbox/` after the chdir
+  and the restore failing, but that is inference, not a diagnosis. The
+  driver now names which chdir term failed and prints the json err codes,
+  reachability and values, so one more run settles it. **Do not "fix"
+  `os_chdir` by rewriting it before reading that output.**
 - **UCRT symbol collisions are a LINK-TIME trap**: a lowercase `nan`,
   `inf` or `copysign` DEFINITION duplicates UCRT symbols (the math externs
   share object files with them) → `lld-link: duplicate symbol`. That is why
