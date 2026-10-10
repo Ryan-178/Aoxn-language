@@ -210,6 +210,27 @@ byte block are hashed first (RFC 2104); binary keys/messages use the
 against the RFC 4231 vectors and a 131-byte 0xaa key cross-checked against
 node:crypto.
 
+## Checking a platform link without that platform
+
+`target_os()` is a compile-time fold, and the backend emits it as
+
+```c
+if (((__builtin_strcmp("windows", "windows") == 0))) { ... }
+```
+
+so a Windows machine can answer a Linux question exactly: rewrite that one
+string literal to `"linux"` and recompile with clang. clang constant-folds
+`__builtin_strcmp` of two literals in the frontend, so the branch that is not
+taken never becomes a call 鈥?the resulting object's undefined-symbol table
+**is** the Linux link's problem list. This is what
+`tests/stdlib_defect_pins.rs::dual_platform_modules_reference_no_foreign_platform_symbols`
+does for both dual-platform groups.
+
+It is not a convenience: it is the only check that catches a **helper** which
+reaches a platform API without its own `target_os()` branch. A guard in the
+caller makes the caller's own calls dead and does nothing for a sibling
+helper, which is exactly how `net/http.ax` shipped a module that did not link
+on Linux while its own comment promised a clean platform error (v0.50.7).
 ## os
 
 `os_cwd()` is the one function here that had to be rewritten twice on

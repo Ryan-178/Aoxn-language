@@ -342,3 +342,129 @@ fn cross_platform_modules_never_hardcode_a_path_separator() {
         }
     }
 }
+
+/// A dual-platform stdlib module must not reference the OTHER platform's API
+/// symbols — and that is checkable from a Windows machine, without a Linux
+/// runner, because `target_os()` is a compile-time fold.
+///
+/// The backend emits `if (__builtin_strcmp("windows", "windows") == 0)`.
+/// Rewriting that one string literal to `"linux"` and recompiling with clang
+/// performs EXACTLY the fold a Linux build would perform — clang
+/// constant-folds `__builtin_strcmp` of two literals in the frontend, so the
+/// branch that is not taken never becomes a call. The undefined-symbol table
+/// of the resulting object is then the Linux link's problem list, exactly.
+///
+/// This is how v0.50.7 found the bug: `stdlib/net/http.ax` guards its two
+/// public entry points with `if target_os() != "windows": return <error>`,
+/// which made THEIR WinHTTP calls dead on Linux — but four helper functions
+/// (`net_query_status`, `net_raw_headers`, `net_http_stream_read`,
+/// `net_http_stream_close`) called WinHTTP with no guard of their own, and the
+/// compiler emits every function body, so `WinHttpQueryHeaders`,
+/// `WinHttpQueryDataAvailable`, `WinHttpReadData`, `WinHttpCloseHandle` and
+/// `GetLastError` were still referenced. A Linux build of any program
+/// importing the module failed to LINK, where the module's own comment and
+/// the README both promise a clean "no transport on this platform" error.
+///
+/// The two probes are separate programs because the resolver correctly
+/// refuses to star-import `os.ax` and `net/http.ax` into one namespace (they
+/// both declare `GetLastError` and `Sleep`). That refusal is correct
+/// behaviour, not a bug — a program picks one.
+#[test]
+fn dual_platform_modules_reference_no_foreign_platform_symbols() {
+    let Some(clang) = aoxn::find_clang() else {
+        eprintln!("skipping: clang not found (set AOXN_CLANG or add clang to PATH)");
+        return;
+    };
+    let dir = std::env::temp_dir().join(format!("aoxn-linuxsim-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+
+    let probes: [(&str, &str); 2] = [
+        (
+            "core",
+            r#"import * from "stdlib.ax"
+import * from "stdlib/os.ax"
+import * from "stdlib/glob.ax"
+import * from "stdlib/pathlib.ax"
+import * from "stdlib/time.ax"
+import * from "stdlib/datetime.ax"
+import * from "stdlib/calendar.ax"
+import * from "stdlib/json.ax"
+import * from "stdlib/base64.ax"
+import * from "stdlib/hashlib.ax"
+import * from "stdlib/bisect.ax"
+import * from "stdlib/heapq.ax"
+import * from "stdlib/math.ax"
+
+def main() -> int:
+    return 0
+"#,
+        ),
+        (
+            "net",
+            r#"import * from "stdlib/net/http.ax"
+import * from "stdlib/net/codec.ax"
+import * from "stdlib/net/sse.ax"
+
+def main() -> int:
+    return 0
+"#,
+        ),
+    ];
+
+    // the Win32 surface the dual-platform stdlib is allowed to reach for
+    const FOREIGN: &[&str] = &[
+        "WinHttp", "GetLocalTime", "QueryPerformance", "GetSystemTimeAsFileTime",
+        "GetTickCount64", "Sleep", "GetLastError", "SetLastError",
+        "CreateDirectoryW", "RemoveDirectoryW", "DeleteFileW", "CopyFileW",
+        "MoveFileW", "GetFileAttributesW", "GetEnvironmentVariableW",
+        "SetEnvironmentVariableW", "GetCurrentDirectoryW",
+        "SetCurrentDirectoryW", "FindFirstFileW", "FindNextFileW", "FindClose",
+        "GetModuleFileName", "GetModuleHandle",
+    ];
+
+    for (name, src) in probes {
+        let ax = dir.join(format!("{name}.ax"));
+        std::fs::write(&ax, src).unwrap();
+        let c = aoxn::compile_paths_to_c(&[ax.display().to_string()], true)
+            .unwrap_or_else(|d| panic!("{name}: emit failed: {d:?}"));
+
+        // perform the fold a Linux build would
+        let windows = r#"__builtin_strcmp("windows", "windows")"#;
+        let linux = r#"__builtin_strcmp("windows", "linux")"#;
+        assert!(
+            c.contains(windows),
+            "{name}: the backend no longer emits the target_os fold this test \
+             rewrites ({windows:?}); the check is void until it is updated"
+        );
+        let simulated = c.replace(windows, linux);
+
+        let cpath = dir.join(format!("{name}_linux.c"));
+        std::fs::write(&cpath, simulated).unwrap();
+        let obj = dir.join(format!("{name}_linux{}", if cfg!(windows) { ".obj" } else { ".o" }));
+        let status = std::process::Command::new(&clang)
+            .arg("-O1")
+            .arg("-w")
+            .arg("-c")
+            .arg("-o")
+            .arg(&obj)
+            .arg(&cpath)
+            .status()
+            .expect("failed to run clang");
+        assert!(status.success(), "{name}: clang refused the simulated C");
+        let bytes = std::fs::read(&obj).expect("object");
+        // symbol names sit in the object's string table in plain bytes on
+        // both COFF and ELF, so a substring scan needs no nm/objdump
+        let text = String::from_utf8_lossy(&bytes).into_owned();
+        for sym in FOREIGN {
+            assert!(
+                !text.contains(sym),
+                "{name}: a simulated-Linux object still references {sym:?}. \
+                 Every function that calls a platform API must branch on \
+                 target_os() ITSELF — the compiler emits every function body, \
+                 so a helper reached from a guarded caller still leaks its \
+                 platform's symbols into the link."
+            );
+        }
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}

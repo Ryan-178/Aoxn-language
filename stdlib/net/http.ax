@@ -238,8 +238,20 @@ struct NetHttpStream:
     err: int
     errmsg: string
 
+#
+# The guard on each helper below belongs HERE, not only in the two public
+# entry points: the compiler emits EVERY function body, so an unguarded
+# WinHttp call is a symbol reference in a Linux object too. Before v0.50.7
+# the entry points' early return made their own calls dead, but these four
+# helpers are separate functions and theirs survived - a Linux build of a
+# program importing this module failed to link instead of reporting "no
+# transport on this platform". Each answer keeps its caller on the error
+# path it already had: status -1, headers "", a stream with got=0, a close
+# that is a no-op.
 # read the HTTP status off an open request; -1 when unavailable
 def net_query_status(req: int) -> int:
+    if target_os() != "windows":
+        return -1
     buf = malloc(8)
     store_i64(buf, 0)
     plen = malloc(8)
@@ -263,6 +275,8 @@ def net_query_status(req: int) -> int:
 
 # the raw response header block, CRLF-separated ("" when unavailable)
 def net_raw_headers(req: int) -> string:
+    if target_os() != "windows":
+        return ""
     cap = 1024
     buf = malloc(cap)
     # zeroed because net_from_wide scans for a NUL and WinHTTP does not
@@ -596,6 +610,8 @@ def net_http_stream_open_bytes(method: string, url: string, headers: string, bod
 
 # one read into `buf` (capacity `cap`); byte count lands in s.got (0 = end)
 def net_http_stream_read(s: NetHttpStream, buf: int, cap: int) -> NetHttpStream:
+    if target_os() != "windows":
+        return s
     s.got = 0
     abuf = malloc(8)
     store_i64(abuf, 0)
@@ -624,6 +640,8 @@ def net_http_stream_read(s: NetHttpStream, buf: int, cap: int) -> NetHttpStream:
     return s
 
 def net_http_stream_close(s: NetHttpStream):
+    if target_os() != "windows":
+        return
     if s.req != 0:
         WinHttpCloseHandle(s.req)
     if s.conn != 0:

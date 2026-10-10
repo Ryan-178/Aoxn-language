@@ -49,7 +49,7 @@ def main() -> int:
 
 ### Install (one file, Windows)
 
-Download **`Aoxn-0.50.6-Setup.exe`** from the
+Download **`Aoxn-0.50.7-Setup.exe`** from the
 [releases page](https://github.com/AlonechatWorkspace/Aoxn-language/releases)
 and double-click it. That single executable carries the compiler, the
 standard library, the UI toolkit and the examples — nothing else to download,
@@ -619,7 +619,7 @@ program. It also compiles the real stdlib and the full `examples/` suite. See
 
 ## Testing & CI
 
-`cargo test` runs the end-to-end suite — **291 tests** in the compiler
+`cargo test` runs the end-to-end suite — **292 tests** in the compiler
 workspace (pipeline 154, compiler unit tests 18, installer stub 3, TypeScript
 front end 34, UI 14, install layout 6, CSS assets 21, CSS assets v0.36 18,
 symbol export 8, OpenAI SDK 2, Anthropic SDK 2, and one driver test per
@@ -768,9 +768,37 @@ Full reference, including limits: [`docs/css-assets.md`](docs/css-assets.md).
 
 ## Status
 
-**v0.50.6** · **the last test still pinning the Windows spelling of a path** ·
-385 tests green (291 in the compiler workspace + 94 in `aoxn-pkg`; the IDE
-adds 36 Rust + 62 frontend tests of its own) ·
+**v0.50.7** · **the HTTP transport did not link on Linux, and you can now check
+that from Windows** · 385 tests green (292 in the compiler workspace + 94 in
+`aoxn-pkg`; the IDE adds 36 Rust + 62 frontend tests of its own) ·
+
+**`stdlib/net/http.ax` failed to link on Linux** — while its own comment and
+this README promise "a clean no-transport-on-this-platform error rather than
+failing to link". The two public entry points *do* gate themselves, and that
+made **their** WinHTTP calls dead on Linux. But four helpers called WinHTTP
+with no guard of their own — `net_query_status`, `net_raw_headers`,
+`net_http_stream_read`, `net_http_stream_close` — and the compiler emits
+every function body, so `WinHttpQueryHeaders`, `WinHttpQueryDataAvailable`,
+`WinHttpReadData`, `WinHttpCloseHandle` and `GetLastError` were still
+referenced. Each helper now guards itself and answers on the path its caller
+already had: status `-1`, headers `""`, a stream with `got = 0`, a close that
+is a no-op. No caller changed. The SDK tests are `#![cfg(windows)]`, so no
+Linux build of this module existed in CI to fail ·
+**you can check a Linux link from a Windows machine**, which is the more
+useful half of this release. `target_os()` is a compile-time fold emitted as
+`if (__builtin_strcmp("windows", "windows") == 0)`; rewriting that one string
+literal to `"linux"` and recompiling with clang performs *exactly* the fold a
+Linux build performs, so the object's undefined-symbol table **is** the Linux
+link's problem list. That is now a test
+(`dual_platform_modules_reference_no_foreign_platform_symbols`), it found this
+bug, and it also proves the earlier fixes: the core group simulates to an
+object referencing only POSIX and libc — `chdir`, `clock_gettime`,
+`localtime_r`, `nanosleep`, `readlink` — so the POSIX branches of `os.ax` and
+`time.ax` are demonstrably the ones that go live. Three hand-rolled rounds of
+this series were needed before anyone wrote the method down ·
+
+**the previous milestone** (v0.50.6) — **the last test still pinning the
+Windows spelling of a path** —
 
 **`tests/stdlib_perf_pins.rs` still asserted `"C:\\a\\c"`** for `path_norm`,
 long after the path builders became platform-native in v0.50.4 — so on Linux
@@ -786,9 +814,6 @@ coming out of a path builder** — as an *input* (`path_name("C:\\x\\y")`,
 review-time judgement no mechanical pin can decide, which is why this one
 recurred after the stdlib scan was already in place. Audited the rest of the
 suite while fixing it; the other backslashes are all inputs ·
-
-**the previous milestone** (v0.50.5) — **`os_cwd()` handed back a pointer
-into memory it had already freed** —
 
 **one use-after-free, nine reported failures** — on Linux it did not crash so
 much as lie. The instrumented CI run said it outright:
@@ -1081,7 +1106,7 @@ Apache-2.0 — see [`LICENSE`](LICENSE).
 ### 一个 exe 装全部（Windows）
 
 从 [releases 页面](https://github.com/AlonechatWorkspace/Aoxn-language/releases)
-下载 **`Aoxn-0.50.6-Setup.exe`**，双击即可。**这一个 exe 里就带着编译器、标准库、
+下载 **`Aoxn-0.50.7-Setup.exe`**，双击即可。**这一个 exe 里就带着编译器、标准库、
 UI 工具箱和示例程序**——不用再下载别的，也不用自己解压：
 
 ```console
@@ -1493,7 +1518,7 @@ Web 服务同样能打：[`web/`](web/README.md) 套件用 Aoxn 写了 HTTP/1.1 
 
 ## 测试与 CI
 
-`cargo test` 跑端到端测试套件——编译器工作区 **291 个**（pipeline 154、编译器
+`cargo test` 跑端到端测试套件——编译器工作区 **292 个**（pipeline 154、编译器
 单元测试 18、安装器 stub 3、TypeScript 前端 34、UI 14、安装布局 6、CSS 资产
 21、CSS 资产 v0.36 18、符号导出 8、OpenAI SDK 2、Anthropic SDK 2，以及
 v0.44.0 标准库模块组各一个驱动测试：hashlib、math、pathlib、
@@ -1621,8 +1646,29 @@ print(asset_path(styles_fingerprint()))   # …\assets\82b4fb25….css
 
 ## 现状
 
-**v0.50.6** · **最后一个仍在把路径钉成 Windows 拼写的测试** ·
-385 测试全绿（编译器工作区 291 + `aoxn-pkg` 94；IDE 另有 36 个 Rust + 62 个前端测试）·
+**v0.50.7** · **HTTP 传输层在 Linux 上链接不通，而这件事现在能在 Windows 上检查了** ·
+385 测试全绿（编译器工作区 292 + `aoxn-pkg` 94；IDE 另有 36 个 Rust + 62 个前端测试）·
+
+**`stdlib/net/http.ax` 在 Linux 上链接失败**——而它自己的注释和这份 README 都写着
+「报告干净的『本平台无传输层』错误，而不是链接失败」。两个公开入口**确实**做了平台
+门禁，也确实让**它们自己**的 WinHTTP 调用在 Linux 上成了死代码。但有四个 helper
+毫无保护地调用 WinHTTP——`net_query_status`、`net_raw_headers`、
+`net_http_stream_read`、`net_http_stream_close`——而编译器会发射每一个函数体，于是
+`WinHttpQueryHeaders`、`WinHttpQueryDataAvailable`、`WinHttpReadData`、
+`WinHttpCloseHandle` 与 `GetLastError` 仍然被引用。现在每个 helper 自己门禁，并沿着
+调用方本来就有的那条路径作答：状态 `-1`、头 `""`、`got = 0` 的流、什么都不做的关闭。
+没有任何调用方需要改动。SDK 测试是 `#![cfg(windows)]`，所以 CI 里从来不存在这个模块的
+Linux 构建来失败 ·
+**可以在 Windows 上检查 Linux 的链接问题**——这是本次发布更有用的一半。`target_os()`
+是编译期折叠，发射成 `if (__builtin_strcmp("windows", "windows") == 0)`；把那个字符串
+字面量改成 `"linux"` 再用 clang 重新编译，执行的**正是**Linux 构建会执行的折叠，所以
+目标文件的未定义符号表**就是**Linux 链接的问题清单。这现在是一个测试
+（`dual_platform_modules_reference_no_foreign_platform_symbols`），它查出了这个 bug，
+也顺带证明了几轮修复：核心那组模拟之后只引用 POSIX 与 libc——`chdir`、
+`clock_gettime`、`localtime_r`、`nanosleep`、`readlink`——所以 `os.ax` 与 `time.ax`
+的 POSIX 分支确实就是会生效的那一支。这一系列里手工做了三轮，才有人把方法写下来 ·
+
+**上一个里程碑**（v0.50.6）——**最后一个仍在把路径钉成 Windows 拼写的测试**——
 
 **`tests/stdlib_perf_pins.rs` 仍在断言 `path_norm` 等于 `"C:\\a\\c"`**——早在
 v0.50.4 把路径**构造器**改成平台原生拼写之后，它就是最后一处还写死 Windows 拼写的地方，

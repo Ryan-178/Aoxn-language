@@ -5,6 +5,59 @@ minor bumps while pre-1.0: each minor version is a language milestone.
 
 ## [Unreleased]
 
+## [0.50.7] - 2026-10-10
+
+### Fixed
+
+- **`stdlib/net/http.ax` did not link on Linux**, despite its own comment and
+  the README promising "a clean no-transport-on-this-platform error rather
+  than failing to link". The two public entry points do gate themselves with
+  `if target_os() != "windows": return <error>`, and that made THEIR WinHTTP
+  calls dead on Linux 鈥?but four helpers called WinHTTP with no guard of their
+  own:
+
+  | function | leaked symbols |
+  |---|---|
+  | `net_query_status` | `WinHttpQueryHeaders` |
+  | `net_raw_headers` | `WinHttpQueryHeaders`, `GetLastError` |
+  | `net_http_stream_read` | `WinHttpQueryDataAvailable`, `WinHttpReadData`, `GetLastError` |
+  | `net_http_stream_close` | `WinHttpCloseHandle` |
+
+  The compiler emits every function body, so a helper reached only from a
+  guarded caller still puts its platform's symbols in the object file. Each
+  helper now guards itself and answers on the path its caller already had:
+  status `-1`, headers `""`, a stream with `got = 0`, a close that is a no-op.
+  No caller had to change.
+
+  The SDK tests could never have caught this 鈥?they are `#![cfg(windows)]`,
+  so no Linux build of this module ever happened in CI.
+
+### A way to check Linux from a Windows machine
+
+`target_os()` is a compile-time fold, emitted as
+`if (__builtin_strcmp("windows", "windows") == 0)`. Rewriting that one string
+literal to `"linux"` and recompiling with clang performs exactly the fold a
+Linux build performs 鈥?clang constant-folds `__builtin_strcmp` of two literals
+in the frontend, so the untaken branch never becomes a call. The resulting
+object's undefined-symbol table is then the Linux link's problem list.
+
+- **New `dual_platform_modules_reference_no_foreign_platform_symbols`** in
+  `tests/stdlib_defect_pins.rs` does this for two probes (the os/glob/pathlib/
+  time/datetime group, and the `net/` group 鈥?separate programs because the
+  resolver correctly refuses to star-import `os.ax` and `net/http.ax` into one
+  namespace, they both declaring `GetLastError` and `Sleep`). It asserts the
+  simulated object names no Win32 API at all, and it asserts the rewrite
+  actually matched, so a change in how the backend spells the fold fails the
+  test instead of silently voiding it.
+
+  This is the general form of the check that has been redone by hand three
+  times in this series (`time`/`datetime`, the separator sweep, `http.ax`).
+  Both existing dual-platform groups pass it: the simulated Linux object for
+  the core group references only POSIX and libc (`chdir`, `clock_gettime`,
+  `localtime_r`, `nanosleep`, `opendir`, `readlink`, 鈥? 鈥?which also
+  independently confirms that the v0.50.1/v0.50.3 POSIX branches are the ones
+  that go live.
+
 ## [0.50.6] - 2026-10-10
 
 ### Fixed

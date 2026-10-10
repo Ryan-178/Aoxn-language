@@ -1059,6 +1059,25 @@ crates/aoxn-pkg       package manager crate (its own dependency set; see above)
   nothing, and splitting it into named terms made v0.50.5 a one-line
   diagnosis. When a failure's cause is not yet known, spend the edit on the
   diagnostic, not on a speculative rewrite.
+- **You can check a LINUX link from a WINDOWS machine.** `target_os()` is a
+  compile-time fold, emitted as `if (__builtin_strcmp("windows", "windows") == 0)`.
+  Rewriting that one string literal to `"linux"` and recompiling with clang
+  performs EXACTLY the fold a Linux build performs (clang constant-folds
+  `__builtin_strcmp` of two literals in the frontend), so the resulting
+  object's undefined-symbol table IS the Linux link's problem list. Use it
+  before concluding that a platform bug "cannot be checked here" — it took
+  three hand-rolled rounds of this series (time/datetime, the separator
+  sweep, `net/http.ax`) before the method was written down as a test:
+  `stdlib_defect_pins::dual_platform_modules_reference_no_foreign_platform_symbols`
+  simulates Linux for both dual-platform groups and asserts no Win32 API is
+  named. That is how v0.50.7 found `net/http.ax`: its two entry points guard
+  themselves, but four helpers called WinHTTP unguarded and leaked five
+  symbols into a Linux link — and the SDK tests are `#![cfg(windows)]`, so no
+  Linux build of that module existed in CI to fail. **A guard in the caller
+  never protects a callee** (same law as the `os_cwd`/`as_string` case), and
+  grepping for `target_os()` sites is not enough either — an early `return`
+  in the caller makes ITS OWN calls dead while a sibling helper's survive, so
+  the check has to be the object file.
 - **UCRT symbol collisions are a LINK-TIME trap**: a lowercase `nan`,
   `inf` or `copysign` DEFINITION duplicates UCRT symbols (the math externs
   share object files with them) → `lld-link: duplicate symbol`. That is why
