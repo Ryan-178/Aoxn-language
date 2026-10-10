@@ -1,0 +1,37 @@
+# cargo-audit configuration for ide/src-tauri (Tauri desktop app).
+#
+# ONE advisory is accepted rather than fixed. `cargo audit` reads this file
+# next to Cargo.lock, so the reason and the exit condition live in the
+# repository instead of in a runner's memory: an accepted risk that nobody
+# can see is an accepted risk nobody revisits.
+#
+# CI does not run `cargo audit` today (see docs/ide.md — the Rust command
+# layer is tested with `pnpm test:rust`, 36 tests). Adding it is a separate
+# decision; this file makes that decision cheap to make later.
+
+[[advisories]]
+id = "RUSTSEC-2024-0429"
+# glib: unsound `Iterator`/`DoubleEndedIterator` impls for `glib::VariantStrIter`
+# (unsound writes through `&p` in `VariantStrIter::impl_get`). Affected
+# `>=0.15.0, <0.20.0`; the lock pins 0.18.5.
+#
+# NOT FIXABLE TODAY, and the reason is a version constraint two crates away:
+# the advisory is patched only in glib >= 0.20, and glib reaches this lock
+# through wry 0.57.0 -> gtk ^0.18 -> glib ^0.18. Both of those are at their
+# LATEST releases (wry 0.57.0, tao 0.37.1 — checked on crates.io), so there
+# is no version to bump: `cargo update` leaves glib at 0.18.5 because ^0.18
+# is all wry asks for. Upstream's fix (gtk-rs-core PR #1343) is unreleased.
+#
+# Blast radius here is small and Linux-only: glib is a transitive dependency
+# of the webview backend, and this project calls none of the affected API
+# (it uses Tauri's window/dialog/fs/diagnostics commands, never
+# `VariantStrIter` over a GVariant string). The unsound code path is only
+# compiled into the Linux build.
+#
+# EXIT CONDITION — delete this entry and run `cargo update` as soon as EITHER
+# (a) gtk-rs releases the glib 0.18 line with the fix, letting a patch bump
+# clear it, OR (b) wry/tao publish a release on the gtk 0.20 line. Re-check
+# with: cargo update && cargo audit --file ide/src-tauri/audit.toml
+#
+# Do NOT "fix" this by deleting the block without bumping glib: a silent
+# removal is how an accepted risk becomes an unnoticed one.

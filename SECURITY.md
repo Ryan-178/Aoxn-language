@@ -16,8 +16,8 @@ minors do not.
 
 | Version | Supported |
 |---|---|
-| `0.50.x` (current) | ✅ yes |
-| `0.49.x` and earlier | ❌ no — please reproduce on `main` or the latest release |
+| `0.50.1` (current) | ✅ yes |
+| `0.50.0` and earlier | ❌ no — please reproduce on `main` or the latest release |
 | `main` (development) | ✅ yes, fixes land here first |
 
 Fix versions are always noted in [`CHANGELOG.md`](CHANGELOG.md). If you need a
@@ -254,6 +254,20 @@ the information needed to protect users even if the reporter disagrees.
   index arithmetic on buffers the *program* built itself remains the
   documented out-of-scope behavior below; the boundary here is data the
   program did not choose.)
+- **Third-party advisories in the benchmark app and the IDE** — the two
+  Next.js projects and the Tauri crate tree are this project's dependency
+  surface, so an advisory against them is this repository's business even
+  though the code is not Aoxn's: web/next-app (the Next.js comparison
+  target — cache poisoning in SSG/ISR, sharp, source-map-js) and ide/
+  (DOMPurify as Monaco pins it, the Tauri webview chain). The standard is
+  the same as anywhere else here: a fix that needs a version this project
+  cannot reach — a transitive pin at an exact version, or an upstream
+  advisory with no patched release yet — must be recorded **in-tree** with
+  its reason and its exit condition, not left as knowledge in someone's
+  head. ide/src-tauri/audit.toml is the worked example: RUSTSEC-2024-0429
+  (glib) is accepted there because the fix needs glib >= 0.20 while wry
+  0.57.0 and tao 0.37.1, both at their latest releases, require gtk ^0.18.
+  Deleting that entry without moving glib is the failure mode to report.
 - **Credential handling in the SDK clients** (v0.41.0) — `AnClient` /
   `OaClient` hold the API key as an ordinary Aoxn string, so it lives in
   the heap for the process's lifetime and is passed by pointer. Nothing
@@ -392,8 +406,8 @@ Aoxn 处于 pre-1.0 阶段：只有最新的版本线接收安全修复，旧的
 
 | 版本 | 支持情况 |
 |---|---|
-| `0.50.x`（当前） | ✅ 支持 |
-| `0.49.x` 及更早 | ❌ 不支持——请在 `main` 或最新发布上复现 |
+| `0.50.1`（当前） | ✅ 支持 |
+| `0.50.0` 及更早 | ❌ 不支持——请在 `main` 或最新发布上复现 |
 | `main`（开发线） | ✅ 支持，修复最先落在这里 |
 
 修复版本永远记在 [`CHANGELOG.md`](CHANGELOG.md)。如需把修复反向移植到旧
@@ -567,6 +581,15 @@ tag，请在报告里说明，我们再商量。
    恶意路径或 base64 输入若造成缓冲越界、下标越界或不前进的死循环，属于
    标准库缺陷。（程序**自建**缓冲上的不检查索引运算仍属下文成文范围外行为；
    这里的边界是程序未曾选择的数据。）
+- **基准应用与 IDE 里的第三方告警** —— 两个 Next.js 项目与 Tauri crate 树是本项目的
+  依赖面，因此针对它们的告警属于本仓库的事务，尽管代码不是 Aoxn 写的：
+  web/next-app（Next.js 对照基准——SSG/ISR 缓存投毒、sharp、source-map-js）
+  与 ide/（DOMPurify，被 Monaco 精确钉住；Tauri webview 链）。判准与本文件其余
+  部分一致：本项目够不到的版本所必需的修复（例如被精确版本传递钉死，或上游尚无补丁
+  发布的告警），必须**记录在仓库里**，连同理由与退出条件，而不是留在某个人的记忆
+  中。ide/src-tauri/audit.toml 是一个范例——RUSTSEC-2024-0429（glib）在那里被接受，
+  因为修复需要 glib >= 0.20，而 wry 0.57.0 与 tao 0.37.1（均已是各自最新版）要求的
+  是 gtk ^0.18。在没升 glib 的情况下删掉那条记录，才是值得上报的失败模式。
 - **SDK 客户端中的凭据处理**（v0.41.0）—— `AnClient` / `OaClient` 把 API key 当作
    普通 Aoxn 字符串持有，因此它在堆里存活整个进程生命周期，并以指针传递。没有任何机制
    会擦除它，core dump 或崩溃报告里就会有它。参考 Python SDK 同样如此。请优先用环境变量

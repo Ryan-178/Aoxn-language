@@ -10,9 +10,8 @@ minor bumps while pre-1.0: each minor version is a language milestone.
 ### Fixed
 
 - **`stdlib/time.ax` and `stdlib/datetime.ax` could not link on Linux.**
-  Both modules (v0.44.0) called the Win32 clocks unconditionally —
-  `QueryPerformanceCounter`, `GetSystemTimeAsFileTime`, `GetTickCount64`,
-  `Sleep`, `GetLocalTime` — so every program importing them failed at the
+  Both modules (v0.44.0) called the Win32 clocks unconditionally 鈥?  `QueryPerformanceCounter`, `GetSystemTimeAsFileTime`, `GetTickCount64`,
+  `Sleep`, `GetLocalTime` 鈥?so every program importing them failed at the
   link step on Linux (`undefined reference to 'GetLocalTime'`,
   `clang: error: linker command failed with exit code 1`), which is where
   the `ubuntu-latest` CI job stood at `tests/datetime.rs`. Invisible on
@@ -31,7 +30,7 @@ minor bumps while pre-1.0: each minor version is a language milestone.
 
   Why the branch is dropped at all: `if target_os() == "windows"` is
   emitted as `__builtin_strcmp("windows", "windows") == 0`, and clang
-  constant-folds that before code generation — so the branch not taken
+  constant-folds that before code generation 鈥?so the branch not taken
   never becomes a call, and its symbols never reach the object file. This
   holds at `-O0` as well as `-O3` (verified both with a standalone clang
   probe and by reading the undefined-symbol table of the real generated
@@ -41,9 +40,79 @@ minor bumps while pre-1.0: each minor version is a language milestone.
 - Pinned by `tests/datetime.rs::clock_modules_reference_only_this_platform`:
   it compiles every clock entry point to an OBJECT FILE and asserts the
   object names this platform's clock symbols and NOT the other platform's.
-  It is a two-way pin — the same assertion runs on both CI platforms, so
+  It is a two-way pin 鈥?the same assertion runs on both CI platforms, so
   a missing guard on either side fails the build instead of waiting for a
   user on the other OS.
+
+## [0.50.2] - 2026-10-10
+
+Theme: **the seven open Dependabot alerts, six closed and one that has
+nothing to bump.** No language or compiler change — this is a dependency
+release, hence a patch number.
+
+### Fixed: two Next.js cache-poisoning advisories (web/next-app)
+
+Next 15.5.26 → **15.5.27**, the official backport release for
+GHSA-4jqv-mc3x-m676 and GHSA-mcj8-r9mp-w47p: an SSG/ISR cache-poisoning
+that becomes cross-user content substitution and a persistent DoS in a
+self-hosted app, reachable without any "Direct" label caveat. The 15.x line
+is held deliberately rather than taking 16.x — the benchmark compares
+bodies and latency against the Aoxn server, and a major bump would move
+that baseline for no reason connected to the alert.
+
+Verified: `pnpm build` clean, `next start` serves all three routes
+(`/`, `/api/json`, `/text` — correct bodies, 404 intact).
+
+### Fixed: sharp (libvsvg CVE-2026-96889) and source-map-js (DoS)
+
+Both come in transitively through next and were not moved by bumping next
+alone — `pnpm update next` leaves the rest of the tree where it was:
+
+- **sharp 0.35.4 → 0.35.5** (GHSA-wq5f-xc86-pv6w)
+- **source-map-js 1.2.1 → 1.2.2** (GHSA-68fv-2mgg-jv7q, CVE-2026-93749 —
+  an unvalidated per-section offset line in indexed source maps, so a
+  crafted map blocks the event loop)
+
+`pnpm update --depth Infinity` is what moved them; it is the difference
+between "I bumped the package the alert names" and "the alert's package is
+actually in range".
+
+### Fixed: two DOMPurify IN_PLACE advisories (ide)
+
+dompurify 3.4.15 → **3.4.16** via a `pnpm.overrides` entry, because
+monaco-editor pins dompurify to an EXACT version and 0.57.0 is monaco's
+latest release — there was no bump to make, only an override. Both
+advisories are DOM XSS in the sanitiser Monaco applies to pasted and
+loaded HTML: a node-removing `afterSanitize` hook leaves the detached
+subtree's handlers armed, and a force-removed rawtext root's text carries
+attacker markup that a pure HTML reparse executes.
+
+Verified: `pnpm test` 62/62, `pnpm typecheck` clean, `pnpm build` clean.
+
+### Accepted, NOT fixed: RUSTSEC-2024-0429 (glib, ide/src-tauri)
+
+`ide/src-tauri/audit.toml` now records the acceptance in-tree, with the
+reason and the exit condition. The advisory (unsound
+`Iterator`/`DoubleEndedIterator` impls for `glib::VariantStrIter`) is
+patched only in glib ≥ 0.20; glib reaches this lockfile through
+wry 0.57.0 → `gtk ^0.18` → `glib ^0.18`, and wry and tao are both already
+at their LATEST releases, so `cargo update` correctly leaves glib at 0.18.5
+— there is no version to move. Upstream's fix (gtk-rs-core PR #1343) is
+unreleased. The unsound code path is a transitive webview-backend
+dependency, Linux-only, and this app never calls it.
+
+`cargo update` on that lockfile was **tried and reverted**: it moved 28
+unrelated crates and cleared nothing, which is churn that only makes the
+next bisect harder. Recorded in the file: delete the entry as soon as
+either gtk-rs ships the 0.18 backport or wry/tao publish on the gtk 0.20
+line.
+
+### Tests
+
+Full compiler suite: **289 green**, unchanged — this release touches no
+`.ax`, no `src/`. The IDE's 62 frontend tests, `pnpm typecheck` and
+`pnpm build` pass on the override; `web/next-app` builds and serves
+correctly on 15.5.27.
 
 ## [0.50.0] - 2026-10-10
 

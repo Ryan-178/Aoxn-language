@@ -51,6 +51,25 @@ pnpm test:rust             # the Rust command layer
 pnpm typecheck             # tsc --noEmit
 ```
 
+### Pinned dependency, and one accepted advisory
+
+- **`dompurify` is overridden to 3.4.16** (`package.json`'s
+  `pnpm.overrides`). Monaco depends on it but pins an EXACT version
+  (`3.4.15`), and 0.57.0 is monaco's latest release, so the two patched
+  versions of DOMPurify's `IN_PLACE` handling (a node-removing
+  `afterSanitize` hook leaving a detached subtree's handlers armed, and a
+  force-removed rawtext root whose text carries attacker markup) could not
+  be cleared any other way. The override is a patch bump within the same
+  minor, and the editor's 62 frontend tests plus `pnpm build` pass on it.
+- **`RUSTSEC-2024-0429` (glib) is ACCEPTED, not fixed** —
+  `ide/src-tauri/audit.toml` records why in the repo: the advisory needs
+  glib ≥ 0.20, and glib reaches this lock through wry 0.57.0 → `gtk ^0.18`
+  → `glib ^0.18`, with both wry and tao already at their latest releases,
+  so `cargo update` has nothing to move (the lock stays at glib 0.18.5).
+  The unsound `VariantStrIter` path is a transitive webview-backend
+  dependency, is Linux-only, and this app never calls it. The file's
+  exit condition says when to delete the entry.
+
 ## What it does
 
 - **Explorer** — a project tree, directories first, with `target`,

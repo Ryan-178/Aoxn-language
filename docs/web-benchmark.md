@@ -31,8 +31,12 @@ Three servers, three routes, same bodies:
 - **Aoxn v0.26.3** — `web/server_win.ax` (Windows) / `web/server_posix.ax`
   (Linux/macOS), compiled with `aoxn build` (LLVM `default<O3>`).
 - **Node.js 22.22.1** — `web/node-server.mjs`, plain `node:http`.
-- **Next.js 15.5.26** — `web/next-app`, app router, `next build` +
-  `next start` (production).
+- **Next.js 15.5.27** — `web/next-app`, app router, `next build` +
+  `next start` (production). The 15.x line is held here on purpose: 15.5.27
+  is the backport release that clears the two SSG/ISR cache-poisoning
+  advisories (GHSA-4jqv-mc3x-m676, GHSA-mcj8-r9mp-w47p) without a major
+  bump, and it carries the patched `sharp` 0.35.5 and `source-map-js` 1.2.2
+  transitively (v0.50.1).
 
 The Aoxn and Node response bodies are **byte-identical** (SHA-256 verified on
 all three routes). The Next.js page carries the same content (title, table,
