@@ -254,6 +254,21 @@ Single test: `cargo test --test pipeline recursion_fib`.
 
 ## Windows tooling gotchas (learned the hard way)
 
+- **A `git push` that SUCCEEDS can still print an error and exit 1 under
+  PowerShell.** GitHub writes `remote: This repository moved. Please use the
+  new location: ...` to **stderr** (the notice names `Ryan-178/Aoxn-language`
+  even though `origin` is `AlonechatWorkspace/Aoxn-language` — it is a stale
+  redirect, not a real relocation). PowerShell routes native stderr into the
+  error stream, so `git push` exits 1 and looks like a failure. **Do not trust
+  the exit code** — verify with `git fetch origin` then
+  `git rev-list --left-right --count origin/main...main`; `0 0` means the push
+  landed.
+- **PowerShell variables are CASE-INSENSITIVE.** `$zh` and `$ZH` are the same
+  variable. A script that loaded a UTF-8 string into `$ZH` and an array into
+  `$zh` silently replaced an array with `($array + ' ')`, which joins it into
+  one string — that is how a whole 25-line bilingual block collapsed into a
+  single README line. Prefer names that differ by more than case, and never
+  let a script's own data file names be its variable names.
 - **PowerShell 5.1 `-Encoding UTF8` writes a BOM.** Aoxn `.ax` sources are
   read byte-wise — a BOM (EF BB BF) is an "unexpected character" at 1:1.
   After any PowerShell rewrite of a `.ax` file, strip BOMs:
