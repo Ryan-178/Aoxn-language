@@ -5,6 +5,52 @@ minor bumps while pre-1.0: each minor version is a language milestone.
 
 ## [Unreleased]
 
+## [0.50.9] - 2026-10-11
+
+### Fixed
+
+- **`dual_platform_modules_reference_no_foreign_platform_symbols` still could
+  not run on Linux** 鈥?twice in a row, for the same underlying reason.
+
+  v0.50.7 rewrote `__builtin_strcmp("windows", "windows")`; v0.50.8 added
+  `("windows", "linux")` alongside it. Both were wrong in the same way: the
+  backend folds `target_os()` to the **build host's** name and the builtin is
+  the LEFT operand in every stdlib comparison, so the folded value is the
+  FIRST argument 鈥?a Windows build emits `("windows", "windows")` but a Linux
+  build emits `("linux", "windows")`. The second argument is the source
+  literal and must not move; rewriting it would make every comparison TRUE
+  rather than folding it.
+
+  The test now rewrites the first argument across all three values
+  `platform::target_os_name()` can return, which covers every build, and the
+  rewrite is idempotent so a host already reading "linux" is untouched.
+
+  **The lesson is the one the audit itself preaches.** A test written on
+  Windows cannot see the Linux spelling of anything 鈥?I picked the two
+  patterns from a Windows build, then "fixed" the failure by adding the one
+  other spelling I could imagine, rather than by asking what a Linux build
+  emits. Guessing the other platform's output twice is worse than not
+  guessing.
+
+### How this is now verified without a Linux runner
+
+  `target_os_name()` was temporarily given an `AOXN_FAKE_LINUX` hook (NOT
+  committed) so the compiler folds as a Linux build does, and the pin was run
+  in that configuration:
+
+  - **passes** with every guard in place 鈥?the Linux path is exercised, not
+    assumed;
+  - **fails** with `net_query_status`'s guard removed, naming `WinHttp` 鈥?so
+    it is not passing vacuously either.
+
+  That is a stronger check than the original: the Linux configuration of
+  both the pin and the thing it pins can now be tested from a Windows
+  machine, and the hook is the kind of switch that is worth keeping as a
+  documented, permanent capability rather than a temporary patch.
+
+  The hook was reverted; this release ships the test fix only.
+
+
 ## [0.50.8] - 2026-10-11
 
 ### Fixed

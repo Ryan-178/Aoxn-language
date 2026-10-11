@@ -431,25 +431,40 @@ def main() -> int:
         let c = aoxn::compile_paths_to_c(&[ax.display().to_string()], true)
             .unwrap_or_else(|d| panic!("{name}: emit failed: {d:?}"));
 
-        // Normalise every target_os fold to the LINUX reading. The backend
-        // spells the second argument with THIS build's own OS name, so the
-        // text is ("windows","windows") on a Windows build and
-        // ("windows","linux") on a Linux one — on Linux the fold has already
-        // been performed for us and the replacement is a no-op, which is
-        // exactly right: that object IS the Linux object.
-        let windows = r#"__builtin_strcmp("windows", "windows")"#;
-        let linux = r#"__builtin_strcmp("windows", "linux")"#;
+        // Normalise every target_os fold to the LINUX reading.
+
+        // The backend folds `target_os()` to the BUILD host's own name, and
+        // in every stdlib comparison the builtin is the LEFT operand, so the
+        // folded value is the FIRST argument:
+        //
+        //   Windows build: __builtin_strcmp("windows", "windows")
+        //   Linux   build: __builtin_strcmp("linux",   "windows")
+        //
+        // (v0.50.8 got this backwards and only accepted the first of those -
+        // a test written on Windows cannot SEE the other, which is the whole
+        // trap.) The second argument is the source literal and must NOT move:
+        // rewriting it would make every comparison true instead of folding
+        // it. platform::target_os_name() has exactly three answers, so three
+        // prefixes cover every build; the rewrite is idempotent.
+        let mut simulated = c.clone();
+        let mut folds = 0;
+        for host in ["windows", "linux", "other"] {
+            let from = format!(r#"__builtin_strcmp("{host}", "#);
+            if simulated.contains(&from) {
+                folds += 1;
+                simulated = simulated.replace(&from, r#"__builtin_strcmp("linux", "#);
+            }
+        }
         assert!(
-            c.contains(windows) || c.contains(linux),
-            "{name}: the backend no longer emits a target_os fold this test \
-             recognises (looked for {windows:?} or {linux:?}); the check is \
-             void until it is updated"
+            folds > 0,
+            "{name}: no target_os fold found - the backend no longer emits
+             __builtin_strcmp(<host>, <literal>); the check is void until it is
+             updated"
         );
-        let simulated = c.replace(windows, linux);
         assert!(
-            !simulated.contains(windows),
-            "{name}: a target_os fold still reads \"windows\" after \
-             normalisation — the check would be measuring nothing"
+            simulated.contains(r#"__builtin_strcmp("linux", "#),
+            "{name}: a target_os fold did not normalise - the check would be
+             measuring nothing"
         );
 
         let cpath = dir.join(format!("{name}_linux.c"));

@@ -1078,6 +1078,38 @@ crates/aoxn-pkg       package manager crate (its own dependency set; see above)
   grepping for `target_os()` sites is not enough either — an early `return`
   in the caller makes ITS OWN calls dead while a sibling helper's survive, so
   the check has to be the object file.
+- **You can check a LINUX link from a WINDOWS machine.** `target_os()` is a
+  compile-time fold emitted as `if (__builtin_strcmp("windows", "windows") == 0)`.
+  Rewriting that one string literal to `"linux"` and recompiling with clang
+  performs EXACTLY the fold a Linux build performs (clang constant-folds
+  `__builtin_strcmp` of two literals in the frontend), so the resulting
+  object's undefined-symbol table IS the Linux link's problem list. Use it
+  before concluding that a platform bug "cannot be checked here" — it took
+  three hand-rolled rounds of this series (time/datetime, the separator
+  sweep, `net/http.ax`) before the method was written down as a test:
+  `stdlib_defect_pins::dual_platform_modules_reference_no_foreign_platform_symbols`
+  simulates Linux for both dual-platform groups and asserts no Win32 API is
+  named. That is how v0.50.7 found `net/http.ax`: its two entry points guard
+  themselves, but four helpers called WinHTTP unguarded and leaked five
+  symbols into a Linux link — and the SDK tests are `#![cfg(windows)]`, so no
+  Linux build of that module existed in CI to fail. **A guard in the caller
+  never protects a callee** (same law as the `os_cwd`/`as_string` case), and
+  grepping for `target_os()` sites is not enough either — an early `return`
+  in the caller makes ITS OWN calls dead while a sibling helper's survive, so
+  the check has to be the object file.
+- **A test written on Windows cannot see the Linux spelling of ANYTHING** —
+  and that bit this pin twice (v0.50.8, then v0.50.9). The backend folds
+  `target_os()` to the BUILD HOST's name as the FIRST argument of the
+  comparison, so the text is `("windows","windows")` on Windows and
+  `("linux","windows")` on Linux. I picked the pattern from a Windows build,
+  then "fixed" the CI failure by adding the one other spelling I could
+  *imagine*. **Never guess the other platform's output: derive it, or make it
+  switchable.** `target_os_name()` takes exactly three values, so the
+  general fix enumerates them — and the real capability is a temporary
+  `AOXN_FAKE_LINUX` hook in `platform.rs` that makes the compiler fold as
+  Linux, which runs the Linux configuration of a test from a Windows machine
+  (used in v0.50.9 to show the pin both passes and still bites there).
+  Consider promoting that hook to a documented permanent capability.
 - **UCRT symbol collisions are a LINK-TIME trap**: a lowercase `nan`,
   `inf` or `copysign` DEFINITION duplicates UCRT symbols (the math externs
   share object files with them) → `lld-link: duplicate symbol`. That is why
