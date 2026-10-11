@@ -5,6 +5,42 @@ minor bumps while pre-1.0: each minor version is a language milestone.
 
 ## [Unreleased]
 
+## [0.50.8] - 2026-10-11
+
+### Fixed
+
+- **The v0.50.7 Linux-simulation pin only worked on Windows.** It rewrote
+  `__builtin_strcmp("windows", "windows")` to `"linux"` and asserted that
+  pattern was present 鈥?but the backend spells the fold's second argument
+  with the BUILD's own OS name, so on a Linux build the emitted text already
+  reads `("windows", "linux")` and the pin failed on Linux with
+
+  ```
+  core: the backend no longer emits the target_os fold this test rewrites
+        ("__builtin_strcmp(\"windows\", \"windows\")"); the check is void until it is updated
+  ```
+
+  Both spellings are now accepted and normalised to the Linux reading, and
+  the void-check is kept in the stronger form: after normalisation NO fold
+  may still read `"windows"`, so the test fails loudly rather than quietly
+  measuring nothing. On a Linux build the replacement is a no-op, which is
+  exactly right 鈥?that object already IS the Linux object.
+
+  Worth stating plainly: the "the check is void" assertion did its job. It
+  caught a pin that would have been silently meaningless on half the CI
+  matrix, which is precisely the failure mode it was written to prevent.
+
+- **The probe's stdlib resolution is now pinned** with `AOXN_STDLIB` rather
+  than relying on another test in the same binary having set it first. Tests
+  in one binary share a process, and their order is not a contract.
+
+- Documented the one way this scan can mislead: it covers the whole object,
+  so a *string literal* naming a Win32 API would false-positive. The case
+  list is exact-cased on purpose (`http.ax`'s platform-error text says
+  "WinHTTP", which does not match "WinHttp"), and every "WinHttp" occurrence
+  in the emitted C was checked to be a real prototype or call, not text.
+
+
 ## [0.50.7] - 2026-10-10
 
 ### Fixed

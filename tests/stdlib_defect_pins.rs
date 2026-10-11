@@ -375,6 +375,9 @@ fn dual_platform_modules_reference_no_foreign_platform_symbols() {
         eprintln!("skipping: clang not found (set AOXN_CLANG or add clang to PATH)");
         return;
     };
+    // the probes import stdlib modules BY NAME, so pin the resolution
+    // rather than relying on another test in this binary having set it
+    std::env::set_var("AOXN_STDLIB", abs("stdlib"));
     let dir = std::env::temp_dir().join(format!("aoxn-linuxsim-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
 
@@ -428,15 +431,26 @@ def main() -> int:
         let c = aoxn::compile_paths_to_c(&[ax.display().to_string()], true)
             .unwrap_or_else(|d| panic!("{name}: emit failed: {d:?}"));
 
-        // perform the fold a Linux build would
+        // Normalise every target_os fold to the LINUX reading. The backend
+        // spells the second argument with THIS build's own OS name, so the
+        // text is ("windows","windows") on a Windows build and
+        // ("windows","linux") on a Linux one — on Linux the fold has already
+        // been performed for us and the replacement is a no-op, which is
+        // exactly right: that object IS the Linux object.
         let windows = r#"__builtin_strcmp("windows", "windows")"#;
         let linux = r#"__builtin_strcmp("windows", "linux")"#;
         assert!(
-            c.contains(windows),
-            "{name}: the backend no longer emits the target_os fold this test \
-             rewrites ({windows:?}); the check is void until it is updated"
+            c.contains(windows) || c.contains(linux),
+            "{name}: the backend no longer emits a target_os fold this test \
+             recognises (looked for {windows:?} or {linux:?}); the check is \
+             void until it is updated"
         );
         let simulated = c.replace(windows, linux);
+        assert!(
+            !simulated.contains(windows),
+            "{name}: a target_os fold still reads \"windows\" after \
+             normalisation — the check would be measuring nothing"
+        );
 
         let cpath = dir.join(format!("{name}_linux.c"));
         std::fs::write(&cpath, simulated).unwrap();
@@ -452,8 +466,13 @@ def main() -> int:
             .expect("failed to run clang");
         assert!(status.success(), "{name}: clang refused the simulated C");
         let bytes = std::fs::read(&obj).expect("object");
-        // symbol names sit in the object's string table in plain bytes on
-        // both COFF and ELF, so a substring scan needs no nm/objdump
+        // Symbol names live in the object's string table in plain bytes on both
+        // COFF and ELF, so a substring scan needs no nm/objdump. The scan
+        // covers the WHOLE object, so a STRING LITERAL naming a Win32 API
+        // would false-positive - the case list is deliberately exact-cased
+        // (http.ax's platform-error text says "WinHTTP", which does not match
+        // "WinHttp"), and a failure here is immediately traceable by grepping
+        // the emitted C, which the message points at.
         let text = String::from_utf8_lossy(&bytes).into_owned();
         for sym in FOREIGN {
             assert!(
