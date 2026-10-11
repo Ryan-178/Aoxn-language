@@ -2722,6 +2722,69 @@ fn c_text_is_opt_level_independent() {
     assert_eq!(o2, o3, "O2 C text should match O3 C text");
 }
 
+/// The generated C must be a pure function of the SOURCE, and that has to hold
+/// across PROCESSES too: the self-host fixed point compares two compilers, and
+/// a build log that saw two different files for one tree is simply wrong.
+///
+/// The array-replication helper used to be named after the `Expr`'s HEAP
+/// ADDRESS, so the address was pasted straight into the emitted C. Six runs of
+/// `aoxn c` over an unchanged tree produced six distinct files. Nothing inside
+/// the process could have caught it: the allocator hands the same address back
+/// for the same node, so an in-process comparison passes while the bug is live.
+/// The helper definitions were stored in a map keyed by that address as well,
+/// so their ORDER was random too and the non-determinism reached the output
+/// even when only one site existed.
+#[test]
+fn c_text_is_stable_across_processes() {
+    let base = std::env::temp_dir().join(format!("aoxn-det-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&base);
+    std::fs::create_dir_all(&base).unwrap();
+    let prog = base.join("prog.ax");
+    std::fs::write(
+        &prog,
+        "def main() -> int:\n    a: [int; 4] = [7] * 4\n    b: [int; 3] = [9] * 3\n    print(a[0] + b[0])\n    return 0\n",
+    )
+    .unwrap();
+
+    let emit = || -> String {
+        let out = Command::new(env!("CARGO_BIN_EXE_aoxn"))
+            .arg("c")
+            .arg(&prog)
+            .output()
+            .expect("failed to run aoxn c");
+        assert!(out.status.success(), "aoxn c failed: {}", String::from_utf8_lossy(&out.stderr));
+        String::from_utf8(out.stdout).expect("C text is not UTF-8")
+    };
+
+    let first = emit();
+    for i in 0..4 {
+        assert_eq!(
+            emit(),
+            first,
+            "run {} of the same binary over one unchanged source produced different C",
+            i + 2
+        );
+    }
+
+    // Sites are numbered in FIRST-USE order, which is the spelling
+    // `selfhost/codegen.ax` produces from its `g.repn` counter. Pinning the
+    // mapping (not just the existence of the names) is what keeps the two
+    // emitters agreeing: stage-1 used to invent an address here while stage-2
+    // counted, so no program using `[X] * N` could ever have passed the fixed
+    // point -- it simply had never been written.
+    let helper_line = |name: &str| -> String {
+        first
+            .lines()
+            .find(|l| l.contains(&format!("ax_rep_{name}(")))
+            .unwrap_or_else(|| panic!("no ax_rep_{name} helper in the emitted C:\n{first}"))
+            .to_string()
+    };
+    assert!(helper_line("0").contains("ax_a_i_4"), "first site in the source should be helper 0, got: {}", helper_line("0"));
+    assert!(helper_line("1").contains("ax_a_i_3"), "second site in the source should be helper 1, got: {}", helper_line("1"));
+
+    let _ = std::fs::remove_dir_all(&base);
+}
+
 #[test]
 fn dependency_files_follows_import_chain() {
     let base = std::env::temp_dir().join(format!("aoxn-deps-{}", std::process::id()));

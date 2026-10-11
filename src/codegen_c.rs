@@ -278,8 +278,19 @@ struct GenC<'a> {
     dict_structs: BTreeMap<String, Type>,
     /// user `extern def` declarations, deduped by C name
     extern_decls: BTreeMap<String, String>,
-    /// per-replication-site fill helper: node address -> rendered text
+    /// per-replication-site fill helper: ASSIGNED NUMBER -> rendered text.
+    /// Keyed by the number rather than by the site so that iterating this map
+    /// (in `assemble`) yields first-use order — the order the self-hosted
+    /// emitter uses. Keying it by anything derived from a memory address put
+    /// the helper definitions in an arbitrary order that changed per process.
     rep_helpers: BTreeMap<usize, String>,
+    /// replication site -> the helper number assigned to it: literal id ->
+    /// number. This is the "one helper per site" dedupe. It used to be keyed
+    /// by the `Expr`'s heap address, which is what made the generated C
+    /// differ between two runs of the same compiler.
+    rep_sites: BTreeMap<usize, usize>,
+    /// next replication helper number (`ax_rep_0`, `ax_rep_1`, ...)
+    rep_count: usize,
     reserved: HashSet<String>,
     /// variables narrowed by `is None` (v0.40.0): name -> the type the CURRENT
     /// branch sees. Latched while a branch is emitted, popped after it.
@@ -327,6 +338,8 @@ impl<'a> GenC<'a> {
             dict_structs: BTreeMap::new(),
             extern_decls: BTreeMap::new(),
             rep_helpers: BTreeMap::new(),
+            rep_sites: BTreeMap::new(),
+            rep_count: 0,
             narrowed: HashMap::default(),
             fn_raises: compute_fn_raises(program),
             catch_labels: Vec::new(),
@@ -1092,9 +1105,19 @@ fn block_returns_all(block: &Block) -> bool {
         // its unwind exit. Raise/Try manage their own control flow and a
         // Return hands the flag to the caller's check.
         let skip = matches!(stmt, Stmt::Try { .. } | Stmt::Raise { .. } | Stmt::Return { .. });
-        if !skip && self.stmt_may_raise(stmt) {
+        if !skip {
+            // Test for an unwind target BEFORE walking the statement. With no
+            // target the check below can never emit anything, so walking first
+            // was a second full traversal of every expression in the program:
+            // pure waste for the many programs with no `raise` and no `try`,
+            // where both lists stay empty for the whole function (and
+            // `fn_raises` is only consulted inside `expr_may_raise`). The
+            // condition is unchanged, so the line is emitted on exactly the
+            // same statements as before.
             if let Some(target) = self.catch_labels.last().cloned().or_else(|| self.exit_label.clone()) {
-                self.line(indent, &format!("if (ax_err_pending) {{ goto {target}; }}"));
+                if self.stmt_may_raise(stmt) {
+                    self.line(indent, &format!("if (ax_err_pending) {{ goto {target}; }}"));
+                }
             }
         }
         Ok(())
@@ -1733,24 +1756,49 @@ fn block_returns_all(block: &Block) -> bool {
                 self.out.push_str("}}");
                 Ok(arr_ty)
             }
-            Expr::ArrayRep { elem, count, pos: _, lit_id: _ } => {
+            Expr::ArrayRep { elem, count, pos: _, lit_id } => {
                 let elem_ty = self.hint(elem)?;
                 let arr_ty = Type::Array { elem: Box::new(elem_ty.clone()), len: *count };
                 let ct = self.c_type(&arr_ty);
-                let key = expr as *const Expr as usize;
-                if !self.rep_helpers.contains_key(&key) {
-                    let ed = self.c_decl(&elem_ty, "ax_v");
-                    let helper = format!(
-                        "static {ct} ax_rep_{key}({ed}) {{\n    \
-                         {ct} ax_r;\n    \
-                         for (long long ax_i = 0; ax_i < {count}LL; ax_i++) {{\n        \
-                         ax_r.data[ax_i] = ax_v;\n    \
-                         }}\n    \
-                         return ax_r;\n}}"
-                    );
-                    self.rep_helpers.insert(key, helper);
-                }
-                self.out.push_str(&format!("ax_rep_{key}("));
+                // One helper per replication SITE, numbered in first-use order.
+                //
+                // The site used to be identified by the `Expr`'s HEAP ADDRESS,
+                // and the address was pasted straight into the helper's C name.
+                // That made the generated C differ between two runs of the same
+                // compiler on the same input (six runs of `aoxn c` over an
+                // unchanged tree produced six distinct files), and it also put
+                // the helper definitions in address order, so the
+                // non-determinism reached the output even for a single site.
+                // That breaks the self-host fixed point by construction: stage-1
+                // and stage-2 would spell different helper names for one
+                // program. The self-hosted emitter has always numbered its
+                // helpers from a plain counter here (`g.repn`), so the two
+                // emitters never agreed on this naming in the first place.
+                //
+                // `lit_id` is the id the parser hands the literal, counted out
+                // in source order, so it identifies a site the same way
+                // `selfhost/codegen.ax` identifies one by its arena node id.
+                let existing = self.rep_sites.get(lit_id).copied();
+                let num = match existing {
+                    Some(n) => n,
+                    None => {
+                        let n = self.rep_count;
+                        self.rep_count = n + 1;
+                        self.rep_sites.insert(*lit_id, n);
+                        let ed = self.c_decl(&elem_ty, "ax_v");
+                        let helper = format!(
+                            "static {ct} ax_rep_{n}({ed}) {{\n    \
+                             {ct} ax_r;\n    \
+                             for (long long ax_i = 0; ax_i < {count}LL; ax_i++) {{\n        \
+                             ax_r.data[ax_i] = ax_v;\n    \
+                             }}\n    \
+                             return ax_r;\n}}"
+                        );
+                        self.rep_helpers.insert(n, helper);
+                        n
+                    }
+                };
+                self.out.push_str(&format!("ax_rep_{num}("));
                 self.emit_expr_inner(elem)?;
                 self.out.push(')');
                 Ok(arr_ty)
@@ -2153,9 +2201,16 @@ fn block_returns_all(block: &Block) -> bool {
             }
             return Err(format!("internal error: unknown callable '{name}' at codegen"));
         }
-        let (c_name, ret, params) = {
+        // Borrow the signature instead of deep-cloning it. `sig.params.clone()`
+        // copied the WHOLE Vec<Type> at every call site (and a Vec<Type> is
+        // deep: a FnPtr element clones its own parameter vector too) only for
+        // the loop to index it. NLL ends the borrow after the three reads
+        // below, so each argument can still be read on demand, which is what
+        // the old `params.get(i).cloned()` already did. Output is unchanged:
+        // same parameter types, same coercion decisions, same bytes.
+        let (c_name, ret, nparams) = {
             let sig = &self.sigs[name];
-            (sig.c_name.clone(), sig.ret.clone(), sig.params.clone())
+            (sig.c_name.clone(), sig.ret.clone(), sig.params.len())
         };
         self.out.push_str(&c_name);
         self.out.push('(');
@@ -2163,7 +2218,11 @@ fn block_returns_all(block: &Block) -> bool {
             if i > 0 {
                 self.out.push_str(", ");
             }
-            let want = params.get(i).cloned();
+            let want = if i < nparams {
+                Some(self.sigs[name].params[i].clone())
+            } else {
+                None
+            };
             match want {
                 Some(w) => {
                     self.emit_coerced(&a.value, &w)?;

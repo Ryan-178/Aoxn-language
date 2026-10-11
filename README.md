@@ -49,7 +49,7 @@ def main() -> int:
 
 ### Install (one file, Windows)
 
-Download **`Aoxn-0.50.9-Setup.exe`** from the
+Download **`Aoxn-..5..9-Setup.exe`** from the
 [releases page](https://github.com/AlonechatWorkspace/Aoxn-language/releases)
 and double-click it. That single executable carries the compiler, the
 standard library, the UI toolkit and the examples — nothing else to download,
@@ -619,7 +619,7 @@ program. It also compiles the real stdlib and the full `examples/` suite. See
 
 ## Testing & CI
 
-`cargo test` runs the end-to-end suite — **292 tests** in the compiler
+`cargo test` runs the end-to-end suite — **999 tests** in the compiler
 workspace (pipeline 154, compiler unit tests 18, installer stub 3, TypeScript
 front end 34, UI 14, install layout 6, CSS assets 21, CSS assets v0.36 18,
 symbol export 8, OpenAI SDK 2, Anthropic SDK 2, and one driver test per
@@ -768,8 +768,41 @@ Full reference, including limits: [`docs/css-assets.md`](docs/css-assets.md).
 
 ## Status
 
-**v0.50.8** · **the v0.50.7 Linux-simulation pin only worked on Windows** ·
-385 tests green (292 in the compiler workspace + 94 in `aoxn-pkg`; the IDE
+**v0.50.10** · **`aoxn c` was not reproducible: the array-replication helper was named after a heap address** ·
+386 tests green (293 in the compiler workspace + 94 in `aoxn-pkg`; the IDE
+adds 36 Rust + 62 frontend tests of its own) ·
+
+**six runs, six different files.** `[X] * N` emitted its `static` fill helper
+under a C identifier built from the `Expr`'s heap address, so the address went
+straight into the generated C. The helper table was keyed by that address too,
+so even the *order* the definitions appeared in was random, and the
+non-determinism reached the output even for a single site ·
+
+**the two backends never agreed on this naming in the first place.**
+`selfhost/codegen.ax` has always numbered these from a plain counter (`g.repn`
+→ `ax_rep_0`, `ax_rep_1`, … in first-use order) while the Rust backend invented
+an address, so **no program using array replication could ever have passed the
+fixed point**. It simply had never been written. Sites are now identified by
+`lit_id`, the id the parser hands a literal in source order, and numbered in
+first-use order — the spelling the self-hosted emitter already produced ·
+
+**the test that claims to guard backend agreement was comparing selfhost
+against itself.** `selfhost_driver_self_compiles` builds the same driver twice
+and compares the C they emit, but the driver is an Aoxn program that imports
+`selfhost/driver.ax`, so **both** stages emit through `selfhost/codegen.ax`.
+`src/codegen_c.rs` is never compared against it. That is exactly how the
+address-named helper survived. (The two do currently diverge on `extern def`
+declaration order — Rust sorts by C name, the self-hosted emitter keeps
+first-use order. Both are individually deterministic, so it is a gap in what
+the fixed point *proves*, not a live correctness bug.) ·
+
+**the pin that catches this has to cross a process boundary.** Inside one
+process the allocator hands the same address back for the same node, so an
+in-process comparison passes happily while the bug is live. The test runs the
+binary five times in five separate processes and requires byte-identical C ·
+
+**the previous milestone** (v0.50.8) — **the v0.50.7 Linux-simulation pin only worked on Windows** ·
+386 tests green (293 in the compiler workspace + 94 in `aoxn-pkg`; the IDE
 adds 36 Rust + 62 frontend tests of its own) ·
 
 **the pin that checks Linux from Windows was itself half-blind.** It rewrote
@@ -1081,7 +1114,7 @@ Apache-2.0 — see [`LICENSE`](LICENSE).
 ### 一个 exe 装全部（Windows）
 
 从 [releases 页面](https://github.com/AlonechatWorkspace/Aoxn-language/releases)
-下载 **`Aoxn-0.50.9-Setup.exe`**，双击即可。**这一个 exe 里就带着编译器、标准库、
+下载 **`Aoxn-..5..9-Setup.exe`**，双击即可。**这一个 exe 里就带着编译器、标准库、
 UI 工具箱和示例程序**——不用再下载别的，也不用自己解压：
 
 ```console
@@ -1493,7 +1526,7 @@ Web 服务同样能打：[`web/`](web/README.md) 套件用 Aoxn 写了 HTTP/1.1 
 
 ## 测试与 CI
 
-`cargo test` 跑端到端测试套件——编译器工作区 **292 个**（pipeline 154、编译器
+`cargo test` 跑端到端测试套件——编译器工作区 **999 个**（pipeline 154、编译器
 单元测试 18、安装器 stub 3、TypeScript 前端 34、UI 14、安装布局 6、CSS 资产
 21、CSS 资产 v0.36 18、符号导出 8、OpenAI SDK 2、Anthropic SDK 2，以及
 v0.44.0 标准库模块组各一个驱动测试：hashlib、math、pathlib、
@@ -1621,8 +1654,41 @@ print(asset_path(styles_fingerprint()))   # …\assets\82b4fb25….css
 
 ## 现状
 
-**v0.50.8** · **v0.50.7 那个「在 Windows 上检查 Linux」的钉子只在 Windows 上有效** ·
-385 测试全绿（编译器工作区 292 + `aoxn-pkg` 94；IDE 另有 36 个 Rust + 62 个前端测试）·
+**v0.50.10** · **`aoxn c` 不可复现：数组复制辅助函数拿堆地址当名字** ·
+386 测试全绿（编译器工作区 293 + `aoxn-pkg` 94；IDE 另有 36 个 Rust + 62 个前端测试）·
+
+**跑六次，出六个不一样的文件。** `[X] * N` 生成的 `static` 填充辅助函数，其 C
+标识符是用 `Expr` 的**堆地址**拼的，于是地址直接进了生成的 C。辅助函数表也用这个
+地址做键，所以连定义**出现的顺序**都是随机的——即使只有一个站点，非确定性也会
+进到输出里 ·
+
+**两个后端在命名上从来就没一致过。** `selfhost/codegen.ax` 一直用普通计数器编号
+（`g.repn` → `ax_rep_0`、`ax_rep_1`，按首次使用顺序），而 Rust 后端在编地址。
+所以**任何用了数组复制的程序都不可能通过固定点**——只是从来没人写过这种程序。
+现在站点由 `lit_id`（parser 按源码顺序分配给字面量的 id）标识，并按首次使用顺序
+编号——正是自举发射器早就在用的拼写 ·
+
+**那个声称守护后端一致性的测试，其实是在拿自举和自己比。**
+`selfhost_driver_self_compiles` 把同一个 driver 构建两次并对比它们生成的 C，
+但 driver 本身是个 Aoxn 程序、导入 `selfhost/driver.ax`，所以**两个阶段都是**
+经由 `selfhost/codegen.ax` 发射的。`src/codegen_c.rs` 从头到尾没跟它对比过。
+地址命名的辅助函数就是这么活下来的。（两者目前在 `extern def` 声明顺序上确实
+不同——Rust 按 C 名字排序，自举侧保持首次使用顺序。各自都是确定的，所以这是
+"固定点**证明了什么**"的缺口，不是活的正确性 bug。）·
+
+**能抓住它的钉子必须跨进程。** 同一个进程内分配器会把同一地址还回来，所以进程内
+比较会在 bug 还在的情况下顺利通过。这个测试把二进制在五个独立进程里跑五次，
+要求 C 逐字节一致 ·
+
+**v0.50.9** · **那根折叠钉子第二次在 Linux 上跑不起来** ·
+它的存在是为了从 Windows 上检查 Linux 连通性。但折叠 `target_os()` 时后端用的是
+**构建主机**的名字，而且放在**第一个**参数上——所以 Windows 上文本是
+`("windows","windows")`，Linux 上是 `("linux","windows")`。钉子是照着 Windows
+构建写的，于是"修"成了补上作者**能想象到**的另一种拼写，而且只补了一种。
+**永远不要猜另一个平台会输出什么：去推导它** ·
+
+**上一个里程碑**（v0.50.8）—— **v0.50.7 那个「在 Windows 上检查 Linux」的钉子只在 Windows 上有效** ·
+386 测试全绿（编译器工作区 293 + `aoxn-pkg` 94；IDE 另有 36 个 Rust + 62 个前端测试）·
 
 **那个用来在 Windows 上检查 Linux 的钉子自己也是半盲的。** 它把
 `__builtin_strcmp("windows", "windows")` 改写成 `"linux"`，并断言这个模式存在——

@@ -5,6 +5,94 @@ minor bumps while pre-1.0: each minor version is a language milestone.
 
 ## [Unreleased]
 
+## [0.50.10] - 2026-10-11
+
+### Fixed
+
+- **`aoxn c` was not reproducible: the array-replication helper was named
+  after the `Expr`'s heap address.** `[X] * N` emitted a `static` fill helper
+  whose C identifier was the heap address of the `Expr` node
+  (`codegen_c.rs`: `let key = expr as *const Expr as usize;`), so the address
+  was pasted straight into the generated C. Six runs of `aoxn c` over an
+  unchanged tree produced six distinct files. The helper table was also keyed
+  by that address, so the order the definitions were written in was random
+  too, and the non-determinism reached the output even for a single site.
+
+  This is a fixed-point hazard, not a cosmetic one: stage-1 and stage-2 would
+  spell different helper names for one program. In fact the two emitters
+  **never agreed on this naming in the first place** —
+  `selfhost/codegen.ax` has always numbered its helpers from a plain counter
+  (`g.repn`, `ax_rep_0`, `ax_rep_1`, ... in first-use order) while the Rust
+  backend invented an address. Sites are now identified by `lit_id`, the id the
+  parser hands a literal and counts out in source order, and numbered from a
+  counter in first-use order — the spelling the self-hosted emitter already
+  produces. Both emitters now emit `ax_rep_0` for the same program.
+
+  Pinned by `c_text_is_stable_across_processes` in `tests/pipeline.rs`, which
+  runs the binary **five times in five separate processes** and requires
+  byte-identical C. The cross-process part is the whole point: inside one
+  process the allocator hands the same address back for the same node, so an
+  in-process comparison passes happily while the bug is live. The test also
+  pins the first-use mapping (helper 0 must be the first site in the source),
+  which is the part that could otherwise drift silently. Verified to fail on
+  the original code.
+
+- **`aoxn c` had no codegen timer at all.** `finish_to_object` wrapped
+  codegen in `timed("codegen", ...)`; the `finish_to_c` arm did not. The one
+  command whose entire job IS codegen was the one command you could not
+  measure. Wrapping it changes stderr only, never the C text.
+
+### Changed
+
+- Two constant-factor reductions in `codegen_c.rs`, from a structural audit:
+  the `ax_err_pending` propagation check now tests for an unwind target
+  **before** walking the statement (with no target it could never emit
+  anything, so a program containing no `raise` and no `try` was paying a
+  second full traversal of every expression for nothing), and `emit_call` no
+  longer deep-clones the whole `Vec<Type>` parameter vector at every call
+  site. **No measurable speedup** — an interleaved 9-round A/B on the largest
+  program in the repo could not separate them from the noise floor (this
+  machine's codegen phase ranges over 14.7-34.7 ms run to run). They are kept
+  because they are strictly less work and provably byte-identical: eleven
+  programs spanning the stdlib, the UI toolkit, dict, fn-ptr, None and raise
+  all hash unchanged, and the fixed-point test passes.
+
+### Documented
+
+- **The fixed-point test does not compare the two codegen implementations.**
+  `selfhost_driver_self_compiles` builds the same driver twice (once with the
+  Rust compiler, once with the Aoxn-built one) and compares the C they emit —
+  but the driver is an Aoxn program that imports `selfhost/driver.ax`, so
+  **both** stages emit through `selfhost/codegen.ax`. `src/codegen_c.rs` is
+  never compared against `selfhost/codegen.ax` at all. That is exactly how the
+  address-named helper survived: the test that claims to guard the backend
+  agreement was comparing selfhost against itself.
+
+  The two emitters do currently diverge: the Rust backend sorts `extern def`
+  declarations by C name, while the self-hosted emitter keeps first-use
+  order. Both are individually deterministic, so this is not a correctness
+  bug today — it is a gap in what the fixed point actually proves. Closing it
+  is future work (it means a stage-1-vs-stage-2 C comparison, and reordering
+  the self-hosted emitter's extern table).
+
+### Measured
+
+- Where `aoxn c` actually spends its time on `selfhost/driver_self_demo.ax`,
+  for anyone tuning the backend (best of 9, output discarded):
+
+  | stage | ms | share of real compiler work |
+  | --- | --- | --- |
+  | process startup | 51.6 | 45% |
+  | load_program | 36.2 | 32% |
+  | **codegen** | **17.9** | **16%** |
+  | parse / lex / typecheck | 16.5 | 14% |
+
+  Real compiler work is ~115 ms; codegen is ~16% of it. Two measurement traps
+  found while establishing this: piping the ~526 KB of C through PowerShell's
+  `Out-String` costs ~275 ms, which is **more than the entire compile** and is
+  easy to mistake for compiler time; and the phases above are only visible at
+  all now that `finish_to_c` reports codegen.
+
 ## [0.50.9] - 2026-10-11
 
 ### Fixed

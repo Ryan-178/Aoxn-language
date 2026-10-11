@@ -290,7 +290,11 @@ fn finish_to_c(program: Program, _opt_level: u8) -> Result<String, Vec<Diag>> {
     let mut program = program;
     program.funcs.retain(|f| f.type_params.is_empty());
     program.funcs.extend(out.instances);
-    codegen_c::generate_c_text(&program, &out.call_map).map_err(|m| vec![Diag::internal(m)])
+    // `aoxn c` had no codegen timer at all — finish_to_object wraps it and
+    // this arm did not, so the one command whose whole job IS codegen could
+    // not be measured. Wrapping it changes stderr only, never the C text.
+    timed("codegen", || codegen_c::generate_c_text(&program, &out.call_map))
+        .map_err(|m| vec![Diag::internal(m)])
 }
 
 /// source-code based entry (no import resolution; imports are an error)

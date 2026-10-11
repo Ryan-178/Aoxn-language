@@ -348,6 +348,38 @@ crates/aoxn-pkg       package manager crate (its own dependency set; see above)
   byte-identical C AND byte-identical objects for the same program (the
   fixed point); the only tolerated object difference is the COFF timestamp
   the test masks.
+- **No address may reach the emitted text — the C must be reproducible ACROSS
+  PROCESSES, not just within one.** `aoxn c` on an unchanged tree has to
+  produce the same bytes on every run, because the build cache keys on them,
+  the fixed point compares them, and a build log that saw two files for one
+  source is simply wrong. v0.50.10: the `[X] * N` fill helper was named
+  `ax_rep_<Expr heap address>`, so six runs produced six different files, and
+  the helper TABLE was keyed by that address too — which made the order of the
+  definitions random as well, so even a single site was non-deterministic.
+  Sites are now keyed by `lit_id` (the parser's source-ordered literal id) and
+  numbered by a first-use counter, which is what `selfhost/codegen.ax` has
+  always done (`g.repn`). **A pin for this class of bug MUST cross a process
+  boundary**: inside one process the allocator hands the same address back for
+  the same node, so an in-process comparison passes happily while the bug is
+  live. `c_text_is_stable_across_processes` in `tests/pipeline.rs` runs the
+  binary five times in five separate processes for exactly that reason, and it
+  also pins the first-use mapping (helper 0 must be the first site in the
+  source) — the part that could otherwise drift silently. When you add a
+  generated C identifier, ask what it is derived from: **a counter, a source
+  position or a name — never `as *const T as usize`.**
+- **The fixed point compares selfhost against selfhost for the driver's own
+  product; it does NOT compare `src/codegen_c.rs` against
+  `selfhost/codegen.ax`.** `selfhost_driver_self_compiles` builds the same
+  driver twice (once with the Rust compiler, once with the Aoxn-built one) and
+  diffs the C they emit — but the driver is an Aoxn program importing
+  `selfhost/driver.ax`, so BOTH stages emit through `selfhost/codegen.ax`.
+  That is exactly how the address-named helper above survived for years, and
+  the two emitters DO currently diverge: the Rust backend sorts `extern def`
+  declarations by C name while the self-hosted emitter keeps first-use order.
+  Both are individually deterministic, so this is a gap in what the fixed point
+  *proves*, not a live correctness bug — but do not read a green
+  `selfhost_driver_self_compiles` as "the two backends agree on emitted C".
+  Closing it means a genuine stage-1-vs-stage-2 C comparison.
 - `target_os()` is a compile-time builtin folding the OS the compiler was
   BUILT on: `"windows"` on a Windows build, `"linux"` on a Linux build
   (v0.46.0), `"other"` elsewhere. **Both** compilers must fold the same
