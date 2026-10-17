@@ -380,7 +380,7 @@ impl Parser {
             };
             self.eat(&Tok::Colon)?;
             let ty = self.ty()?;
-            fields.push(Param { name: fname, ty, pos: fpos });
+            fields.push(Param { name: fname, ty, pos: fpos, default: None });
             if *self.peek() == Tok::Newline {
                 self.bump();
             }
@@ -430,7 +430,18 @@ impl Parser {
                 };
                 self.eat(&Tok::Colon)?;
                 let ty = self.ty()?;
-                params.push(Param { name: pname, ty, pos: ppos });
+                // `def f(x: int = 3)` (v0.51.0). The default is an ordinary
+                // expression, parsed in the enclosing (module) scope — a
+                // parameter's own name is not in scope inside it, which is
+                // Python's rule and keeps "a default can only mention
+                // parameters declared before it" true by construction.
+                let default = if *self.peek() == Tok::Assign {
+                    self.bump();
+                    Some(Box::new(self.expr()?))
+                } else {
+                    None
+                };
+                params.push(Param { name: pname, ty, pos: ppos, default });
                 match self.peek() {
                     Tok::Comma => {
                         self.bump();
@@ -838,8 +849,27 @@ impl Parser {
 
     // ---- expressions, precedence climbing ----
 
+    /// Python's expression grammar, lowest precedence first:
+    /// `or_test ["if" or_test "else" expression]` — so `if`/`else` binds
+    /// looser than every operator, and the `else` branch is a full
+    /// expression, which makes the form nest to the RIGHT
+    /// (`a if c else b if d else e` reads as Python reads it).
+    /// Both words are real keyword tokens here (`Tok::If` / `Tok::Else`),
+    /// so no identifier has to be reserved for this form.
     fn expr(&mut self) -> Result<Expr, Diag> {
-        self.or_expr()
+        let then_expr = self.or_expr()?;
+        if *self.peek() != Tok::If {
+            return Ok(then_expr);
+        }
+        let pos = self.pos();
+        self.bump(); // 'if'
+        let cond = self.or_expr()?;
+        if *self.peek() != Tok::Else {
+            return Err(self.perr(self.pos().line, self.pos().col, "expected 'else' after the condition of a conditional expression"));
+        }
+        self.bump();
+        let else_expr = self.expr()?;
+        Ok(Expr::IfExp { then_expr: Box::new(then_expr), cond: Box::new(cond), else_expr: Box::new(else_expr), pos })
     }
 
     fn or_expr(&mut self) -> Result<Expr, Diag> {
@@ -1011,7 +1041,7 @@ impl Parser {
     }
 
     fn mul_expr(&mut self) -> Result<Expr, Diag> {
-        let mut lhs = self.unary_expr()?;
+        let mut lhs = self.pow_expr()?;
         loop {
             // `//` is Python's integer division; Aoxn's `/` already truncates
             // on two ints, so the two spellings share one operator
@@ -1023,7 +1053,7 @@ impl Parser {
             };
             let pos = self.pos();
             self.bump();
-            let rhs = self.unary_expr()?;
+            let rhs = self.pow_expr()?;
             // Python-style array replication: [e] * N  (or N * [e])
             let rep: Option<(Expr, usize)> = if allow_rep {
                 match (&lhs, &rhs) {
@@ -1046,6 +1076,20 @@ impl Parser {
             lhs = Expr::Binary { op, lhs: Box::new(lhs), rhs: Box::new(rhs), pos };
         }
         Ok(lhs)
+    }
+
+    /// `**` sits between unary and `*`, exactly as in Python's grammar
+    /// (`factor: ("+"|"-"|"~") factor | power`), so `-2 ** 2` is `-(2 ** 2)`
+    /// and NOT `(-2) ** 2`. Right-associative: `2 ** 3 ** 2` is 2 ** 9.
+    fn pow_expr(&mut self) -> Result<Expr, Diag> {
+        let lhs = self.unary_expr()?;
+        if *self.peek() != Tok::PowStar {
+            return Ok(lhs);
+        }
+        let pos = self.pos();
+        self.bump();
+        let rhs = self.pow_expr()?;
+        Ok(Expr::Binary { op: BinOp::Pow, lhs: Box::new(lhs), rhs: Box::new(rhs), pos })
     }
 
     fn unary_expr(&mut self) -> Result<Expr, Diag> {

@@ -168,6 +168,11 @@ pub struct Param {
     pub name: String,
     pub ty: Type,
     pub pos: Pos,
+    /// `def f(x: int = 3)` (v0.51.0). The default is MATERIALIZED BY THE CALLER:
+    /// the C signature keeps every parameter, so a program that spells no
+    /// default emits byte-identical C. `None` on struct fields and on every
+    /// parameter that has none.
+    pub default: Option<Box<Expr>>,
 }
 
 #[derive(Debug, Clone)]
@@ -253,6 +258,9 @@ pub enum BinOp {
     Add,
     Sub,
     Mul,
+    /// `**` — power (v0.51.0). Two ints give an int (exponentiation by
+    /// squaring, exponent < 0 yields 0), two floats give a float.
+    Pow,
     Div,
     Mod,
     Shl,
@@ -300,6 +308,10 @@ pub enum Expr {
     Unary { op: UnOp, expr: Box<Expr>, pos: Pos },
     Binary { op: BinOp, lhs: Box<Expr>, rhs: Box<Expr>, pos: Pos },
     Index { arr: Box<Expr>, idx: Box<Expr>, pos: Pos },
+    /// `then if cond else other` (v0.51.0) — Python's conditional
+    /// expression. Lowest precedence of any operator form; the `else` branch
+    /// is a full expression, so it nests to the right.
+    IfExp { then_expr: Box<Expr>, cond: Box<Expr>, else_expr: Box<Expr>, pos: Pos },
     Field { obj: Box<Expr>, name: String, pos: Pos },
     ArrayLit { elems: Vec<Expr>, lit_id: usize, pos: Pos },
     /// `[elem] * N` — single-element array replication (Python-style)
@@ -323,6 +335,7 @@ impl Expr {
             | Expr::Unary { pos, .. }
             | Expr::Binary { pos, .. }
             | Expr::Index { pos, .. }
+            | Expr::IfExp { pos, .. }
             | Expr::Field { pos, .. }
             | Expr::ArrayLit { pos, .. }
             | Expr::ArrayRep { pos, .. }

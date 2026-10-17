@@ -43,6 +43,24 @@ def net_cp_utf8(cp: int, p: int) -> int:
 
 # ---- UTF-8 -> UTF-16LE ----
 
+# sequence length announced by a UTF-8 lead byte, or 0 when the byte cannot
+# start one (a bare continuation byte 0x80..0xBF, or 0xF5..0xFF).
+#
+# `0xC0`/`0xC1` are rejected too: they can only ever encode an overlong
+# two-byte form of an ASCII code point.
+def net_utf8_len(b: int) -> int:
+    if b < 128:
+        return 1
+    if b < 194:
+        return 0
+    if b < 224:
+        return 2
+    if b < 240:
+        return 3
+    if b < 245:
+        return 4
+    return 0
+
 # write s as UTF-16LE (surrogate pairs included) at p; return BYTE count
 #
 # Same hoist as os.utf16_write's twin and ui.ax's v0.49.0 fix: the length
@@ -50,24 +68,64 @@ def net_cp_utf8(cp: int, p: int) -> int:
 # character (the stores below alias s as far as clang can tell, so the
 # strlen is NOT loop-invariant). Every wide-string parameter WinHTTP takes
 # comes through here via net_to_wide.
+#
+# SAFETY: the loop bound `i < sn` says NOTHING about the bytes AFTER `i`.
+# The first version read `i+1`..`i+3` unconditionally, so a buffer ending
+# in a lone `0xF0` read three bytes past its allocation — a heap read
+# overflow reachable from any untrusted file or network response that gets
+# widened (ASan: heap-buffer-overflow READ of size 1). Three checks now
+# stand between the lead byte and the tail: the announced length must fit,
+# every tail byte must be a real continuation byte, and the code point
+# must not be an overlong or surrogate form (an overlong two-byte `E0 80
+# 80` decodes to U+0000, which would plant a NUL in a header value).
+#
+# Anything malformed becomes U+FFFD and consumes ONLY the lead byte, so the
+# loop always makes progress — a rejected sequence can never become an
+# infinite loop, which is the other half of the bug.
 def net_utf16_write(s: string, p: int) -> int:
     i = 0
     n = 0
     sn = len(s)
     while i < sn:
         b = load_u8(s, i)
-        if b < 128:
-            cp = b
-            i = i + 1
-        elif b < 224:
-            cp = (b % 32) * 64 + load_u8(s, i + 1) % 64
-            i = i + 2
-        elif b < 240:
-            cp = (b % 16) * 4096 + (load_u8(s, i + 1) % 64) * 64 + load_u8(s, i + 2) % 64
-            i = i + 3
-        else:
-            cp = (b % 8) * 262144 + (load_u8(s, i + 1) % 64) * 4096 + (load_u8(s, i + 2) % 64) * 64 + load_u8(s, i + 3) % 64
-            i = i + 4
+        w = net_utf8_len(b)
+        bad = 0
+        if w < 1:
+            bad = 1
+        if w > 1 and i + w > sn:
+            bad = 1
+        k = i + 1
+        while k < i + w and bad == 0:
+            cb = load_u8(s, k)
+            if cb < 128 or cb > 191:
+                bad = 1
+            k = k + 1
+        cp = 65533
+        i = i + 1
+        if bad == 0:
+            if w == 1:
+                cp = b
+            if w == 2:
+                cp = (b % 32) * 64 + load_u8(s, i) % 64
+            if w == 3:
+                cp = (b % 16) * 4096 + (load_u8(s, i) % 64) * 64 + load_u8(s, i + 1) % 64
+            if w == 4:
+                cp = (b % 8) * 262144 + (load_u8(s, i) % 64) * 4096 + (load_u8(s, i + 1) % 64) * 64 + load_u8(s, i + 2) % 64
+            i = i + w - 1
+            # overlong / surrogate / out-of-range forms decode to something no
+            # valid UTF-8 can encode; treating them as malformed is cheaper
+            # than emitting a NUL or a surrogate half into a header
+            if w == 2 and cp < 128:
+                bad = 1
+            if w == 3 and cp < 2048:
+                bad = 1
+            if w == 4 and (cp < 65536 or cp > 1114111):
+                bad = 1
+            if cp >= 55296 and cp <= 57343:
+                bad = 1
+            if bad != 0:
+                cp = 65533
+                i = i - w + 1
         if cp >= 65536:
             v = cp - 65536
             hi = v / 1024 + 55296

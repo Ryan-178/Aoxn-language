@@ -256,6 +256,19 @@ struct JParse:
     err: int       # 0 = ok, 1 = failed (first error wins)
     errmsg: string
     res: int       # extra result channel (hex escape value, ...)
+    depth: int     # current nesting depth (v0.51.0) — see J_MAX_DEPTH
+
+# Recursion depth budget. `jp_arr`/`jp_obj` recurse through `jp_value`, so a
+# document that is nothing but `[` repeated N times burns N stack frames with
+# no parser state to stop it: 200 KB of nested arrays overflowed the stack
+# (Windows 0xC00000FD) and killed the process — an untrusted response or file
+# could take a program down. A real document never comes close: the CPython
+# default is 1000, and this limit is deliberately lower still, because a
+# generated C frame is larger than CPython's. Exceeding it is a normal
+# parse ERROR (`jp_fail`), not a crash, and the error text names the limit so
+# a caller who genuinely needs deeper input knows what to raise.
+def J_MAX_DEPTH() -> int:
+    return 200
 
 # The end-of-input test needs the source length, and `len()` on a string IS
 # strlen AT EVERY USE SITE (codegen emits __builtin_strlen inline). Testing it
@@ -288,10 +301,19 @@ def jp_ws(p: JParse) -> JParse:
 def jp_value(p: JParse) -> JParse:
     p = jp_ws(p)
     c = j_at(p)
-    if c == 123:
-        return jp_obj(p)
-    if c == 91:
-        return jp_arr(p)
+    if c == 123 or c == 91:
+        # the depth is raised and lowered around the RECURSIVE call, and the
+        # limit is checked before it — checking after would already have
+        # spent the frames that are the whole problem
+        if p.depth >= J_MAX_DEPTH():
+            return jp_fail(p, "JSON nested too deeply (limit is " + str(J_MAX_DEPTH()) + ")")
+        p.depth = p.depth + 1
+        if c == 123:
+            p = jp_obj(p)
+        else:
+            p = jp_arr(p)
+        p.depth = p.depth - 1
+        return p
     if c == 34:
         return jp_str(p)
     if c == 45 or (c >= 48 and c <= 57):
@@ -314,7 +336,7 @@ def jp_lit(p: JParse, word: string, kind: int, ival: int, fval: float) -> JParse
         p.pos = p.pos + 1
         i = i + 1
     dom = jdom_push(p.dom, kind, ival, fval, 0, 0)
-    return JParse(src=p.src, sn=p.sn, pos=p.pos, dom=dom, err=p.err, errmsg=p.errmsg, res=p.res)
+    return JParse(src=p.src, sn=p.sn, pos=p.pos, dom=dom, err=p.err, errmsg=p.errmsg, res=p.res, depth=p.depth)
 
 # ---- strings ----
 
@@ -375,7 +397,7 @@ def jp_str(p: JParse) -> JParse:
             p.pos = p.pos + 1
             store_u8(out, oi, 0)
             dom = jdom_push(p.dom, J_STR(), 0, 0.0, out, 0)
-            return JParse(src=p.src, sn=p.sn, pos=p.pos, dom=dom, err=p.err, errmsg=p.errmsg, res=p.res)
+            return JParse(src=p.src, sn=p.sn, pos=p.pos, dom=dom, err=p.err, errmsg=p.errmsg, res=p.res, depth=p.depth)
         if c == 92:
             p.pos = p.pos + 1
             e = j_at(p)
@@ -577,7 +599,7 @@ def jp_num(p: JParse) -> JParse:
     else:
         f = j_num_float(text)
         dom = jdom_push(p.dom, J_FLOAT(), 0, f, 0, 0)
-    return JParse(src=p.src, sn=p.sn, pos=p.pos, dom=dom, err=p.err, errmsg=p.errmsg, res=p.res)
+    return JParse(src=p.src, sn=p.sn, pos=p.pos, dom=dom, err=p.err, errmsg=p.errmsg, res=p.res, depth=p.depth)
 
 # ---- arrays ----
 
@@ -588,7 +610,7 @@ def jp_arr(p: JParse) -> JParse:
     if j_at(p) == 93:
         p.pos = p.pos + 1
         dom = jdom_push(p.dom, J_ARR(), kids.len, 0.0, kids.data, 0)
-        return JParse(src=p.src, sn=p.sn, pos=p.pos, dom=dom, err=p.err, errmsg=p.errmsg, res=p.res)
+        return JParse(src=p.src, sn=p.sn, pos=p.pos, dom=dom, err=p.err, errmsg=p.errmsg, res=p.res, depth=p.depth)
     while True:
         p = jp_value(p)
         if p.err == 1:
@@ -601,7 +623,7 @@ def jp_arr(p: JParse) -> JParse:
         elif c == 93:
             p.pos = p.pos + 1
             dom = jdom_push(p.dom, J_ARR(), kids.len, 0.0, kids.data, 0)
-            return JParse(src=p.src, sn=p.sn, pos=p.pos, dom=dom, err=p.err, errmsg=p.errmsg, res=p.res)
+            return JParse(src=p.src, sn=p.sn, pos=p.pos, dom=dom, err=p.err, errmsg=p.errmsg, res=p.res, depth=p.depth)
         else:
             return jp_fail(p, "expected ',' or ']' in array")
     # unreachable: every loop path returns; the checker needs a tail return
@@ -617,7 +639,7 @@ def jp_obj(p: JParse) -> JParse:
     if j_at(p) == 125:
         p.pos = p.pos + 1
         dom = jdom_push(p.dom, J_OBJ(), vals.len, 0.0, vals.data, keys.data)
-        return JParse(src=p.src, sn=p.sn, pos=p.pos, dom=dom, err=p.err, errmsg=p.errmsg, res=p.res)
+        return JParse(src=p.src, sn=p.sn, pos=p.pos, dom=dom, err=p.err, errmsg=p.errmsg, res=p.res, depth=p.depth)
     while True:
         p = jp_ws(p)
         if j_at(p) != 34:
@@ -641,7 +663,7 @@ def jp_obj(p: JParse) -> JParse:
         elif c == 125:
             p.pos = p.pos + 1
             dom = jdom_push(p.dom, J_OBJ(), vals.len, 0.0, vals.data, keys.data)
-            return JParse(src=p.src, sn=p.sn, pos=p.pos, dom=dom, err=p.err, errmsg=p.errmsg, res=p.res)
+            return JParse(src=p.src, sn=p.sn, pos=p.pos, dom=dom, err=p.err, errmsg=p.errmsg, res=p.res, depth=p.depth)
         else:
             return jp_fail(p, "expected ',' or '}' in object")
     # unreachable: every loop path returns; the checker needs a tail return
@@ -659,7 +681,7 @@ def j_parse(src: string) -> JParse:
 # SAME slab, so their child indices are already correct and no remapping is
 # needed. `p.dom.last` is the fragment's root.
 def j_parse_into(dom: JDom, src: string) -> JParse:
-    p = JParse(src=src, sn=len(src), pos=0, dom=dom, err=0, errmsg="", res=0)
+    p = JParse(src=src, sn=len(src), pos=0, dom=dom, err=0, errmsg="", res=0, depth=0)
     p = jp_value(p)
     if p.err == 1:
         return p
@@ -680,6 +702,11 @@ def j_parse_into(dom: JDom, src: string) -> JParse:
 # inside the window the fraction is extracted as one i64 (16 digits), rounded
 # to 15, and printed with the point inserted (trailing zeros trimmed).
 def j_fmt_f(f: float) -> string:
+    # NaN compares false against everything, so it fell through every range
+    # test below and reached `to_int` — undefined behaviour on a NaN. Python's
+    # json spells it the same way (`json.dumps(float('nan')) == 'NaN'`).
+    if f != f:
+        return "NaN"
     if f == 0.0:
         return "0"
     sign = ""
@@ -691,7 +718,16 @@ def j_fmt_f(f: float) -> string:
         # above i64 range: exponent spelling (to_int would wrap)
         e = 0
         while m >= 10.0:
+            prev = m
             m = m / 10.0
+            # INFINITY NEVER CHANGES UNDER DIVISION. `j_parse("1e400")` is five
+            # bytes of perfectly valid JSON and yields +inf, so this loop — and
+            # the SDK path that round-trips it through `j_dumps` — spun
+            # forever. A value that does not move under m/10 IS the
+            # non-terminating one, so detecting it is the fix rather than a
+            # bound on the iteration count.
+            if m == prev:
+                return sign + "Infinity"
             e = e + 1
         return sign + j_fmt_f(m) + "e" + str(e)
     if m >= 1000000000000000.0:

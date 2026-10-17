@@ -112,14 +112,12 @@ fn ts_parse_object_literal_needs_annotation() {
 }
 
 #[test]
-fn ts_parse_slice_diagnostics() {
-    let cases: &[(&str, &str)] = &[
+fn ts_parse_slice_diagnostics() {    let cases: &[(&str, &str)] = &[
         ("import * as ns from \"y\";", "namespace"),
         ("export default a;", "default exports"),
         ("class C {}", "class"),
         ("var x = 1;", "var"),
         ("const t = 1;", "top-level"),
-        ("function f(): number { return a ? b : c; }", "ternary"),
         ("function f(): number { const n = null; return 0; }", "null"),
         ("function f(): number { g.h(); return 0; }", "method calls"),
         ("function f(): number { g<number>(1); return 0; }", "explicit type arguments"),
@@ -133,6 +131,24 @@ fn ts_parse_slice_diagnostics() {
         let e = parse(0, src).expect_err(&format!("should reject: {src}"));
         assert!(e.message.contains(want), "for {src:?} want {want:?} got {:?}", e.message);
     }
+}
+
+/// the ternary was on that list until v0.51.0, when the Aoxn conditional
+/// expression gave it a node to lower into: `c ? a : b` is the same shape as
+/// `a if c else b` with the operands in the other order.
+#[test]
+fn ts_ternary_lowers_to_the_conditional_expression() {
+    let p = parse(0, "function f(): number { return a ? b : c; }").expect("the ternary now parses");
+    let f = &p.funcs[0];
+    let Stmt::Return { expr: Some(e), .. } = &f.body.stmts[0] else {
+        panic!("expected a return statement");
+    };
+    let Expr::IfExp { then_expr, cond, else_expr, .. } = e else {
+        panic!("expected IfExp, got {e:?}");
+    };
+    assert!(matches!(&**cond, Expr::Var { name, .. } if name == "a"));
+    assert!(matches!(&**then_expr, Expr::Var { name, .. } if name == "b"));
+    assert!(matches!(&**else_expr, Expr::Var { name, .. } if name == "c"));
 }
 
 #[test]

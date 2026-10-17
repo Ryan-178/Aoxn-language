@@ -5,6 +5,108 @@ minor bumps while pre-1.0: each minor version is a language milestone.
 
 ## [Unreleased]
 
+## [0.51.0] - 2026-10-17
+
+Python syntax sugar, part 1, plus four security fixes in the standard
+library's network/JSON layer found by an audit of the shipped code.
+
+### Added
+
+- **Default parameter values** — `def f(a: int, b: int = 3)`. The default is
+  **materialized by the call site**, so the C prototype keeps every parameter
+  and a program that spells no default emits byte-identical C (which is why
+  this needed no `selfhost/` mirror; see below). A call passes between
+  `required` and `params.len()` arguments and the missing tail is filled in
+  textually. Rules, all checked with their own message: a defaulted
+  parameter may not be followed by a plain one; a default may not name a
+  parameter (it is written into the call, where that name does not exist);
+  `extern def` and generic functions may not have defaults; a default
+  whose type does not match the parameter is a `type` error. Taking such a
+  function as a *value* keeps its full arity — a function-pointer type has
+  nowhere to hang a default.
+- **`a if c else b`** — Python's conditional expression, at the precedence
+  Python gives it (looser than every operator, nesting to the right) and
+  spelled with the real `if`/`else` keywords. The condition is `bool`; both
+  branches must have the **same** type, because Aoxn has no implicit
+  conversion and this is the last place a reader looks for one. Emitted as
+  the C conditional operator, so aggregates keep value semantics for free.
+- **`**`** — power, right-associative and binding tighter than `*` but looser
+  than unary minus, exactly as in Python's grammar (`-2 ** 2` is `-4`).
+  Two ints give an exact int (exponentiation by squaring, emitted as the
+  `ax_pow_int` helper only where used); two floats give a float
+  (`__builtin_pow`). Mixed operands are a type error, like every other
+  arithmetic operator. **Documented deviation:** a negative int exponent
+  yields 0, where Python returns a float — `to_float(3) ** -1` for that.
+- **`print` takes several values** — `print(a, b, c)`, one space between
+  them, one trailing newline, and `print()` for an empty line. Keyword
+  arguments (`sep=`/`end=`) stay refused: half a keyword argument surface
+  is a question, not a feature. The single-argument form emits the exact C
+  text it always did.
+- **The TypeScript front end now lowers `c ? a : b`** into the same node,
+  instead of rejecting the ternary as "S2 work".
+
+### Fixed (security / robustness)
+
+- **A cross-origin redirect leaked the Anthropic API key.**
+  `stdlib/net/http.ax` let WinHTTP follow redirects on its own, and WinHTTP
+  carries the request **headers** across the hop. Anthropic's `x-api-key` is
+  an ordinary custom header, so a 302 pointing at another origin handed that
+  origin the key in the clear — reproduced with two loopback servers, where
+  the second received the key and the call still reported `200` / `err=0`.
+  The transport now sets `WINHTTP_OPTION_REDIRECT_POLICY_NEVER` and delivers
+  a redirect as an ordinary 3xx with `r.location` filled in, so only the code
+  holding the credential can decide to follow it — and what to re-send.
+- **A truncated UTF-8 sequence read past the end of the buffer.**
+  `stdlib/net/codec.ax`'s `net_utf16_write` checked only `i < sn` and then
+  read `i+1`..`i+3` unconditionally, so any buffer ending in a lone lead
+  byte (`F0`) produced a heap read overflow (ASan: heap-buffer-overflow READ
+  of size 1) — reachable from any untrusted file or response that gets
+  widened. It now validates the announced sequence length, every
+  continuation byte, and rejects overlong / surrogate / out-of-range forms
+  (an overlong `E0 80 80` decodes to U+0000, which would plant a NUL in a
+  header). Malformed input becomes U+FFFD and consumes only the lead byte,
+  so a rejected sequence can never become an infinite loop.
+- **`j_fmt_f` looped forever on an infinite float.** `j_parse("1e400")` is
+  five bytes of valid JSON and yields `+inf`; `j_dumps` then divided it by ten
+  "until it was under ten", which never happens — a hang reachable from
+  ordinary JSON round-tripping (and from `an` tool-input serialization).
+  A value that does not move under `m / 10` **is** the non-terminating case
+  and now returns `Infinity` (the spelling Python's `json` uses); `NaN` is
+  caught by `f != f` instead of reaching `to_int`, which is undefined
+  behaviour on a NaN.
+- **A deeply nested JSON document overflowed the stack.** The parser
+  recursed through arrays/objects with no budget, so ~200 KB of `[` repeated
+  killed the process (Windows `0xC00000FD`) instead of returning an error.
+  `J_MAX_DEPTH()` (200) is now checked *before* the recursive call, and
+  exceeding it is a normal parse error naming the limit.
+- **SSE multi-line data was quadratic in time and allocation.**
+  `stdlib/net/sse.ax` accumulated a frame's `data:` lines with
+  `data = data + "\n" + payload`, which copies everything so far on every
+  line — and Aoxn's concatenation never frees the old buffer, so it leaked
+  too. Measured: 1 000 lines 0.08 s, 2 000 0.19 s, 4 000 0.70 s, 8 000 2.83 s.
+  Accumulation is now a geometrically grown byte buffer, and the dispatched
+  frame is **copied** out of it (handing out the accumulator's address made
+  every earlier frame read back as the newest one).
+- **A truncated HTTP response was reported as a clean success.**
+  `WinHttpQueryDataAvailable` / `WinHttpReadData` failing used to `break` the
+  drain loop with `err == 0`, so a server that announced
+  `Content-Length: 100` and closed after ten bytes produced `status=200`,
+  `err=0` and a partial body — and if that body happened to be valid JSON,
+  nothing downstream could tell. Read failures now enter the transport error
+  channel, which is the only thing the SDKs gate on.
+
+### Notes
+
+- **No `selfhost/` mirror for any of this**, exactly as for the v0.40.0
+  features: the new forms are unused by the self-hosted compiler and by
+  `stdlib/stdlib.ax`, and the fixed point compares stage-1 against stage-2
+  on programs that do not use them. The fixed-point test stays green.
+- The audit findings in `crates/aoxn-pkg` (archive entry paths escaping the
+  extraction directory, archive hard links, dependency-map keys reaching a
+  recursive delete, registry checksums used as cache paths) and in the IDE
+  (workspace root replaced by the webview, build output through a hard link,
+  explorer following junctions) are **NOT fixed here** — see SECURITY.md.
+
 ## [0.50.10] - 2026-10-11
 
 ### Fixed

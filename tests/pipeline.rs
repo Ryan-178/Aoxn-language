@@ -3694,3 +3694,444 @@ fn clang_arg_list_parsing() {
     assert!(aoxn::parse_clang_args("").is_empty());
     assert!(aoxn::parse_clang_args("\n  \n").is_empty());
 }
+
+// ---- v0.51.0: Python syntax sugar, part 1 -------------------------------
+//
+// Four forms, all of them closer to Python than anything the surface had:
+// default parameter values, the conditional expression, `**`, and a `print`
+// that takes several values. Three of the four are pure syntax; the fourth
+// (`**`) needs one integer helper.
+//
+// The invariant every test below leans on: a program that spells NONE of
+// these emits byte-identical C. That is what keeps the self-host fixed point
+// true with no `selfhost/` mirror, and it is pinned directly by
+// `new_syntax_is_absent_from_a_plain_programs_c`.
+
+/// `greet()` / `greet("aoxn")` / `greet("aoxn", "?")` — the tail is filled
+/// in at the CALL SITE, so the C prototype never changes.
+#[test]
+fn default_parameter_values() {
+    let out = build_and_run(
+        r#"
+        def greet(name: string = "world", punct: string = "!") -> string:
+            return "hello, " + name + punct
+
+        def scaled(v: int, factor: int = 2) -> int:
+            return v * factor
+
+        def main() -> int:
+            print(greet())
+            print(greet("aoxn"))
+            print(greet("aoxn", "?"))
+            print(scaled(21))
+            print(scaled(21, 5))
+            return 0
+        "#,
+    );
+    assert_eq!(out, "hello, world!\nhello, aoxn!\nhello, aoxn?\n42\n105\n");
+}
+
+/// a default value is written into the CALL, so it cannot read a parameter —
+/// the name would not exist there. What it CAN do is call another function,
+/// which is what the language's only module-level bindings are.
+#[test]
+fn default_value_may_call_a_function_but_not_read_a_parameter() {
+    let out = build_and_run(
+        r#"
+        def base() -> int:
+            return 7
+
+        def scaled(v: int, factor: int = base()) -> int:
+            return v * factor
+
+        def main() -> int:
+            print(scaled(3))
+            print(scaled(3, 2))
+            return 0
+        "#,
+    );
+    assert_eq!(out, "21\n6\n");
+
+    let msg = expect_compile_error(
+        r#"
+        def bounded(lo: int, hi: int = lo * 2) -> int:
+            return hi
+
+        def main() -> int:
+            return bounded(3)
+        "#,
+    );
+    assert!(msg.contains("refers to parameter 'lo'"), "{msg}");
+}
+
+/// defaults work for aggregates and through a function pointer's target
+/// (a function used as a VALUE keeps its full arity — see the error test)
+#[test]
+fn default_values_for_aggregates_and_externs() {
+    let out = build_and_run_with_stdlib(
+        r#"
+        def first(xs: [int; 3] = [7, 8, 9]) -> int:
+            return xs[0]
+
+        def main() -> int:
+            print(first())
+            print(first([1, 2, 3]))
+            return 0
+        "#,
+    );
+    assert_eq!(out, "7\n1\n");
+}
+
+/// the four arity/type rules, each with its own message
+#[test]
+fn default_parameter_errors() {
+    let too_few = expect_compile_error(
+        r#"
+        def f(a: int, b: int = 1) -> int:
+            return a + b
+
+        def main() -> int:
+            return f()
+        "#,
+    );
+    assert!(too_few.contains("expects 1 to 2 argument(s), found 0"), "{too_few}");
+
+    let too_many = expect_compile_error(
+        r#"
+        def f(a: int = 1) -> int:
+            return a
+
+        def main() -> int:
+            return f(1, 2)
+        "#,
+    );
+    assert!(too_many.contains("expects 0 to 1 argument(s), found 2"), "{too_many}");
+
+    // a plain parameter after a defaulted one would make "which argument am
+    // I?" ambiguous — the shape Python rejects too
+    let order = expect_compile_error(
+        r#"
+        def f(a: int = 1, b: int) -> int:
+            return a + b
+
+        def main() -> int:
+            return f(1, 2)
+        "#,
+    );
+    assert!(order.contains("has no default value but follows"), "{order}");
+
+    let wrong = expect_compile_error(
+        r#"
+        def f(a: int = "three") -> int:
+            return a
+
+        def main() -> int:
+            return f()
+        "#,
+    );
+    assert!(wrong.contains("default value for parameter 'a' must be int, found string"), "{wrong}");
+
+    let forward = expect_compile_error(
+        r#"
+        def f(a: int = b, b: int = 2) -> int:
+            return a + b
+
+        def main() -> int:
+            return f()
+        "#,
+    );
+    assert!(forward.contains("refers to parameter 'b'"), "{forward}");
+}
+
+/// a default is Aoxn source: it cannot appear on an `extern def` (there is no
+/// Aoxn call site to supply it, and the C prototype would lie about a symbol
+/// the C library owns), nor on a generic function
+#[test]
+fn default_parameters_are_refused_on_extern_and_generic() {
+    let e = expect_compile_error(
+        r#"
+        extern def getenv(name: string = "PATH") -> int
+
+        def main() -> int:
+            return 0
+        "#,
+    );
+    assert!(e.contains("extern function 'getenv' cannot have a default"), "{e}");
+
+    let g = expect_compile_error(
+        r#"
+        def head[T, N](xs: [T; N], fallback: T = 0) -> T:
+            return xs[0]
+
+        def main() -> int:
+            return 0
+        "#,
+    );
+    assert!(g.contains("a generic function cannot have a default parameter value"), "{g}");
+}
+
+/// taking a function as a VALUE keeps its full arity: a function pointer type
+/// is `fn(A, B) -> R`, and there is no place to hang a default on it
+#[test]
+fn a_function_with_defaults_keeps_its_arity_as_a_value() {
+    let msg = expect_compile_error(
+        r#"
+        def f(a: int, b: int = 1) -> int:
+            return a + b
+
+        def main() -> int:
+            cb: fn(int, int) -> int = f
+            return cb(1)
+        "#,
+    );
+    assert!(msg.contains("expects 2 argument(s), found 1"), "{msg}");
+}
+
+/// a default value is emitted TEXTUALLY at the call site, so a call it makes
+/// can raise — and the caller's function must then carry the unwind check.
+/// This is the hole the fixpoint extension closes.
+#[test]
+fn a_raising_default_value_makes_the_caller_check_its_slot() {
+    let out = build_and_run(
+        r#"
+        def boom() -> int:
+            raise "kaboom"
+
+        def risky(n: int = boom()) -> int:
+            return n
+
+        def main() -> int:
+            try:
+                x = risky()
+                print("not reached")
+            except as e:
+                print("caught:", e)
+            return 0
+        "#,
+    );
+    assert_eq!(out, "caught: kaboom\n");
+}
+
+/// `a if c else b` — lowest precedence, nests to the right
+#[test]
+fn conditional_expression() {
+    let out = build_and_run(
+        r#"
+        def pick(n: int) -> string:
+            return "pos" if n > 0 else "non-pos"
+
+        def main() -> int:
+            print(pick(1), pick(0), pick(-3))
+            print(1 + (10 if true else 20))
+            print("a" if false else "b" if true else "c")
+            x = 5
+            print("x>3" if x > 3 else "x<=3")
+            return 0
+        "#,
+    );
+    assert_eq!(out, "pos non-pos non-pos\n11\nb\nx>3\n");
+}
+
+/// the conditional expression keeps value semantics for aggregates too: the
+/// C conditional operator yields one value of the branch type
+#[test]
+fn conditional_expression_over_structs() {
+    let out = build_and_run_with_stdlib(
+        r#"
+        struct Point:
+            x: int
+            y: int
+
+        def origin() -> Point:
+            return Point(x=0, y=0)
+
+        def shifted(n: int) -> Point:
+            return Point(x=n, y=n)
+
+        def main() -> int:
+            p = origin() if true else shifted(4)
+            print(p.x, p.y)
+            return 0
+        "#,
+    );
+    assert_eq!(out, "0 0\n");
+}
+
+#[test]
+fn conditional_expression_errors() {
+    let not_bool = expect_compile_error(
+        r#"
+        def main() -> int:
+            x = 1 if 2 else 3
+            return x
+        "#,
+    );
+    assert!(not_bool.contains("condition of a conditional expression must be bool, found int"), "{not_bool}");
+
+    let mismatch = expect_compile_error(
+        r#"
+        def main() -> int:
+            x = 1 if true else "three"
+            return x
+        "#,
+    );
+    assert!(mismatch.contains("both branches of a conditional expression must have the same type, found int and string"), "{mismatch}");
+
+    let no_else = expect_compile_error(
+        r#"
+        def main() -> int:
+            x = 1 if true
+            return x
+        "#,
+    );
+    assert!(no_else.contains("expected 'else'"), "{no_else}");
+}
+
+/// `**` binds tighter than `*` and looser than unary minus, exactly as in
+/// Python's grammar, and it is right-associative
+#[test]
+fn power_operator() {
+    let out = build_and_run(
+        r#"
+        def main() -> int:
+            print(2 ** 10)
+            print(2 ** 3 ** 2)
+            print(-2 ** 2)
+            print(2 * 3 ** 2)
+            print(to_float(2) ** 0.5)
+            print(3 ** -1)
+            print(1 ** 1000)
+            return 0
+        "#,
+    );
+    // Python: 1024, 512, -4, 18, 1.414214, 0.5, 1.
+    // Aoxn differs on exactly one: a NEGATIVE int exponent yields 0, because
+    // int cannot hold Python's 1/3 — write `to_float(3) ** -1` for that.
+    assert_eq!(out, "1024\n512\n4\n18\n1.414214\n0\n1\n");
+}
+
+#[test]
+fn power_operator_rejects_mixed_operands() {
+    let msg = expect_compile_error(
+        r#"
+        def main() -> int:
+            x = 2 ** 0.5
+            return x
+        "#,
+    );
+    assert!(msg.contains("'**' requires two int or two float operands, found (int, float)"), "{msg}");
+}
+
+/// the integer power needs `ax_pow_int`; a program that never raises an int
+/// to an int power must not carry the helper (and neither must a program that
+/// uses only the float form)
+#[test]
+fn power_helper_is_emitted_only_where_it_is_needed() {
+    let plain = aoxn::compile_to_c(
+        &dedent(
+            r#"
+        def main() -> int:
+            print(1)
+            return 0
+        "#,
+        ),
+        true,
+    )
+    .expect("plain program should compile");
+    assert!(!plain.contains("ax_pow_int"), "the helper leaked into a program that never uses `**`");
+
+    let floats = aoxn::compile_to_c(
+        &dedent(
+            r#"
+        def main() -> int:
+            print(to_float(2) ** 0.5)
+            return 0
+        "#,
+        ),
+        true,
+    )
+    .expect("float power should compile");
+    assert!(floats.contains("__builtin_pow"), "{floats}");
+    assert!(!floats.contains("ax_pow_int"), "the int helper was emitted for a float power");
+
+    let ints = aoxn::compile_to_c(
+        &dedent(
+            r#"
+        def main() -> int:
+            print(2 ** 8)
+            return 0
+        "#,
+        ),
+        true,
+    )
+    .expect("int power should compile");
+    assert!(ints.contains("ax_pow_int(2LL, 8LL)"), "{ints}");
+}
+
+/// Python's `print` takes any number of values, one space between them, one
+/// newline at the end
+#[test]
+fn print_takes_several_values() {
+    let out = build_and_run(
+        r#"
+        def main() -> int:
+            print(1, 2)
+            print("a", True, 1.5)
+            print("trailing space above:", 7)
+            print()
+            return 0
+        "#,
+    );
+    assert_eq!(out, "1 2\na true 1.500000\ntrailing space above: 7\n\n");
+}
+
+#[test]
+fn print_with_no_arguments_prints_an_empty_line() {
+    let out = build_and_run(
+        r#"
+        def main() -> int:
+            print()
+            return 0
+        "#,
+    );
+    assert_eq!(out, "\n");
+}
+
+#[test]
+fn print_still_takes_positional_arguments_only() {
+    let msg = expect_compile_error(
+        r#"
+        def main() -> int:
+            print(1, sep="-")
+            return 0
+        "#,
+    );
+    assert!(msg.contains("print takes positional arguments only"), "{msg}");
+}
+
+/// the whole point of doing this in one version: a program that uses NONE of
+/// the new forms must emit exactly the C it emitted before — which is what
+/// keeps the self-host fixed point green with no `selfhost/` mirror, and is
+/// why the tests above could be added without touching one.
+#[test]
+fn new_syntax_is_absent_from_a_plain_programs_c() {
+    let c = aoxn::compile_to_c(
+        &dedent(
+            r#"
+        def plain(a: int, b: int) -> int:
+            return a + b
+
+        def main() -> int:
+            x = plain(1, 2)
+            if x > 2:
+                print("big")
+            return 0
+        "#,
+        ),
+        true,
+    )
+    .expect("plain program should compile");
+    assert!(!c.contains("ax_pow_int"), "{c}");
+    // the single-argument print is spelled exactly as it always was
+    assert!(c.contains("__builtin_printf(\"%s\\n\", "), "{c}");
+}

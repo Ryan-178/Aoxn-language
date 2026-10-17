@@ -40,6 +40,7 @@ extern def WinHttpQueryHeaders(req: int, level: int, name: int, buf: int, plen: 
 extern def WinHttpQueryDataAvailable(req: int, avail: int) -> int
 extern def WinHttpReadData(req: int, buf: int, toread: int, read: int) -> int
 extern def WinHttpSetTimeouts(h: int, resolve: int, connect: int, send: int, recv: int) -> int
+extern def WinHttpSetOption(h: int, option: int, buf: int, buflen: int) -> int
 extern def WinHttpCloseHandle(h: int) -> int
 extern def GetLastError() -> int
 extern def Sleep(ms: int)
@@ -225,6 +226,7 @@ struct NetHttpResp:
     body: string      # raw response body ("" when the transport failed)
     request_id: string   # the server's request-id header ("" when absent)
     retry_after: int     # Retry-After in seconds (0 when absent or not numeric)
+    location: string     # the `Location` header of a 3xx (v0.51.0); "" when absent
     err: int          # 1 = transport-level failure
     errmsg: string
 
@@ -403,8 +405,38 @@ def net_http_request(method: string, url: string, headers: string, body: string,
 # string: it would be silently truncated at the first zero byte. Callers
 # with real bytes (stdlib/anthropic's file upload) hand over the buffer
 # directly. `body_len` 0 means "no body" and `body_ptr` is then ignored.
+# Never let WinHTTP follow a redirect on its own (v0.51.0).
+#
+# WinHTTP's automatic redirect carries the request HEADERS across the hop,
+# and that is a credential leak rather than a convenience: Anthropic's
+# `x-api-key` is an ordinary custom header, so a 302 pointing at another
+# origin handed that origin the API key in the clear — reproduced with two
+# loopback servers, where the second one received the key and the call still
+# reported 200 / err=0. "The server the user talked to redirected" is not
+# consent to send the credential somewhere new.
+#
+# So the transport stops deciding: a redirect comes back as an ordinary 3xx
+# response with `r.location` filled in, and only the code holding the
+# credential may follow it — and it then chooses what to re-send. That is
+# the only arrangement that cannot leak, and it costs the SDKs nothing (they
+# do not follow redirects today).
+#
+# WINHTTP_OPTION_REDIRECT_POLICY (68) = WINHTTP_OPTION_REDIRECT_POLICY_NEVER (2)
+def net_http_no_redirects(session: int):
+    # the guard belongs in the function that MAKES THE CALL, not only in its
+    # callers: the backend emits every function body, so a helper reached
+    # from a guarded entry point still drags WinHttpSetOption into a Linux
+    # link. `stdlib_defect_pins` simulates a Linux fold and reads the
+    # object's symbol table, and this is exactly what it is there to catch.
+    if target_os() != "windows":
+        return
+    opt = malloc(8)
+    store_i64(opt, 2)
+    WinHttpSetOption(session, 68, opt, 4)
+    free(opt)
+
 def net_http_request_bytes(method: string, url: string, headers: string, body_ptr: int, body_len: int, ua: string, connect_ms: int, recv_ms: int) -> NetHttpResp:
-    r = NetHttpResp(status=0, body="", request_id="", retry_after=0, err=0, errmsg="")
+    r = NetHttpResp(status=0, body="", request_id="", retry_after=0, location="", err=0, errmsg="")
     if target_os() != "windows":
         # honest platform gate: the transport is WinHTTP, and there is no
         # TLS stack in the language to replace it with on Linux yet
@@ -425,6 +457,7 @@ def net_http_request_bytes(method: string, url: string, headers: string, body_pt
         r.err = 1
         return r
     WinHttpSetTimeouts(session, 15000, connect_ms, 30000, recv_ms)
+    net_http_no_redirects(session)
     whost = net_to_wide(u.host)
     conn = WinHttpConnect(session, whost, u.port, 0)
     free(whost)
@@ -482,6 +515,10 @@ def net_http_request_bytes(method: string, url: string, headers: string, body_pt
     rawh = net_raw_headers(req)
     r.request_id = net_header_value(rawh, "request-id")
     r.retry_after = net_header_int(rawh, "retry-after", 0)
+    # the redirect target, now that redirects are NOT followed for us (see
+    # net_http_no_redirects): a 3xx is delivered as itself, and this is the
+    # only safe place to read a new URL from
+    r.location = net_header_value(rawh, "location")
     # drain the body
     cap = 8192
     buf = malloc(cap)
@@ -492,6 +529,17 @@ def net_http_request_bytes(method: string, url: string, headers: string, body_pt
         ok = WinHttpQueryDataAvailable(req, abuf)
         if ok == 0:
             free(abuf)
+            # A FAILED read is not a short body. The loop used to `break`
+            # here with `err == 0`, so a server that announced
+            # `Content-Length: 100` and then closed after ten bytes was
+            # reported as a clean 200 with a partial body — and if the
+            # partial body happened to be valid JSON, nothing downstream
+            # could tell. The transport error channel is the only thing the
+            # SDKs actually gate on (`oa_resp_ok` / `an_resp_ok`), so this
+            # is where a truncated response has to land.
+            code = GetLastError()
+            r.errmsg = "response read failed: " + net_winhttp_err(code)
+            r.err = 1
             break
         avail = load_i64(abuf)
         free(abuf)
@@ -505,6 +553,9 @@ def net_http_request_bytes(method: string, url: string, headers: string, body_pt
         ok = WinHttpReadData(req, buf + total, avail, rbuf)
         if ok == 0:
             free(rbuf)
+            code = GetLastError()
+            r.errmsg = "response read failed: " + net_winhttp_err(code)
+            r.err = 1
             break
         got = load_i64(rbuf)
         free(rbuf)
@@ -553,6 +604,7 @@ def net_http_stream_open_bytes(method: string, url: string, headers: string, bod
         s.errmsg = net_winhttp_err(GetLastError())
         return s
     WinHttpSetTimeouts(session, 15000, connect_ms, 30000, recv_ms)
+    net_http_no_redirects(session)
     whost = net_to_wide(u.host)
     conn = WinHttpConnect(session, whost, u.port, 0)
     free(whost)

@@ -105,7 +105,7 @@ impl Flattened {
                 fields: s
                     .fields
                     .iter()
-                    .map(|f| Param { name: f.name.clone(), ty: self.source_type(&f.ty), pos: f.pos })
+                    .map(|f| Param { name: f.name.clone(), ty: self.source_type(&f.ty), pos: f.pos, default: None })
                     .collect(),
                 pos: s.pos,
             })
@@ -120,7 +120,7 @@ impl Flattened {
                 params: f
                     .params
                     .iter()
-                    .map(|p| Param { name: p.name.clone(), ty: self.source_type(&p.ty), pos: p.pos })
+                    .map(|p| Param { name: p.name.clone(), ty: self.source_type(&p.ty), pos: p.pos, default: None })
                     .collect(),
                 ret: self.source_type(&f.ret),
                 body: Block { stmts: Vec::new() },
@@ -519,6 +519,11 @@ fn rewrite_fn(f: &mut FnDecl, b: &Bindings, members: &[HashMap<String, Member>])
     f.name = ctx.plain(&f.name);
     for p in &mut f.params {
         p.ty = ctx.ty(&p.ty);
+        // a default value is ordinary source: `def f(n: int = util.limit())`
+        // names a function exactly like any other expression would
+        if let Some(d) = &mut p.default {
+            ctx.expr(d);
+        }
     }
     f.ret = ctx.ty(&f.ret);
     ctx.block(&mut f.body);
@@ -669,6 +674,11 @@ impl<'a> Ctx<'a> {
             Expr::Index { arr, idx, .. } => {
                 self.expr(arr);
                 self.expr(idx);
+            }
+            Expr::IfExp { then_expr, cond, else_expr, .. } => {
+                self.expr(cond);
+                self.expr(then_expr);
+                self.expr(else_expr);
             }
             Expr::Field { obj, name, pos } => {
                 // `m.f` read as a value is a module member; a struct field

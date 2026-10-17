@@ -16,7 +16,7 @@ the deviation is called out explicitly below.
   a tab counts as 4 columns.
 - Statements end at a line break; no semicolons. `;` is a syntax error.
 - `#` starts a comment (to end of line). Blank and comment-only lines are ignored.
-- Inside `(...)` a line break is ignored (implicit line joining) 鈥?call
+- Inside `(...)` a line break is ignored (implicit line joining) 闂?call
   arguments may span lines, trailing commas allowed. Since v0.40.0 the same
   holds inside `{...}` (a dict literal may span lines).
 - A single simple statement may follow `:` on the same line
@@ -93,19 +93,19 @@ print("apple" < "banana")      # true (byte-wise lexicographic)
 - `+` concatenates two strings (only strings can be concatenated).
 - All six comparison operators work on `(string, string)` via byte-wise
   `strcmp` semantics; `len(s)` is the byte length.
-- **Escapes (v0.42.0): six of them** — `\n`, `\t`, `\r`, `\0`, `\\`, `\"`.
+- **Escapes (v0.42.0): six of them** 闁?`\n`, `\t`, `\r`, `\0`, `\\`, `\"`.
   Anything else is a lex error naming the escape. `\r` exists because HTTP/SSE
   framing is CRLF and every layer that needed a carriage return had been
   writing byte 13 through `store_u8`; `\0` exists because a byte buffer needs a
   way to spell a NUL. **`\0` does not make a string binary-safe**: `len()` is
-  `strlen`, so everything after the NUL is invisible to the string builtins —
+  `strlen`, so everything after the NUL is invisible to the string builtins 闁?
   use it for buffers you then address with `as_ptr`/`store_u8`.
 - Strings are **immutable**. Literals live in static storage; concatenation
-  results are heap-allocated and intentionally not freed (no GC yet 鈥?safe
+  results are heap-allocated and intentionally not freed (no GC yet 闂?safe
   because strings never mutate, so sharing/aliasing is sound).
 - Strings may appear in struct fields, array elements, parameters, and
   returns; copies share the underlying bytes (safe: immutability).
-- No string indexing yet (returns no `char` type 鈥?roadmap).
+- No string indexing yet (returns no `char` type 闂?roadmap).
 
 ## Loops
 
@@ -166,7 +166,7 @@ sort(["b", "a"])      # T = string, N = 2
   `[...]` after the function name. At most one length parameter per function.
 - Monomorphization: every distinct (type, length) combination at a call site
   produces a dedicated instance at compile time; arguments are unified
-  against the declared parameter types (inferred 鈥?no explicit type
+  against the declared parameter types (inferred 闂?no explicit type
   arguments).
 - The length parameter is a compile-time `int` constant inside the body
   (`range(N)`, `N - 1`).
@@ -220,7 +220,7 @@ def main() -> int:
   import cfg from "./cfg.ax"           # == from cfg import cfg
   ```
   A **named** import brings in exactly what it lists; anything else stays out
-  of scope, and referring to it is an error (v0.43.0 — before that the list
+  of scope, and referring to it is an error (v0.43.0 闁?before that the list
   was parsed and ignored). A **module** binding is a namespace, not a value:
   `m.f(...)` and `m.Type` work, `x = m` does not. Two modules may both define
   `f` as long as they are reached through their modules; star-importing both
@@ -233,14 +233,14 @@ def main() -> int:
   module; failing that it is resolved as a package import under
   `aox_modules/` (through the package's `aoxn.json` `main` / `exports`), then
   against the **installed standard library** (v0.30.0), where `stdlib` means
-  the stdlib directory and `stdlib/ui` a module inside it — `$AOXN_STDLIB`,
+  the stdlib directory and `stdlib/ui` a module inside it 闁?`$AOXN_STDLIB`,
   else `$AOXN_HOME/lib/stdlib`, else the checkout, so a program written
   against an installed toolchain compiles from any directory (see
   `docs/install.md`). A **quoted** specifier skips the sibling probe and
   resolves exactly as it always has. A project-local package always wins.
   Dots are the subpath separator, so `stdlib.net.json` is `stdlib/net/json`.
   Each file is included exactly once (canonical path); circular imports are
-  compile errors. `Aoxn run main.ax` alone is enough — imports pull in
+  compile errors. `Aoxn run main.ax` alone is enough 闁?imports pull in
   dependencies.
 - Multiple entry files on the command line (`Aoxn build a.ax b.ax`) are also
   merged, with import resolution applied to each.
@@ -260,9 +260,9 @@ def main() -> int:
     return 0
 ```
 
-- `styles() -> string` — every plain stylesheet, `@import`s inlined in order,
+- `styles() -> string` 闁?every plain stylesheet, `@import`s inlined in order,
   comments and redundant whitespace removed.
-- `styles_fingerprint() -> string` — the `<16 hex>.css` name the bundle is
+- `styles_fingerprint() -> string` 闁?the `<16 hex>.css` name the bundle is
   **emitted under**, stable for identical input, for `<link>` cache-busting.
 - A `*.module.css` file has its class names hashed (seeded by the file's own
   path) and is **not** joined into the bundle; it generates
@@ -282,8 +282,8 @@ def main() -> int:
 executable relocatable. `--tailwind` generates a documented utility subset
 into the bundle.
 
-Minification is deliberately conservative — comments and whitespace only, no
-selector merging or reordering — so the emitted text is a pure function of the
+Minification is deliberately conservative 闁?comments and whitespace only, no
+selector merging or reordering 闁?so the emitted text is a pure function of the
 source. Class rewriting is context-aware: a `.` inside a string literal, an
 `@media` prelude, or a declaration value is not a selector and is left alone.
 
@@ -347,6 +347,19 @@ def fib(n: int) -> int:
 
 - Parameters require type annotations; the return annotation is optional
   (defaults to `void`).
+- **Default parameter values (v0.51.0)** 闁?`def f(a: int, b: int = 3)`. The
+  default is **materialized by the call site**: the C prototype keeps every
+  parameter, and a call that omits a trailing one emits its default in its
+  place. A program that spells no default therefore emits byte-identical C,
+  which is why the feature needed no `selfhost/` mirror.
+  - A defaulted parameter may not be followed by a plain one (Python's rule,
+    and the only way "which argument am I?" has one answer).
+  - A default may not name a parameter: it is written into the call, where
+    that name does not exist. `extern def` and generic functions may not have
+    defaults.
+  - A default whose type does not match the parameter is a `type` error.
+  - Taking such a function as a **value** keeps its full arity 闁?a
+    function-pointer type has nowhere to hang a default.
 - Recursion and mutual recursion are allowed; order of definition does not
   matter.
 
@@ -370,13 +383,14 @@ def fib(n: int) -> int:
 
 **`main` (v0.42.0)** is the program entry point and has a fixed shape: no
 parameters, and a return type of `int` (the exit code) or `void`. Command-line
-arguments are read with `argc()` / `arg(i)`, not from a `main` parameter —
+arguments are read with `argc()` / `arg(i)`, not from a `main` parameter 闁?
 `def main(argc: int)` is a compile error that says so. (The TS front end's
 `function main(): number` keeps its own contract: its value is discarded.)
 
 ## Expressions
 
 ```ebbnf
+expr  := or_expr ["if" or_expr "else" expr]      # conditional expression
 or    := and ("or"  | "||") and)*
 and   := bitor ("and" | "&&") bitor)*
 bitor := bitxor ("|" bitxor)*
@@ -386,7 +400,8 @@ eq    := rel (("==" | "!=") rel)*
 rel   := shift (("<" | "<=" | ">" | ">=") shift)*
 shift := add (("<<" | ">>") add)*
 add   := mul (("+" | "-") mul)*
-mul   := unary (("*" | "/" | "//" | "%") unary)*
+mul   := power (("*" | "/" | "//" | "%") power)*
+power := unary ("**" power)?                     # right-associative (v0.51.0)
 unary := ("not" | "!" | "~" | "-" | "+") unary | primary
 primary := INT | FLOAT | STRING | True | False | FSTRING
          | IDENT ("(" args ")")? | "(" expr ")"
@@ -394,8 +409,25 @@ primary := INT | FLOAT | STRING | True | False | FSTRING
 postfix := primary ("(" args ")" | "[" expr "]" | "." IDENT)*
 ```
 
-**Integer literals (v0.42.0)** are decimal, hexadecimal (`0x`/`0X`) or binary
-(`0b`/`0B`). A malformed literal names the offending digit (`invalid digit 'Z'
+**Conditional expression (v0.51.0)** 闁?`a if c else b` is Python's form at
+Python's precedence: looser than every operator, and the `else` branch is a
+full expression, so it nests to the right (`a if c else b if d else e` reads
+as Python reads it). The condition must be `bool`, and **both branches must
+have the same type** 闁?Aoxn has no implicit conversion, and a pair that only
+"unifies" would mean inventing one in the last place a reader looks. It is
+emitted as the C conditional operator, so structs and arrays keep their value
+semantics for free.
+
+**`**` (v0.51.0)** sits between unary and `*`, matching Python's grammar, so
+`-2 ** 2` is `-(2 ** 2)`; it is **right-associative** (`2 ** 3 ** 2` is
+`2 ** 9`). Two `int`s give an exact `int` (exponentiation by squaring), two
+`float`s give a `float`, and mixed operands are a type error 闁?there is no
+promotion, exactly like `%` and the bitwise operators, so write
+`to_float(2) ** 0.5`. **Deviation from Python:** a negative `int` exponent
+yields `0` (Python returns a float); a negative `float` exponent is ordinary
+and returns `0.333333`.
+
+**Integer literals (v0.42.0)** are decimal, hexadecimal (`0x`/`0X`) or binary(`0b`/`0B`). A malformed literal names the offending digit (`invalid digit 'Z'
 in hexadecimal literal`) instead of lexing `0` plus an identifier, and an
 out-of-range value is rejected with the maximum spelled in its own radix.
 `int` is signed 64-bit, so `0xFFFFFFFFFFFFFFFF` does not fit.
@@ -403,12 +435,12 @@ out-of-range value is rejected with the maximum spelled in its own radix.
 - `and`/`or`/`not` and `&&`/`||`/`!` are synonyms. `and`/`or` short-circuit.
 - `True`/`False` and `true`/`false` are synonyms.
 - **Bitwise and shift operators (v0.37.0)**: `&`, `|`, `^`, `~`, `<<`, `>>`.
-  They bind exactly as in C — looser than the comparisons, tighter than
-  `&&`/`||` — and they are **int-only**, like `%`: there is no promotion to
+  They bind exactly as in C 闁?looser than the comparisons, tighter than
+  `&&`/`||` 闁?and they are **int-only**, like `%`: there is no promotion to
   float, because Aoxn has no implicit int/float conversion at all. `<<` and
   `>>` shift by the right operand's value; a count of 64 or more, or a
   negative count, is undefined behaviour, exactly like signed overflow. There
-  are no augmented bitwise forms (`&=`, `<<=`, …): write `x = x & y`.
+  are no augmented bitwise forms (`&=`, `<<=`, 闁?: write `x = x & y`.
   A single `&` or `|` is now the bitwise operator rather than a lex error;
   `&&` and `||` are unchanged.
 - **Chained comparison** (Python): `a < b <= c` means `(a < b) and (b <= c)`
@@ -430,34 +462,36 @@ out-of-range value is rejected with the maximum spelled in its own radix.
 
 - Every `if` / `while` condition must be `bool`.
 - A non-void function must return a value on **all** paths (`if/elif/else`
-  where every branch returns satisfies this). A `raise` counts as an exit —
+  where every branch returns satisfies this). A `raise` counts as an exit 闁?
   except inside a try body, where the handler decides.
 - No unreachable statements (rejected at compile time).
 - A name may be declared only once; annotations on re-assignment must match.
 
 ## Builtins
 
-- `print(expr)` 鈥?one `int`, `float`, `bool`, or `string` (no arrays/structs);
-  prints a trailing newline. Floats print with `%f` (6 decimals).
-- `len(x)` 鈥?array: static length; string: byte length; `dict[V]` (v0.40.0):
+- `print(expr)` 闂?one or more `int`, `float`, `bool`, or `string` values (no arrays/structs),
+  separated by a single space, with a trailing newline. v0.51.0 accepts any
+  number of values and `print()` prints an empty line; floats print with `%f`
+  (6 decimals) and keyword arguments are not accepted.
+- `len(x)` 闂?array: static length; string: byte length; `dict[V]` (v0.40.0):
   entry count. Returns `int`.
-- `str(x)` 鈥?convert `int`/`float`/`bool`/`string` to `string`.
-- `to_int(x)` / `to_float(x)` 鈥?explicit scalar conversions (truncating
+- `str(x)` 闂?convert `int`/`float`/`bool`/`string` to `string`.
+- `to_int(x)` / `to_float(x)` 闂?explicit scalar conversions (truncating
   toward zero / widening; `bool` converts through 0/1). These are the only
   int/float mixing the language allows, and what the TS front end's
   numeric tower lowers through.
 - `dict_has(d: dict[V], k: string) -> bool` /
-  `dict_del(d: dict[V], k: string) -> bool` (v0.40.0) 鈥?membership and
+  `dict_del(d: dict[V], k: string) -> bool` (v0.40.0) 闂?membership and
   removal; `dict_del` is `False` when the key was absent. Both mutate
   through the dict's handle.
 - `to_int(f)` on a function value (v0.40.0) is its raw address; `f = addr as
   fn(...) -> ...` converts back. The FFI escape hatch.
-- `assert(cond)` / `assert(cond, message)` (v0.42.0) — see Statements.
-- `exit(code: int)` (v0.42.0) — terminate with `code`; `void`.
-- `argc() -> int` (v0.42.0) — how many arguments the program was invoked with,
+- `assert(cond)` / `assert(cond, message)` (v0.42.0) 闁?see Statements.
+- `exit(code: int)` (v0.42.0) 闁?terminate with `code`; `void`.
+- `argc() -> int` (v0.42.0) 闁?how many arguments the program was invoked with,
   **not counting the program path** (`argc()` is Python's `len(sys.argv) - 1`,
   so `aoxn run app.ax -- a b` gives 2).
-- `arg(i: int) -> string` (v0.42.0) — the `i`-th argument, 0-based. An index
+- `arg(i: int) -> string` (v0.42.0) 闁?the `i`-th argument, 0-based. An index
   before 0 or at/after `argc()` yields `""` rather than raising, so a loop over
   `range(argc())` needs no guard.
 - **Warnings are part of the contract (v0.42.0)**: the compiler can report
@@ -472,9 +506,9 @@ IO in Aoxn itself; they perform no checks.
 
 - `load_i64(addr) -> int`, `store_i64(addr, v: int)`
 - `load_f64(addr) -> float`, `store_f64(addr, v: float)`
-- `load_u8(base, off) -> int`, `store_u8(base, off, v: int)` 鈥?`base` may be
+- `load_u8(base, off) -> int`, `store_u8(base, off, v: int)` 闂?`base` may be
   an `int` address or a `string` (byte access into the string)
-- `as_string(p: int) -> string`, `as_ptr(s: string) -> int` 鈥?pointer
+- `as_string(p: int) -> string`, `as_ptr(s: string) -> int` 闂?pointer
   reinterpretation
 
 There is deliberately **no `sizeof`** and no way to take the address of a
@@ -486,7 +520,7 @@ in wholesale, and nothing can be passed "by reference" implicitly.
 
 v0.39.0 said "Aoxn has **no exceptions**" and shipped this channel as the
 replacement. v0.40.0 added real `raise` / `try` / `except` (see
-[Exceptions](#exceptions-v0400)) — this one stays, for the failures a caller
+[Exceptions](#exceptions-v0400)) 闁?this one stays, for the failures a caller
 is expected to *inspect* rather than unwind past. Nothing here changed; only
 its monopoly on error handling did.
 
@@ -574,7 +608,7 @@ the heap at some unrelated later allocation. Free exactly one of them.
 
 The second half of the edge is **reallocation**. Growth goes through `realloc`,
 which frees the old block, so if one copy grows a `Vec` that another copy still
-holds, the other copy is left pointing at freed memory — a use-after-free that
+holds, the other copy is left pointing at freed memory 闁?a use-after-free that
 may read as a plausible value for a long time before it faults. Value semantics
 make this easy to write by accident, because passing a `Vec` to a function hands
 over a *copy of the handle*:
@@ -622,9 +656,9 @@ except as e:
   exits with status 1.
 - A `raise` inside a try **body** is caught by that try (so `try: ... raise
   "x" ... except:` continues at the handler). A raise inside a **handler**
-  propagates outward — re-raise is how a handler adds context.
+  propagates outward 闁?re-raise is how a handler adds context.
 - `except:` without `as` discards the message.
-- `raise` counts as an exit for the all-paths-return rule — except in a try
+- `raise` counts as an exit for the all-paths-return rule 闁?except in a try
   body, where the handler decides.
 - The runtime is two statics (a pending flag + the message), a `goto` to the
   handler label or the frame's unwind label, and a slot check after every
@@ -643,14 +677,14 @@ copied by value like any struct.
 
 - Widening `T -> T | None` (and `None -> T | None`) is implicit; no other
   union, and no implicit narrowing. `print` and every operator reject a
-  nullable until it is narrowed — there is no truthiness and no `??`.
+  nullable until it is narrowed 闁?there is no truthiness and no `??`.
 - `x is None` / `x is not None` test and **narrow** a bare variable: inside
   the `is not None` branch the checker and the code generator both see `x`
   as plain `T`. A branch that always returns keeps the narrowing, and an
   assignment inside the branch re-narrows the view (`x = None` narrows to
   None, `x = x + 1` re-tags the slot).
 - Array literals infer through it: `[1, None, 3]` is `[int | None; 3]`.
-- `x == None` is rejected — comparison operators want non-nullables; the
+- `x == None` is rejected 闁?comparison operators want non-nullables; the
   test is `is`.
 
 ## Function pointers (v0.40.0)
@@ -663,13 +697,13 @@ def twice(x: int) -> int:
 
 cb = twice          # cb: fn(int) -> int
 print(cb(21))       # indirect call
-p = to_int(cb)      # raw address — the FFI escape hatch
+p = to_int(cb)      # raw address 闁?the FFI escape hatch
 f = p as fn(int) -> int   # and back (a COM vtable slot, a Win32 callback)
 ```
 
 - The annotation is `fn(A, ...) -> R`. Signatures are part of the type: two
   pointers of different signatures are different types.
-- Pointers are ordinary values — they copy, and they live in arrays and
+- Pointers are ordinary values 闁?they copy, and they live in arrays and
   struct fields.
 - `extern def` declarations reject fn-pointer parameters (the ABI has no
   closure representation to pass through).
@@ -681,7 +715,7 @@ f = p as fn(int) -> int   # and back (a COM vtable slot, a Win32 callback)
 ```
 d: dict[int] = {"a": 1, "b": 2}
 d["a"] = 10                 # insert / overwrite
-print(d["a"])               # read — a missing key RAISES
+print(d["a"])               # read 闁?a missing key RAISES
 print(len(d))               # entry count
 print(dict_has(d, "a"))     # membership, the guard for speculative reads
 print(dict_del(d, "a"))     # remove; False when the key was absent
@@ -691,13 +725,13 @@ for k in d:                 # walks KEYS, in insertion order
 
 - Keys are `string` only; all values share one type; `{}` cannot infer its
   value type and needs the annotation (`d: dict[int] = {}`).
-- A missing key **raises** `dict key not found` — that is what the exception
+- A missing key **raises** `dict key not found` 闁?that is what the exception
   channel is for. Guard a speculative read with `dict_has`, or wrap it in
   `try`.
 - The dict is a **heap handle** (`struct ax_dict_V*`), the same shape as the
   UI toolkit's `TableModel` and the web server's `FileTable`: copying the
   handle shares the dict, so a mutation made through a callee's copy is
-  visible to the caller — including growth and `dict_del`. Lookup is a
+  visible to the caller 闁?including growth and `dict_del`. Lookup is a
   linear scan over insertion order; growth doubles, so inserts amortize to
   O(1) while the honest shape of the type stays "a settings map, not a
   database".
@@ -718,17 +752,17 @@ for k in d:                 # walks KEYS, in insertion order
   stays byte-identical by construction.
 ## Tooling contract (AI-native)
 
-- `Aoxn build file.ax [-o out] [--O0|--O1|--O2|--O3]` — native executable
+- `Aoxn build file.ax [-o out] [--O0|--O1|--O2|--O3]` 闁?native executable
   (O3 default: the level selects the clang `-O` used to compile the generated C).
-- `Aoxn run file.ax [-- args...]` — compile and run; the arguments after `--`
+- `Aoxn run file.ax [-- args...]` 闁?compile and run; the arguments after `--`
   reach the program through `argc()`/`arg(i)` (v0.42.0).
-- `Aoxn c file.ax` — print the generated C text (v0.29.0: the C-emitting
+- `Aoxn c file.ax` 闁?print the generated C text (v0.29.0: the C-emitting
   backend is the only backend; `Aoxn ir` is kept as a deprecated alias).
-- `Aoxn doctor [--json] [--no-smoke]` (v0.30.0) — report the install root,
+- `Aoxn doctor [--json] [--no-smoke]` (v0.30.0) 闁?report the install root,
   the stdlib, the resolved clang and its version, then compile and run a
   one-line program that imports the stdlib; exit code 0 means the toolchain
   works. `--json` is the machine-readable form.
-- `Aoxn version` — the compiler version.
+- `Aoxn version` 闁?the compiler version.
 - Optimization levels: `--O3` (default), `--O2`, `--O1`, `--O0` select the
   clang `-O` level used to compile the generated C. The **C text itself is
   level-independent** - the level only picks compiler flags. `--O1` roughly
@@ -750,13 +784,13 @@ for k in d:                 # walks KEYS, in insertion order
   `-o` destination). Any source or option change is a miss; output is
   identical to a fresh compile either way.
 - `--json` - the machine-readable report:
-  `{"ok":true|false,"errors":[{"stage","severity","code","file","line","col","message"}],"warnings":[…]}`.
+  `{"ok":true|false,"errors":[{"stage","severity","code","file","line","col","message"}],"warnings":[闁炽儺娉潁`.
   Printed on success too (with an empty `errors` array), so a caller never has
   to parse human text to learn the outcome.
 - `--clang-arg <flag>` (repeatable, v0.42.0) - forward a flag verbatim to
   **every** clang invocation, compile and link alike: `-g` for debug info,
   `-fsanitize=undefined` for the UB the language leaves unchecked,
-  `-fno-strict-aliasing`, … `-g` is also spelled as its own flag. The flags
+  `-fno-strict-aliasing`, 闁?`-g` is also spelled as its own flag. The flags
   join the cache key, so switching them rebuilds.
 - `--cc-warnings` (v0.42.0) - stop passing `-w`, so clang's own warnings about
   the emitted C are shown. This is how a wrong `extern def` signature becomes
@@ -785,7 +819,7 @@ compiler, the whole test suite (its own CI job) and the `stdlib/ui_x11.ax`
 UI backend; `target_os()` folds `"windows"` on a Windows build and
 `"linux"` on a Linux build (see the Platform query section above).
 macOS support, with a native UI backend, remains out of reach for a
-language whose `extern def` cannot pass structs by value — see
+language whose `extern def` cannot pass structs by value 闁?see
 `docs/platform-support.md` for the whole story.
 
 Since v0.29.0 the compiler has no LLVM dependency: codegen emits ISO C and
@@ -794,11 +828,11 @@ clang compiles it (`AOXN_CLANG`, `PATH`, or the toolchain's own
 
 ## Performance
 
-Aoxn lowers to ISO C and compiles with clang O3 to native machine code —
+Aoxn lowers to ISO C and compiles with clang O3 to native machine code 闁?
 measured at parity with `clang -O3` on identical algorithms (see
 `examples/bench_*.ax`):
 loop sum, array scan, struct copies, for-loop iteration, and string
-build/compare all land within 卤15% of clang.
+build/compare all land within 闁?5% of clang.
 
 ## Standard library
 
@@ -806,17 +840,17 @@ build/compare all land within 卤15% of clang.
 the program: math (`abs/min/max/clamp/pow_i/gcd/lcm/isqrt/is_prime/hypot`
 + `sqrt`/`floor`/`ceil` via FFI), and generic search/sort/aggregation:
 `sort`, `linear_search`, `binary_search`, `max_of`, `min_of`, `reverse`,
-`sum_int`, `sum_float` 鈥?all parameterized by element type and length.
+`sum_int`, `sum_float` 闂?all parameterized by element type and length.
 
 ## Roadmap
 
 Ordered by how much they cost the language's Python parity.
-
-1. Remaining Python operators and forms: `**` (right-associative power),
-   `in` / `not in` as operators (array membership, string substring).
-   (`is` / `is not` shipped in v0.40.0 for the `None` narrowing.)
-2. Conditional expressions (`a if c else b`) and multiple assignment /
-   unpacking (`a, b = f()`), which need tuple or multi-target support in the
+1. ~~Remaining Python operators and forms~~ 閳?**`**` shipped in v0.51.0**
+   (right-associative power; `-2 ** 2` is `-4`). Still open: `in` / `not in`
+   as operators (array membership, string substring).
+2. ~~Conditional expressions~~ 閳?**`a if c else b` shipped in v0.51.0** (both
+   branches must have the same type). Still open: multiple assignment /
+   unpacking (`a, b = f()`), which needs tuple or multi-target support in the
    AST.
 3. Default parameter values (`def f(x: int = 3)`).
 4. Package layout (`aoxn.json` `exports` conventions are already honoured;
@@ -827,16 +861,16 @@ Ordered by how much they cost the language's Python parity.
 6. Memory: string interning or arena freeing (currently concatenation leaks);
    dict values are never freed either (a dict lives as long as the program,
    like every other heap block in the language).
-7. Standard library expansion: containers, IO, crypto — the module-by-module
+7. Standard library expansion: containers, IO, crypto 闁?the module-by-module
    plan (all 31 Python stdlib modules, batched and feasibility-rated, plus the
-   15 third-party libraries in §5) is in `docs/stdlib-todo.md`; its §0 lists the
+   15 third-party libraries in 閹?) is in `docs/stdlib-todo.md`; its 閹? lists the
    language-level constraints each module runs into (the self-host critical
    path, argv, the int-only `Vec`, the absence of `enum`/tagged unions, and the
    missing `inf`/`nan` literals). **`docs/language-gaps.md` is the companion**:
    it maps every gap in this roadmap to the libraries it blocks, the files a
    change would touch, its cost, and a ranked order for closing them.
    **The first 13 modules landed in v0.44.0** (math, time, datetime, calendar,
-   pathlib, base64, hashlib, hmac, os, glob, json — promoted from `net/` —,
+   pathlib, base64, hashlib, hmac, os, glob, json 闁?promoted from `net/` 闁?
    bisect, heapq; `docs/stdlib.md` is the reference).
 8. Top-level statements as an implicit `main` (module-script mode).
 9. Larger Python features, each of which is a real language design (not just

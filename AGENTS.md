@@ -1,31 +1,31 @@
-# AGENTS.md — Aoxn compiler
+# AGENTS.md 鈥?Aoxn compiler
 
 Aoxn: AI-native compiled language with Python-style syntax (indentation
 blocks, `def`, `elif`, `#` comments). Programs lower to ISO C
-(`src/codegen_c.rs`) and clang compiles/links them to native code — measured
+(`src/codegen_c.rs`) and clang compiles/links them to native code 鈥?measured
 at parity with `clang -O3`. **v0.29.0 (2026-10-01): the LLVM dependency is
 gone**; the C-emitting backend is the only backend (history:
 `docs/llvm-independence-report.md`, `CHANGELOG.md`). **v0.30.0: Windows
-was made the only supported platform** — **v0.46.0 brought Linux back**
+was made the only supported platform** 鈥?**v0.46.0 brought Linux back**
 (the compiler, the whole suite and a rewritten X11 UI backend run on
-ubuntu-latest; the installer and the WinHTTP transport stay Windows-only —
+ubuntu-latest; the installer and the WinHTTP transport stay Windows-only 鈥?
 `docs/platform-support.md` is the authority). macOS stays unsupported. This
 repo IS the
 compiler (Rust workspace: root `aoxn` crate + `crates/aoxn-pkg`).
 Language sources use the `.ax` extension. Language rules live in
-`docs/spec.md` (Windows-only: `docs/platform-support.md`) — keep it in sync with `src/parser.rs` + `src/typecheck.rs`
+`docs/spec.md` (Windows-only: `docs/platform-support.md`) 鈥?keep it in sync with `src/parser.rs` + `src/typecheck.rs`
 when the grammar changes. Update `CHANGELOG.md` on every version bump.
-**The wiki (`wiki/`) is FROZEN since v0.29.3 (user instruction)** — do not
+**The wiki (`wiki/`) is FROZEN since v0.29.3 (user instruction)** 鈥?do not
 update wiki pages anymore; `docs/` is the living documentation and stays in
-sync. AGENTS.md is a published repo file (tracked since v0.29.3) — update it
+sync. AGENTS.md is a published repo file (tracked since v0.29.3) 鈥?update it
 in the session bench like any other file.
 
 ## Commit policy (user instruction, standing)
 
-**每对话独立工作树 / per-session worktree bench (v2, 2026-09-29 起)**:
+**姣忓璇濈嫭绔嬪伐浣滄爲 / per-session worktree bench (v2, 2026-09-29 璧?**:
 every conversation works in its OWN git worktree ("bench") created at the
 start of the session. Never commit session work from the shared main
-worktree — parallel sessions must not be able to sweep each other's
+worktree 鈥?parallel sessions must not be able to sweep each other's
 half-finished files into their commits.
 
 Session start:
@@ -34,13 +34,13 @@ Session start:
    `-2`, `-3` on name collision). The bench is a SIBLING directory of the
    repo (`D:\ailanguage-bench\`), shares the same `.git`, and starts from
    the current `main`. NOTE: in Git Bash pass the path with FORWARD SLASHES
-   (`D:/ailanguage-bench/<slug>`) — backslashes get eaten and the worktree
+   (`D:/ailanguage-bench/<slug>`) 鈥?backslashes get eaten and the worktree
    lands in a mangled path.
 2. Do ALL file work inside the bench directory; the main worktree
    (`D:\ailanguage`) stays untouched by the session.
 
-**全量提交 / full commits**: inside the bench, every commit must include
-the whole bench working tree — use `git add -A` (not `git add <file>`
+**鍏ㄩ噺鎻愪氦 / full commits**: inside the bench, every commit must include
+the whole bench working tree 鈥?use `git add -A` (not `git add <file>`
 cherry-picking, not `git add .`), then `git commit`, then verify with
 `git status` that nothing is left behind.
 
@@ -50,10 +50,10 @@ cherry-picking, not `git add .`), then `git commit`, then verify with
   `.ps1`/`.ax`/log files) so they do not land in history; do not delete files
   authored by the user.
 
-Session end (merge back + push, 合并后统一推送 — main stays current):
+Session end (merge back + push, 鍚堝苟鍚庣粺涓€鎺ㄩ€?鈥?main stays current):
 1. In the MAIN worktree require a clean `git status` (tracked files). If
    another session holds uncommitted work there, STOP and let the user
-   coordinate — never merge on top of a dirty main.
+   coordinate 鈥?never merge on top of a dirty main.
 2. `git merge --ff-only <slug>` in the main worktree (if it cannot
    fast-forward: `git rebase main` in the bench, re-run tests there,
    retry). Then `git push`, keeping
@@ -63,28 +63,28 @@ Session end (merge back + push, 合并后统一推送 — main stays current):
    `git branch -d <slug>`. A session paused mid-work keeps its bench and
    branch until the work lands.
 
-**README/SECURITY 重写 / README & SECURITY rewrite (user instruction,
+**README/SECURITY 閲嶅啓 / README & SECURITY rewrite (user instruction,
 standing)**: after every conversation that changes the project, REWRITE
-`README.md` and `SECURITY.md` against the new reality — same commit as the
+`README.md` and `SECURITY.md` against the new reality 鈥?same commit as the
 work, before the session-end merge. Do not patch them incrementally;
 regenerate the status/version/test-count sections from the actual tree
 (CHANGELOG top entry, `cargo test` totals, current commands) so they can
-never drift half a version behind (the old "v0.7 · 70/70 tests" README is
+never drift half a version behind (the old "v0.7 路 70/70 tests" README is
 the cautionary tale). Both files are bilingual (English section first,
-中文 section second) — update BOTH halves.
+涓枃 section second) 鈥?update BOTH halves.
 
-**Wiki 冻结 / wiki frozen (user instruction, standing, 2026-10-01 起)**:
-每次项目结束后**不再修改 `wiki/`** — do NOT touch `wiki/` pages at the end
+**Wiki 鍐荤粨 / wiki frozen (user instruction, standing, 2026-10-01 璧?**:
+姣忔椤圭洰缁撴潫鍚?*涓嶅啀淇敼 `wiki/`** 鈥?do NOT touch `wiki/` pages at the end
 of (or during) a session anymore. The old wiki-sync rule (update affected
 pages in the same commit) is RETIRED; the wiki stays as it is and may
 describe older behavior. `docs/` remains living documentation: keep
 `docs/spec.md` in sync with the grammar and update the topical docs
-(`docs/ui.md`, `docs/ts-m1-spec.md`, …) as before — just never `wiki/`.
+(`docs/ui.md`, `docs/ts-m1-spec.md`, 鈥? as before 鈥?just never `wiki/`.
 
 ## Commands
 
 ```powershell
-cargo build                                   # build the `aoxn` compiler (Rust only — no LLVM)
+cargo build                                   # build the `aoxn` compiler (Rust only 鈥?no LLVM)
 cargo test                                    # tests: pipeline + lib + TS + UI (see run_pkg_tests.sh for aoxn-pkg)
 bash run_pkg_tests.sh                         # aoxn-pkg tests (Smart-App-Control hash-stamp workaround)
 cargo run -- run examples\hello.ax            # compile+run an Aoxn program
@@ -101,7 +101,7 @@ cargo run -- run selfhost\driver_self_demo.ax  # fixed point: Aoxn compiler comp
 cargo run -- build examples\fib.ax -o f.exe   # emit a native executable (clang -O3 default)
 cargo run -- c examples\fib.ax                # print the generated C (`ir` is a deprecated alias)
 cargo run -- check examples\fib.ax            # type-check only: run the pipeline, print diagnostics, no C text (v0.31.1; what the IDE's Check button drives)
-cargo run -- symbols examples\fib.ax          # top-level declarations with signatures and positions, incl. every import (v0.35.0; no clang — what the IDE's outline / go-to-definition / symbol search read)
+cargo run -- symbols examples\fib.ax          # top-level declarations with signatures and positions, incl. every import (v0.35.0; no clang 鈥?what the IDE's outline / go-to-definition / symbol search read)
 cargo run -- run bad.ax --json                # diagnostics as JSON for agent consumption
 cargo run -- run examples\fib.ax --O1         # clang -O1: fast compile (O3 stays the default)
 cargo run -- build examples\fib.ax --O0       # clang -O0
@@ -112,14 +112,14 @@ cargo run -- version
 ```
 
 **Installing (v0.30.0, window rewritten in v0.37.0)**: the shipped artifact is ONE
-file, `Aoxn-<version>-Setup.exe` — the installer stub (`src/setup/`) with the
+file, `Aoxn-<version>-Setup.exe` 鈥?the installer stub (`src/setup/`) with the
 whole toolchain appended to it. Double-clicking it opens a native window
 (`src/setup/ui.rs`, laid out after the Python installer) that unpacks into
 `%LOCALAPPDATA%\aoxn`, puts `aoxn` on PATH and runs `aoxn doctor`; it downloads
 nothing unless given `-InstallClang`. `-Console` is the headless mode for
 scripts and CI. `dist/package.ps1` builds the exe and
 `.github/workflows/release.yml` publishes it on a `v*` tag; CI runs the same
-package → install → doctor → run check on every push. clang stays an
+package 鈫?install 鈫?doctor 鈫?run check on every push. clang stays an
 external prerequisite (Aoxn emits C).
 
 Package management (`crates/aoxn-pkg`, beta): `Aoxn pkg <cmd>` plus direct
@@ -132,15 +132,15 @@ package imports resolve entries via the manifest's `main`/`exports`/`types`
 (`src/pkg_manifest.rs`, zero-dep JSON reader). v0.29.4: read-only HTTP
 registry backend (`crates/aoxn-pkg/src/registry/http.rs`, TLS-free
 `std::net` client; `packages/names.json` feeds the typosquat guard).
-v0.29.5: npm bridge `aoxn npm-import` (`npm.rs`) — the npm CLI is the
+v0.29.5: npm bridge `aoxn npm-import` (`npm.rs`) 鈥?the npm CLI is the
 transport; Aoxn packages published to npm land in `vendor/<name>/` as
 path dependencies. v0.32.0 (**measured against pip/pnpm**): devDependencies
-+ `install --prod/--dev-only` (ONE lockfile, per-package `dev` flag —
++ `install --prod/--dev-only` (ONE lockfile, per-package `dev` flag 鈥?
 `Lockfile::mark_dev_only`), manifest `overrides` (applied in
 `resolve.rs::get_dependencies`), curated registries (`trust.json` +
 `advisories/` in one repo: `aoxn trust bootstrap|list|check`, `trust.rs`),
 `aoxn list`/`freeze` (`list.rs`), `--json` reports, parallel downloads
-(`--jobs`, default 8; each worker holds its own `Registry::fork()` — backends
+(`--jobs`, default 8; each worker holds its own `Registry::fork()` 鈥?backends
 carry mutable state), and enforced `IndexVersion.aoxn` minimum compiler
 versions. Topical docs: `docs/pkg-manager.md` and
 `docs/trusted-registry.md`.
@@ -148,11 +148,11 @@ versions. Topical docs: `docs/pkg-manager.md` and
 **Integrity has TWO digests; do not confuse them**: `checksum` is the
 manifest hash over the unpacked file tree (the content anchor, pinned in
 `aoxn.lock`, re-verified after extraction); `tarball_sha256` is the digest
-of the served tarball bytes (the transport digest — ONLY the HTTP backend may
+of the served tarball bytes (the transport digest 鈥?ONLY the HTTP backend may
 compare a download against it, and it is optional for pre-v0.32.0 indexes,
 in which case the wire check is skipped, never the content one). Until
-v0.32.0 the HTTP backend compared the download against `checksum` — two
-unrelated quantities — so every real download failed with a bogus integrity
+v0.32.0 the HTTP backend compared the download against `checksum` 鈥?two
+unrelated quantities 鈥?so every real download failed with a bogus integrity
 error, and its test was green only because it had written the tarball digest
 into the manifest-hash field.
 
@@ -160,24 +160,24 @@ into the manifest-hash field.
 the owner prefix stops two workspace members from overwriting each other's
 entry, and the value must never embed a filesystem path (an absolute dir in
 there made moving the project re-resolve forever). `lockfile_version` stays
-1 — every field added since is optional with a serde default.
+1 鈥?every field added since is optional with a serde default.
 
 Optimization levels (v0.29.0): `--O0/--O1/--O2/--O3` select the clang `-O`
-level used to compile the generated C — the C text itself is level-independent
+level used to compile the generated C 鈥?the C text itself is level-independent
 (test `c_text_is_opt_level_independent`). `--backend c` is accepted for
 compatibility (it is the only backend); any other value errors out.
 `Aoxn run` AND `Aoxn build` share the exe cache: content hash of entry+all
-transitive imports + compiler identity + options in `target/cache` — an
-unchanged re-run/re-build skips compile and link (run: ~1.1s → ~85ms).
+transitive imports + compiler identity + options in `target/cache` 鈥?an
+unchanged re-run/re-build skips compile and link (run: ~1.1s 鈫?~85ms).
 `AOXN_NO_CACHE=1` disables, `AOXN_CACHE_DIR=<dir>` relocates.
 
 Env (install layout, v0.30.0): `AOXN_HOME=<root>` = toolchain root (default:
 the parent of the executable's `bin/`), `AOXN_STDLIB=<dir>` = the stdlib
 sources (default: `$AOXN_HOME/lib/stdlib`, falling back to the checkout in
 dev builds). A bare `import * from "stdlib"` / `"stdlib/ui"` resolves against
-that directory **after** the project-local `aox_modules/<name>` probe —
-local packages always win. clang discovery: `AOXN_CLANG` → `PATH` →
-`<root>/toolchain/bin/clang` (portable LLVM drop-in) → repo LLVM → system.
+that directory **after** the project-local `aox_modules/<name>` probe 鈥?
+local packages always win. clang discovery: `AOXN_CLANG` 鈫?`PATH` 鈫?
+`<root>/toolchain/bin/clang` (portable LLVM drop-in) 鈫?repo LLVM 鈫?system.
 
 Env: `AOXN_DUMP_C=1` dumps generated C to stderr; `AOXN_TIME=1` prints
 pipeline phase wall-clock (lex/parse/typecheck/codegen/link);
@@ -194,32 +194,32 @@ Single test: `cargo test --test pipeline recursion_fib`.
 ## Environment facts (non-obvious, verified)
 
 - **clang is the only external toolchain** (needed to compile the generated C
-  and to link). Resolution order: `AOXN_CLANG` env → PATH → repo-local
-  `LLVM\bin\clang.exe` → `C:\Program Files\LLVM\bin\clang.exe`. The winget
-  "LLVM 23.1.0" install on this machine survives purely as clang's home —
+  and to link). Resolution order: `AOXN_CLANG` env 鈫?PATH 鈫?repo-local
+  `LLVM\bin\clang.exe` 鈫?`C:\Program Files\LLVM\bin\clang.exe`. The winget
+  "LLVM 23.1.0" install on this machine survives purely as clang's home 鈥?
   no LLVM library is probed, linked, or shipped since v0.29.0 (`build.rs`,
   `src/llvm.rs`, `src/codegen.rs` are deleted).
 - clang auto-detects MSVC Build Tools, which must be installed (Rust host is
   x86_64-pc-windows-msvc) for the final link. User programs needing C
   libraries pass `-l NAME` / `-L DIR` (forwarded to clang).
 - **COFF TimeDateStamp flake trap (fixed in a23e096)**: clang stamps the
-  wall-clock time into every Windows object (bytes 4–8 of the COFF header),
+  wall-clock time into every Windows object (bytes 4鈥? of the COFF header),
   so two compiles of identical C differ by exactly those bytes. The
   fixed-point test masks them (`tests/pipeline.rs`, Windows only). If you see
   an object diff "first diff at Some(4)", it is the timestamp, not a codegen
   bug.
-- **Do NOT add external crates to the compiler library `src/`** — zero deps
+- **Do NOT add external crates to the compiler library `src/`** 鈥?zero deps
   there is a security property (see SECURITY.md). `crates/aoxn-pkg` may use
   crates (clap/serde/semver/pubgrub/sha2/hex/flate2/tar/dirs/thiserror),
   pinned by `Cargo.lock`.
 - MSVC STL (VS 2022 17.14+) rejects clang 18 ("expected Clang 19.0.0 or
-  newer") when compiling C/C++ with headers — irrelevant for Aoxn emission,
+  newer") when compiling C/C++ with headers 鈥?irrelevant for Aoxn emission,
   but breaks ad-hoc C++ comparison probes; declare externs manually instead
   of including headers.
-- This dev machine's 10–50ms phase timings swing ±2× (AV/indexer): benchmark
-  comparisons need interleaved 5× min/median or they lie.
+- This dev machine's 10鈥?0ms phase timings swing 卤2脳 (AV/indexer): benchmark
+  comparisons need interleaved 5脳 min/median or they lie.
 - **`run_pkg_tests.sh` exists because Windows Smart App Control blocks
-  freshly built unsigned test binaries after their first runs** — the script
+  freshly built unsigned test binaries after their first runs** 鈥?the script
   bumps a marker comment so each test build produces a new binary hash. Use
   it instead of bare `cargo test -p aoxn-pkg` on this machine.
 - **The same AV behavior hits the INSTALLER, and it is worse there.**
@@ -227,58 +227,58 @@ Single test: `cargo test --test pipeline recursion_fib`.
   *after* `aoxn doctor` has already run it successfully. The installer used
   to report **Done** and leave a PATH entry pointing at a file that no
   longer existed, so the failure surfaced at the next command as
-  PowerShell's `"The term '…\bin\aoxn.exe' is not recognized as a name of a
-  cmdlet"` — an error that blames the shell. `confirm_present` in
+  PowerShell's `"The term '鈥bin\aoxn.exe' is not recognized as a name of a
+  cmdlet"` 鈥?an error that blames the shell. `confirm_present` in
   `src/setup/main.rs` re-checks the binary after the self-test and fails the
   install with the cause and the remedy; `release.yml` checks the path before
   invoking it. **When touching the installer, keep that check.**
 - **The installer downloads NOTHING by default** (v0.37.0). It unpacks, sets
   PATH and runs `aoxn doctor`. It used to `winget install LLVM.LLVM` whenever
   it found no clang, which turned a ten-second install into a multi-minute one
-  behind a progress bar that never mentioned the download — indistinguishable
+  behind a progress bar that never mentioned the download 鈥?indistinguishable
   from hung. `-InstallClang` re-enables it deliberately. **Do not add an
   unprompted download to the install path**; report what is missing instead.
 - **The installer window (`src/setup/ui.rs`) is modelled on the Python
-  installer** — Welcome / Progress / Done, with ONE primary button that changes
+  installer** 鈥?Welcome / Progress / Done, with ONE primary button that changes
   meaning per phase (Install Now -> Cancel -> Close) rather than being swapped.
   Everything is owner-drawn in GDI. `main.rs` hands the UI a *closure*; the
   worker must not be spawned before the user clicks, or the toolchain unpacks
   into the disk with nothing on screen.
 - `WNDCLASSEXW::lpszClassName` must point at memory that outlives the
-  statement — Win32 keeps the pointer for the life of the class. The class
+  statement 鈥?Win32 keeps the pointer for the life of the class. The class
   names are leaked UTF-16 buffers (`wide_leaked`), not temporaries.
 - `src/setup/main.rs` no longer contains a literal NUL byte (the payload magic
   is `b"AOXNSFX\x00"`, an escape). The file reads as text again, so grep/rg
   work on it. It *did* contain one from v0.30.0 to v0.37.0; if it ever comes
-  back, do not "clean it up" blindly — check the magic spelling first.
+  back, do not "clean it up" blindly 鈥?check the magic spelling first.
 
 ## Windows tooling gotchas (learned the hard way)
 
 - **A `git push` that SUCCEEDS can still print an error and exit 1 under
   PowerShell.** GitHub writes `remote: This repository moved. Please use the
   new location: ...` to **stderr** (the notice names `Ryan-178/Aoxn-language`
-  even though `origin` is `AlonechatWorkspace/Aoxn-language` — it is a stale
+  even though `origin` is `AlonechatWorkspace/Aoxn-language` 鈥?it is a stale
   redirect, not a real relocation). PowerShell routes native stderr into the
   error stream, so `git push` exits 1 and looks like a failure. **Do not trust
-  the exit code** — verify with `git fetch origin` then
+  the exit code** 鈥?verify with `git fetch origin` then
   `git rev-list --left-right --count origin/main...main`; `0 0` means the push
   landed.
 - **PowerShell variables are CASE-INSENSITIVE.** `$zh` and `$ZH` are the same
   variable. A script that loaded a UTF-8 string into `$ZH` and an array into
   `$zh` silently replaced an array with `($array + ' ')`, which joins it into
-  one string — that is how a whole 25-line bilingual block collapsed into a
+  one string 鈥?that is how a whole 25-line bilingual block collapsed into a
   single README line. Prefer names that differ by more than case, and never
   let a script's own data file names be its variable names.
 - **PowerShell 5.1 `-Encoding UTF8` writes a BOM.** Aoxn `.ax` sources are
-  read byte-wise — a BOM (EF BB BF) is an "unexpected character" at 1:1.
+  read byte-wise 鈥?a BOM (EF BB BF) is an "unexpected character" at 1:1.
   After any PowerShell rewrite of a `.ax` file, strip BOMs:
   check bytes `[0]==0xEF && [1]==0xBB && [2]==0xBF` and slice them off.
-  The Write tool does NOT add a BOM — prefer it over shell heredocs.
+  The Write tool does NOT add a BOM 鈥?prefer it over shell heredocs.
 - **PowerShell quoting for inline code is a trap** (backticks, `$()`, nested
   quotes). For anything non-trivial, write a `.ps1` via the Write tool and
   execute it. Commit messages: `git commit -F <file>`, never `-m` with
   multiline text.
-- **Git Bash eats backslashes in path arguments** — `git worktree add
+- **Git Bash eats backslashes in path arguments** 鈥?`git worktree add
   D:\ailanguage-bench\foo` creates a mangled directory. Use forward slashes.
 - `winget download` of LLVM needs `--accept-source-agreements`; CI installs
   clang the same way (Windows).
@@ -286,32 +286,32 @@ Single test: `cargo test --test pipeline recursion_fib`.
 ## Architecture (pipeline order)
 
 ```
-.aox source (.ax extension)  — or TypeScript (.ts/.tsx) via src/ts/
-  → src/lexer.rs      tokens with line/col/file; emits NEWLINE/INDENT/DEDENT
-  → src/parser.rs     recursive-descent AST (src/ast.rs), Python-style layout
-  → src/typecheck.rs  strict check + FnSig table + GENERIC monomorphizer
-  → src/codegen_c.rs  ISO C text → clang -c → object file (clang -O<n> -w -c)
-  → src/lib.rs        load imports (src/files.rs registry) → link via clang → executable
+.aox source (.ax extension)  鈥?or TypeScript (.ts/.tsx) via src/ts/
+  鈫?src/lexer.rs      tokens with line/col/file; emits NEWLINE/INDENT/DEDENT
+  鈫?src/parser.rs     recursive-descent AST (src/ast.rs), Python-style layout
+  鈫?src/typecheck.rs  strict check + FnSig table + GENERIC monomorphizer
+  鈫?src/codegen_c.rs  ISO C text 鈫?clang -c 鈫?object file (clang -O<n> -w -c)
+  鈫?src/lib.rs        load imports (src/files.rs registry) 鈫?link via clang 鈫?executable
 src/main.rs           CLI (build / run / c / pkg...), --json diagnostics, -l/-L link flags, --clang-arg/-g/--cc-warnings
 crates/aoxn-pkg       package manager crate (its own dependency set; see above)
 ```
 
 - Diagnostics: `Diag { stage, file: u32, line, col, message, severity, code }`
   in lib.rs; stages are `lex | parse | type | internal | link | io | asset |
-  cc`. `file` indexes `src/files.rs` (thread_local registry) — resolved to
+  cc`. `file` indexes `src/files.rs` (thread_local registry) 鈥?resolved to
   names at print/JSON time. Compiler-internal failures must surface as
   `internal` diags, never panics. **`severity` splits errors from warnings**
   (v0.42.0): warnings never fail a build, ride a thread-local channel
   (`push_warning`/`take_warnings`, cleared once per `typecheck::check`) instead
   of every pipeline `Result`, and appear in `--json` as a `warnings` array
-  beside `errors` — including on success. `W001` is the unused-local lint.
+  beside `errors` 鈥?including on success. `W001` is the unused-local lint.
   A **`cc`** diag means the C compiler rejected our text (nearly always a
-  user `extern def` that contradicts a C declaration) — do not fold it back
+  user `extern def` that contradicts a C declaration) 鈥?do not fold it back
   into `internal`.
 - The compiler library `src/` has zero external crate dependencies. The C
-  emitter is plain string building — no LLVM handles, no FFI of its own
+  emitter is plain string building 鈥?no LLVM handles, no FFI of its own
   beyond what user programs declare.
-- Multi-file: `load_program` (lib.rs) resolves imports recursively —
+- Multi-file: `load_program` (lib.rs) resolves imports recursively 鈥?
   include-once per canonical path, cycles rejected via an import stack,
   paths relative to the importing file. String-based APIs (`build_exe`)
   reject imports; only path-based entry points resolve them. A resolved
@@ -327,7 +327,7 @@ crates/aoxn-pkg       package manager crate (its own dependency set; see above)
     (`ui.button` -> `ui_button`), or unless it is not spellable unqualified
     at all (what a selective import left out). A contended program did not
     compile before v0.43.0, so **every existing program emits byte-identical
-    C** — which is what keeps the self-host fixed point true with NO stage-2
+    C** 鈥?which is what keeps the self-host fixed point true with NO stage-2
     mirror of the binding layer. Do not "always mangle": that changes every
     program's C and breaks the fixed point.
   - **A star import re-exports** (a module's own names plus what IT
@@ -336,12 +336,12 @@ crates/aoxn-pkg       package manager crate (its own dependency set; see above)
     declared it, so a stdlib function arriving through two paths is one
     function and not a "comes from two modules" conflict. Dropping that
     origin is what makes both SDKs fail to compile.
-  - **An entry module's own names are always visible** — `entries` is passed
+  - **An entry module's own names are always visible** 鈥?`entries` is passed
     to `resolve` for exactly this. Without it every program's `main` would
     be prefixed.
   - **An unquoted specifier probes the importing file's own directory; a
     quoted one does not.** `ImportDecl.path_quoted` carries that difference
-    all the way into `scan_imports`, which the build-cache key depends on —
+    all the way into `scan_imports`, which the build-cache key depends on 鈥?
     miss it and editing a bare-imported module silently serves a stale exe.
   - `aoxn symbols` must report SOURCE spellings
     (`Flattened::with_source_names`); the IDE's outline and go-to-definition
@@ -358,18 +358,18 @@ crates/aoxn-pkg       package manager crate (its own dependency set; see above)
   so assignment/param/return copy by value exactly like C struct semantics.
 - Aggregate ABI: aggregates cross function boundaries as pointer + sret
   out-pointer (spelled natively in C), same shape the old LLVM backend used.
-- The generated C text is **level-independent** — `--O` only picks the clang
+- The generated C text is **level-independent** 鈥?`--O` only picks the clang
   level. Stage-1 (Rust-built) and stage-2 (Aoxn-built) compilers must emit
   byte-identical C AND byte-identical objects for the same program (the
   fixed point); the only tolerated object difference is the COFF timestamp
   the test masks.
-- **No address may reach the emitted text — the C must be reproducible ACROSS
+- **No address may reach the emitted text 鈥?the C must be reproducible ACROSS
   PROCESSES, not just within one.** `aoxn c` on an unchanged tree has to
   produce the same bytes on every run, because the build cache keys on them,
   the fixed point compares them, and a build log that saw two files for one
   source is simply wrong. v0.50.10: the `[X] * N` fill helper was named
   `ax_rep_<Expr heap address>`, so six runs produced six different files, and
-  the helper TABLE was keyed by that address too — which made the order of the
+  the helper TABLE was keyed by that address too 鈥?which made the order of the
   definitions random as well, so even a single site was non-deterministic.
   Sites are now keyed by `lit_id` (the parser's source-ordered literal id) and
   numbered by a first-use counter, which is what `selfhost/codegen.ax` has
@@ -379,39 +379,39 @@ crates/aoxn-pkg       package manager crate (its own dependency set; see above)
   live. `c_text_is_stable_across_processes` in `tests/pipeline.rs` runs the
   binary five times in five separate processes for exactly that reason, and it
   also pins the first-use mapping (helper 0 must be the first site in the
-  source) — the part that could otherwise drift silently. When you add a
+  source) 鈥?the part that could otherwise drift silently. When you add a
   generated C identifier, ask what it is derived from: **a counter, a source
-  position or a name — never `as *const T as usize`.**
+  position or a name 鈥?never `as *const T as usize`.**
 - **The fixed point compares selfhost against selfhost for the driver's own
   product; it does NOT compare `src/codegen_c.rs` against
   `selfhost/codegen.ax`.** `selfhost_driver_self_compiles` builds the same
   driver twice (once with the Rust compiler, once with the Aoxn-built one) and
-  diffs the C they emit — but the driver is an Aoxn program importing
+  diffs the C they emit 鈥?but the driver is an Aoxn program importing
   `selfhost/driver.ax`, so BOTH stages emit through `selfhost/codegen.ax`.
   That is exactly how the address-named helper above survived for years, and
   the two emitters DO currently diverge: the Rust backend sorts `extern def`
   declarations by C name while the self-hosted emitter keeps first-use order.
   Both are individually deterministic, so this is a gap in what the fixed point
-  *proves*, not a live correctness bug — but do not read a green
+  *proves*, not a live correctness bug 鈥?but do not read a green
   `selfhost_driver_self_compiles` as "the two backends agree on emitted C".
   Closing it means a genuine stage-1-vs-stage-2 C comparison.
 - `target_os()` is a compile-time builtin folding the OS the compiler was
   BUILT on: `"windows"` on a Windows build, `"linux"` on a Linux build
   (v0.46.0), `"other"` elsewhere. **Both** compilers must fold the same
-  value or the fixed point breaks — and they do BY CONSTRUCTION:
+  value or the fixed point breaks 鈥?and they do BY CONSTRUCTION:
   `selfhost/codegen.ax`'s builtin emitter calls `target_os()` itself, a
   value burned in by whatever compiler built it, so every stage on one
   machine folds the same host OS. Do NOT give the selfhost side its own
-  platform check — the chain is the check. It stays a builtin because it
+  platform check 鈥?the chain is the check. It stays a builtin because it
   is part of the language, and source that branches on it must keep
   compiling.
 - Reserved-word collisions in emitted C identifiers are handled by the
   keyword table in codegen_c.rs; C runtime use is limited to the small
-  builtin name list (`malloc`, `memcpy`, `strlen`, `snprintf`, …).
+  builtin name list (`malloc`, `memcpy`, `strlen`, `snprintf`, 鈥?.
 - platform.rs centralizes exe/obj extensions (`exe_ext`/`obj_ext`), the
   Windows stack-link flag (`-Wl,/STACK:8388608`), and `target_os_name()`.
   Tests must use these helpers, not literals (CI runs the suite on ONE
-  platform, `windows-latest`, since v0.30.0 — the language is Windows-only).
+  platform, `windows-latest`, since v0.30.0 鈥?the language is Windows-only).
 
 ## Lexer invariants (Python-style layout)
 
@@ -422,7 +422,7 @@ crates/aoxn-pkg       package manager crate (its own dependency set; see above)
   (implicit line joining).
 - EOF: flush trailing `Newline`, then pending `Dedent`s, then `Eof`.
 - `//` is NOT a comment (it is int division); comments are `#` only.
-- Indent/dedent mismatch → lex error "unindent does not match any outer
+- Indent/dedent mismatch 鈫?lex error "unindent does not match any outer
   indentation level".
 - Tests embed indented sources; `dedent()` in tests/pipeline.rs strips the
   common leading whitespace before compiling.
@@ -432,6 +432,28 @@ crates/aoxn-pkg       package manager crate (its own dependency set; see above)
 - No implicit int/float conversions, no re-typing a bound name, `bool`
   conditions only, all-paths-return, no unreachable code. This strictness is
   a feature (deterministic, AI-verifiable); do not relax it casually.
+- **Python syntax sugar, part 1 (v0.51.0)**: default parameter values
+  (`def f(a: int, b: int = 3)`), the conditional expression
+  (`a if c else b`), `**`, and a `print` that takes several values. Four
+  traps, all pinned in `tests/pipeline.rs`:
+  - **A default is MATERIALIZED BY THE CALL SITE** — the C prototype keeps
+    every parameter, so a program that spells no default emits
+    byte-identical C and the self-host fixed point needs **no
+    `selfhost/` mirror** (same status as the v0.40.0 features). A default
+    may not name a parameter (it is written into the call, where that name
+    does not exist), and `extern def` / generic functions may not have one.
+  - **A default value can RAISE.** It is emitted as text into a caller's
+    body, so `scan_fn_body` must walk parameter defaults too — otherwise
+    the caller carries no unwind check and a raising default unwinds
+    through a frame that never tested the slot.
+  - **Both branches of `a if c else b` must have the SAME type.** There is
+    no conversion to fall back on, and a pair that merely "unifies" would
+    invent one in the least-looked-at place.
+  - **`-2 ** 2` is `-4`** (`**` binds looser than unary minus, tighter than
+    `*`, right-associative), and a **negative `int` exponent yields 0**,
+    not a float — `to_float(3) ** -1` for that.
+  - The TS front end lowers `c ? a : b` into the same node (it used to
+    reject the ternary outright).
 - Python-style surface, native semantics: `def`/`elif`/`pass`, `x = 5`
   infers, `x: int = 5` checks, re-assignment keeps the type, `and`/`or`/`not`
   + `True`/`False` are aliases of the symbolic operators.
@@ -439,8 +461,8 @@ crates/aoxn-pkg       package manager crate (its own dependency set; see above)
   `>>`, **int-only** like `%`. They were added for the crypto/TLS/HTTP2 work
   (SHA-256 rounds, the TLS 1.3 key schedule, HPACK varints, UTF-8
   continuation bytes). Two traps, both pinned in `tests/pipeline.rs`: **in C
-  `==` binds TIGHTER than `&`** (`a & b == c` is `a & (b == c)` — write
-  `(a & b) == c`), and there are **no augmented bitwise forms** — write
+  `==` binds TIGHTER than `&`** (`a & b == c` is `a & (b == c)` 鈥?write
+  `(a & b) == c`), and there are **no augmented bitwise forms** 鈥?write
   `x = x & y`. Do not "fix" the precedence to what looks intuitive.
 - **The spelling/IO layer grew in v0.42.0** (all four are pinned in
   `tests/pipeline.rs`):
@@ -450,49 +472,49 @@ crates/aoxn-pkg       package manager crate (its own dependency set; see above)
     messages. Mirrored in `selfhost/lexer.ax` (`parse_radix`,
     `is_radix_digit`) and pinned by `selfhost_driver_mirrors_radix_literals_and_escapes`.
   - **Six string escapes**: `\n \t \r \0 \\ \"` (`\r` and `\0` are new).
-    `\0` is for byte buffers only — `len()` is `strlen`, so a NUL truncates
+    `\0` is for byte buffers only 鈥?`len()` is `strlen`, so a NUL truncates
     every string builtin.
   - **`assert(cond[, message])`** prints `assertion failed at line N[: msg]`
-    (stdout, like the uncaught-exception report — the runtime never writes to
+    (stdout, like the uncaught-exception report 鈥?the runtime never writes to
     stderr) and exits 1. Not catchable, and it does not count as an exit for
     the all-paths-return rule.
   - **`exit(code)`**, and **`argc()`/`arg(i)`** for the command line. `argc()`
     excludes the program path; `arg(i)` is 0-based and returns `""` out of
     range. **The `main(argc, argv)` wrapper and the argv globals are emitted
-    ONLY when the program calls those two builtins** — every other program's C
+    ONLY when the program calls those two builtins** 鈥?every other program's C
     text is byte-identical, which is why the self-host fixed point needs no
     `selfhost/codegen.ax` mirror for argv (stage-2 does not know the builtins,
     same status as the v0.40.0 features). `def main(argc: int)` is now a
     `type` error naming the builtins (it used to reach clang and surface as
     `internal`); `main` returns `int` or `void`, with the TS front end's
     `function main(): number` explicitly exempt.
-- **`vec_push` delegates again (v0.39.2) — the "self-host trap" is
+- **`vec_push` delegates again (v0.39.2) 鈥?the "self-host trap" is
   ROOT-CAUSED, and it was never a compiler bug.** The culprit is
   `struct_cycle` in `selfhost/typecheck.ax`: the cycle detector threaded its
   DFS path as a `Vec` **by value**, pushed onto it, then recursed. The
   callee's push can realloc, and realloc frees the buffer that every other
-  copy of the handle still points at — so on return the caller's `path`
+  copy of the handle still points at 鈥?so on return the caller's `path`
   dangled and the next sibling branch walked freed memory (0xC0000374). It
   stayed latent because the inline growth reserved 8 slots up front, so the
   first eight pushes of any path never reallocated; the delegating form
-  grows 1, 2, 4, … and reallocates on almost every push, which turned the
+  grows 1, 2, 4, 鈥?and reallocates on almost every push, which turned the
   latent bug into a sure crash. The fix is the write-back discipline the
   rest of the self-hosted code already follows: return the live handle with
   the answer (`struct Cycle{hit, path}`) and hand back `vec_pop(mine)`, so
   the caller's ancestor chain is restored but points at the current buffer.
-  Returning the *extended* path instead is wrong in the other direction —
+  Returning the *extended* path instead is wrong in the other direction 鈥?
   the DFS path must be the ancestor chain, not every node ever visited, or a
   node reached twice through different branches reads as a cycle.
 - **The general rule this exposes**: a `Vec` handle must be refreshed from
   its callee whenever that callee may have grown it. A function that takes a
-  `Vec`, pushes onto it, and recurses **cannot return `int`** — it has no
+  `Vec`, pushes onto it, and recurses **cannot return `int`** 鈥?it has no
   way to hand the handle back. `load_file` gets this right (`ls =
-  load_file(ls, …)`); the old cycle detector had no such door.
-- **`raise` / `try` / `except` exist (v0.40.0) — the v0.39.0 "no exceptions"
+  load_file(ls, 鈥?`); the old cycle detector had no such door.
+- **`raise` / `try` / `except` exist (v0.40.0) 鈥?the v0.39.0 "no exceptions"
   decision was reversed by user instruction (2026-10-04).** `raise <string>`
   unwinds to the nearest `try` handler (or out of the function; uncaught =
   one report, exit 1). The runtime is two statics (pending flag + message), a
-  `goto`, and a slot check after every statement that called a raiser — the
+  `goto`, and a slot check after every statement that called a raiser 鈥?the
   may-raise set is a fixpoint over call names, and calls through a function
   pointer always count. A raise inside a try BODY is caught by that try; in
   a handler it propagates. `raise` counts as an exit for all-paths-return
@@ -500,18 +522,18 @@ crates/aoxn-pkg       package manager crate (its own dependency set; see above)
   inspected failures; `Diag` stays compile-time. **Known wart, pinned by
   test**: a statement's check runs after the statement, so
   `print(f(x))` with a raising `f` prints the zero return value before the
-  hop — fixing it means hoisting raising args out of the call, in
+  hop 鈥?fixing it means hoisting raising args out of the call, in
   `codegen_c.rs` AND the selfhost mirror.
-- **`dict[V]` is a HEAP HANDLE (v0.40.0), not a value** — `struct
+- **`dict[V]` is a HEAP HANDLE (v0.40.0), not a value** 鈥?`struct
   ax_dict_V*` over parallel key/value arrays, like the UI's `TableModel` and
   the web `FileTable`. The first spelling passed the 4-word struct by value
   and was unsound twice over (`len`/`cap` lived in the copy, so a callee's
   growth/del was invisible; the stale `len` then walked off a reallocated
-  buffer — correct at -O0, segfault at -O1+, reproduced with clang on the
+  buffer 鈥?correct at -O0, segfault at -O1+, reproduced with clang on the
   bare C). Copying the handle SHARES the dict; set/del through any copy is
   visible to all. A missing key RAISES `dict key not found` (the reason any
   program with a dict pulls in the error slot); `dict_has` guards reads.
-  `{}` needs an annotation (`d: dict[int] = {}`) — and that annotation path
+  `{}` needs an annotation (`d: dict[int] = {}`) 鈥?and that annotation path
   is special-cased in the Let arms of BOTH the checker and codegen, because
   `check_expr`/`hint` have no expected type to give an empty literal.
 - **v0.40.0 also added function pointers and `T | None`**: a bare function
@@ -519,7 +541,7 @@ crates/aoxn-pkg       package manager crate (its own dependency set; see above)
   casts between `int` and fn-ptr, `to_int(f)`); `None` + `T | None` is the
   only union form, `is None` / `is not None` narrow per branch (checker AND
   codegen keep the narrowed view), and print/operators reject a nullable
-  until narrowed. **The selfhost mirror has NONE of v0.40.0 yet** —
+  until narrowed. **The selfhost mirror has NONE of v0.40.0 yet** 鈥?
   `selfhost/codegen.ax` emits no dict/None/fn-ptr/raise text, so the fixed
   point only covers programs without them. Porting is future work.
 - Arrays `[T; N]` and structs are first-class value types (copy on
@@ -529,13 +551,13 @@ crates/aoxn-pkg       package manager crate (its own dependency set; see above)
   work byte-wise, `len()` is bytes. They live in struct fields/arrays by
   shared pointer (safe: immutability); concat results leak by design.
 - **One array length parameter per function** (`def f[N](a: [T; N], ...)`;
-  multiple differently-sized arrays in one signature are still unsupported —
+  multiple differently-sized arrays in one signature are still unsupported 鈥?
   this shapes API design, e.g. the UI toolkit's table/tree take heap-backed
   model objects instead of parallel arrays).
 - When grammar/semantics change: update `docs/spec.md`, parser, typecheck,
   codegen, and add a test in `tests/pipeline.rs` in the same change.
 
-## UI toolkit (stdlib/ui.ax + ui_draw.ax + a backend) — v3 widget set, 3 OS
+## UI toolkit (stdlib/ui.ax + ui_draw.ax + a backend) 鈥?v3 widget set, 3 OS
 
 - **FOUR FILES**: `ui.ax` (portable core) + `ui_draw.ax` (the
   platform-NEUTRAL widget layer) + ONE backend per platform: `ui_win.ax`
@@ -545,7 +567,7 @@ crates/aoxn-pkg       package manager crate (its own dependency set; see above)
   `target_os()`.
 - **`plat_*` primitive contract** (see the `ui_draw.ax` header): the widget
   layer only ever calls `plat_fill_rect` / `plat_text` / `plat_measure` /
-  `plat_clip_push` / `plat_pump` / `plat_init` / … and each backend
+  `plat_clip_push` / `plat_pump` / `plat_init` / 鈥?and each backend
   supplies them. THREE tests pin this (`tests/ui.rs`): the widget layer
   must name no Win32/Xlib symbol; BOTH backends must implement the SAME
   `plat_*` set (the check covers `ui_x11.ax` since v0.46.0); every
@@ -554,7 +576,7 @@ crates/aoxn-pkg       package manager crate (its own dependency set; see above)
 - **No third windowing backend.** `extern def` can only pass
   int/f64/string/bool, so a backend whose window/draw API takes structs by
   value (AppKit's `NSRect`/`CGRect`, for one) is not expressible, and there
-  is no C shim escape hatch — the compiler only emits its own C text
+  is no C shim escape hatch 鈥?the compiler only emits its own C text
   (`src/codegen_c.rs`) and shells out to clang. Do NOT add a native backend
   for another windowing system (Cocoa is the standing example); if a future
   version gains struct-typed externs, revisit then.
@@ -562,7 +584,7 @@ crates/aoxn-pkg       package manager crate (its own dependency set; see above)
   function pointers/closures). Widgets are per-frame functions; app state
   travels via the write-back idiom (struct in / struct out). Reference:
   `docs/ui.md`; showcase: `examples/ui_gallery.ax`; tests: `tests/ui.rs`.
-- **Signal-slot without function pointers**: an integer-channel event bus —
+- **Signal-slot without function pointers**: an integer-channel event bus 鈥?
   `ui_connect(c, signal, slot)` + `ui_emit(c, signal, kind, a, b)` queues
   `Ev` records read via `ui_event_count`/`ui_event(i)`; the app dispatches
   one switch on `ev.slot`. Widgets don't hold handlers.
@@ -573,58 +595,58 @@ crates/aoxn-pkg       package manager crate (its own dependency set; see above)
   `ui_textbox` (single line) + `ui_textedit` (multi-line, line cache in the
   heap block) share pure edit ops in the portable half; clipboard via
   `ui_clip_get/set` (CF_UNICODETEXT). Render text slices with
-  `ui_measure_sub`/`ui_draw_text_sub` (frame-arena based — never `str_sub`
+  `ui_measure_sub`/`ui_draw_text_sub` (frame-arena based 鈥?never `str_sub`
   on a frame path).
 - **v0.45.0 internals worth knowing**: text click/drag positioning goes
-  through `text_pos_in_range` (O(n) — one measure per codepoint, summed;
-  never re-measure `s[0..j)` per codepoint, that was O(n²)); the caret
-  x-offset rides a one-entry cache at st 532..535 (key: id/caret/len —
+  through `text_pos_in_range` (O(n) 鈥?one measure per codepoint, summed;
+  never re-measure `s[0..j)` per codepoint, that was O(n虏)); the caret
+  x-offset rides a one-entry cache at st 532..535 (key: id/caret/len 鈥?
   keep `caret_offset`'s `from` a pure function of (s, caret));
   `TreeModel` blocks are 4 slots per node (parent, expanded, label, child
-  count — `tree_has_child` is O(1) and `tree_set_parent` maintains the
+  count 鈥?`tree_has_child` is O(1) and `tree_set_parent` maintains the
   count on re-parent); all five scrollbars are one `sb_widget`; popup
   lists clamp to the first 32 items and `overlay_item_str` answers ""
   out of range (a scrolled 40-item popup used to `as_string` a garbage
   pointer); an open menu consumes the arrow/Enter/Esc key edges and the
-  WM_CHAR queue for its frame — modal, so call `ui_menubar`/`ui_menu`
+  WM_CHAR queue for its frame 鈥?modal, so call `ui_menubar`/`ui_menu`
   before the page content.
-- **GDI stock pens: `DC_PEN = 19`, `DC_BRUSH = 18`** — `GetStockObject(20)`
+- **GDI stock pens: `DC_PEN = 19`, `DC_BRUSH = 18`** 鈥?`GetStockObject(20)`
   is out of range and fails silently (no outline ever drew; fixed in
   v0.29.2). Keep the decimal-constant discipline: no hex literals, no
   bitwise ops in the language.
 - The shared heap block (`st`, 1024 i64 slots) layout is documented in the
-  `ui.ax` header comment — extend it there when adding state. Slots
+  `ui.ax` header comment 鈥?extend it there when adding state. Slots
   820/821 = the backend clip stack (**Windows: one `SaveDC` handle per
-  level, `RestoreDC` on pop — `IntersectClipRect` only ever narrows, so
+  level, `RestoreDC` on pop 鈥?`IntersectClipRect` only ever narrows, so
   re-intersecting on pop could never restore; that bug clipped the whole
   window to the first textbox rect for the rest of the process, BitBlt
   included, and `tests/ui.rs::ui_clip_stack_restores_and_culls` is the
   pixel readback that pins it**), 822/823 = the clipboard buffer (X11's
   selection-owner state; Windows keeps the bytes in GlobalAlloc),
   824 = the X11 close request consumed by `plat_pump` (Windows needs no
-  flag — close detection is the `IsWindow` poll),
+  flag 鈥?close detection is the `IsWindow` poll),
   826 = the sans font handle parked for `ui_font_sans`,
   532..535 = the caret x-offset cache (owner id / caret / length / width),
   827..834 = the widget layer's own state: the clip SHADOW stack (827
   stack, 828 depth, 829..832 the effective clip in force, 833 the
   canvas-known flag) that `ui_clip_push`/`ui_clip_pop` maintain and that
-  `rect_visible`/`text_visible` cull against — nothing is culled until
+  `rect_visible`/`text_visible` cull against 鈥?nothing is culled until
   `ui_init`/`ui_resize_canvas` set the canvas, so headless tests still
-  draw everything — and 834 the 64-entry text-measure cache keyed by
+  draw everything 鈥?and 834 the 64-entry text-measure cache keyed by
   (bounded content hash, from, to),
   835..840 = the Windows DC state cache (selected stock brush/pen, their
   colors, selected font, text color); anything that changes the DC behind
   its back must call `dc_cache_drop` (clip pop's `RestoreDC`, the resize
   bitmap swap),
   559 = the layout overflow counter (v0.49.0: a `lay_push` past the 8-level
-  cap balances its own `ui_layout_end` here instead of popping a live box —
+  cap balances its own `ui_layout_end` here instead of popping a live box 鈥?
   `ui_layout_overflow`/`ui_layout_depth` read it/558),
-  830 = the cached body-font line height (`ui_font_height`, v0.49.0 — a
+  830 = the cached body-font line height (`ui_font_height`, v0.49.0 鈥?a
   textbox used to measure its WHOLE field per frame just to read `ts.h`,
   an O(n) content hash under the v0.47.0 measure cache).
 - **One press cycle, fifteen widgets (v0.49.0)**: `ui_press` /
   `ui_press_claim` / `ui_press_release` / `ui_pressed` own the `st 0`
-  claim, and `ui_wheel_scroll`/`ui_clamp_scroll` own the wheel math — the
+  claim, and `ui_wheel_scroll`/`ui_clamp_scroll` own the wheel math 鈥?the
   fifteen hand copies had already drifted. Two details are load-bearing:
   the claim is only taken when the slot is free (an overlay's `-1` sentinel
   is never stolen), and the slot stays claimed for the whole hold (dragging
@@ -633,17 +655,17 @@ crates/aoxn-pkg       package manager crate (its own dependency set; see above)
   v0.49.0: `itoa10`'s arena-exhaustion escape returns ASCII (it returned
   UTF-16, so a full arena made `ui_label_int` draw one digit), and
   `utf16_write` hoists `len(s)` out of its loop (`while i < len(s)` is
-  O(n²) — see the v0.48.0 stdlib rule).
+  O(n虏) 鈥?see the v0.48.0 stdlib rule).
 - **Measure per-op costs before optimizing this toolkit** (i5-1135G7, GDI,
   1000x700): `BitBlt` 0.8 ms, full-window fill 0.08 ms, `TextOutW` ~7 us,
   `plat_measure` ~2.6 us, `plat_fill_rect` ~1.3 us, and
   `GetAsyncKeyState` / `PeekMessageW` / `GetClientRect` are FREE (10 000
-  calls measure at 0 ms — the 256-key sweep in `plat_pump` is not worth
+  calls measure at 0 ms 鈥?the 256-key sweep in `plat_pump` is not worth
   touching). v0.47.0's numbers: culling -40 % on a scroll scene, cached
   measure 96x on a repeat, DC cache -6 % per fill, ~9 % on a 100-widget
   scene. The clip fix itself made a heavy scene SLOWER (1.8 -> 3.5 ms per
   frame) because the old number came from a renderer that was not drawing
-  most of the frame — if a benchmark here gets faster, check what stopped
+  most of the frame 鈥?if a benchmark here gets faster, check what stopped
   being painted before you celebrate.
 - **GDI `DC_PEN`/`DC_BRUSH` traps (Windows)**: `GetStockObject(20)` is out
   of range and fails silently. Keep the decimal-constant discipline in the
@@ -651,27 +673,27 @@ crates/aoxn-pkg       package manager crate (its own dependency set; see above)
   v0.38.0, but the UI toolkit keeps to plain arithmetic on raw constants).
 ## Self-hosting status (docs/selfhost.md is a historical assessment; wiki/Self-Hosting.md is frozen at v0.29.2, the source is current)
 
-- Stages 1–4 + loader + driver all DONE (`selfhost/`, ~7k lines of Aoxn):
+- Stages 1鈥? + loader + driver all DONE (`selfhost/`, ~7k lines of Aoxn):
   lexer, parser (arena AST), typecheck (incl. generic monomorphization),
   loader (include-once + cycles), codegen (**C text emitter mirroring
-  `codegen_c.rs`** — the LLVM-C FFI port is gone since v0.29.0), driver
-  (load → check → emit C → `clang -O3 -w -c` → link).
-- **FIXED POINT**: `selfhost/driver_self_demo.ax` — the Aoxn-written driver
+  `codegen_c.rs`** 鈥?the LLVM-C FFI port is gone since v0.29.0), driver
+  (load 鈫?check 鈫?emit C 鈫?`clang -O3 -w -c` 鈫?link).
+- **FIXED POINT**: `selfhost/driver_self_demo.ax` 鈥?the Aoxn-written driver
   compiles the whole self-hosting compiler into `target/selfhost_stage2.exe`;
   stage-2 then compiles a stdlib program and the generated C **and the
   emitted object** match the Rust-built compiler's byte-for-byte (objects
   modulo the COFF timestamp, see above). Runs on every platform now (skips
-  only when clang is missing) — no more `LLVM-C.lib` precondition. Verified
+  only when clang is missing) 鈥?no more `LLVM-C.lib` precondition. Verified
   by `selfhost_driver_self_compiles`. `gen_c_text` (codegen.ax) + `emit_c`
   (driver.ax) are the self-hosted `aoxn c`.
 - The Aoxn driver also compiles its own front end
   (`selfhost/driver_frontend_demo.ax`) and the whole `examples/` suite.
   Next rung: porting `main.rs` CLI semantics. argv reached the LANGUAGE in
   v0.42.0 (`argc()`/`arg(i)`), but stage-2 does not know those builtins (nor
-  assert/exit/dict/None/fn-ptr/raise) — the mirror is still on the pre-v0.40
+  assert/exit/dict/None/fn-ptr/raise) 鈥?the mirror is still on the pre-v0.40
   subset, see the language rules above.
 - CRITICAL value-semantics discipline (the v0.11 segfault): a function
-  taking `p: PState`/`c: CState` by value MUST return the struct — local
+  taking `p: PState`/`c: CState` by value MUST return the struct 鈥?local
   `p.n_tag = vec_push(...)` mutations are discarded by the caller. All
   selfhost helpers use write-back (`p = parse_expr(p)`) and pass extra
   results through fields (`p.res_node`, `p.res_vec`, `c.res_ok`, `c.r_ty`).
@@ -686,48 +708,48 @@ crates/aoxn-pkg       package manager crate (its own dependency set; see above)
   value to `end` before zeroing `start`; `if` merge branches must come from
   the real end block of each path (`LLVMGetInsertBlock`'s C-backend
   equivalent: whatever block the builder is at after the branch body).
-- Aoxn-on-Aoxn debugging recipe: runtime crash in generated code → check
+- Aoxn-on-Aoxn debugging recipe: runtime crash in generated code 鈫?check
   seed values first (`vec_get(empty, -1)` dereferences NULL); compiler crash
-  → per-fn stage traces (`AOXN_TC_TRACE`); silent wrong output → dump both
+  鈫?per-fn stage traces (`AOXN_TC_TRACE`); silent wrong output 鈫?dump both
   sides' C (`AOXN_DUMP_C=1`) and diff.
 
-## TypeScript front end (src/ts/) — TS-M1 W1 complete (v0.28.0)
+## TypeScript front end (src/ts/) 鈥?TS-M1 W1 complete (v0.28.0)
 
 - S0 lexer + S1 parser + S2a generics/arrays/templates + S2b f64 tower,
   unions/narrowing, any/optional/tuples + S3 modules ALL DONE. `load_file`
-  dispatches on extension (`.ts`/`.tsx` → `ts::parser`), `aoxn build foo.ts`
-  just works. TS lowers into the EXISTING `crate::ast` (console.log→print,
-  x.length→len(x), object literal→StructLit via interface annotation).
+  dispatches on extension (`.ts`/`.tsx` 鈫?`ts::parser`), `aoxn build foo.ts`
+  just works. TS lowers into the EXISTING `crate::ast` (console.log鈫抪rint,
+  x.length鈫抣en(x), object literal鈫扴tructLit via interface annotation).
 - `import "path"` was removed in W1-S3 and **revived in v0.43.0** as
   equivalent to `import * from "path"`; the Python spellings (`from x import
   *`, `import x as y`) work in a `.ts` file too. Every source in this repo
   still uses `import * from "..."`, which is the form the self-hosted
   compiler can also compile.
 - **`import * from "p"` compiled in .ax files but NOT in .ts files until
-  v0.36.0** — the TS arm that should have handled the whole-module merge
+  v0.36.0** 鈥?the TS arm that should have handled the whole-module merge
   returned an error on seeing `*`, so a `.ts` file could import nothing at all
   (its own error text recommended the form it refused). `import * as ns`
   still needs namespace objects and still errors (TS-M2); the two are told
   apart by peeking one token further (`src/ts/parser.rs`, `import_decl_ts`).
 - `number` is f64 (double) everywhere since S2b; explicit type args
   `f<T>(x)` stay rejected (ambiguity with `a < b > (c)`).
-- Roadmap: see `docs/ts-m1-spec.md` — W2 (pkg + CSS pipeline), W3 (benchmark
-  v2), W4 (TS-M2 runtime semantics: objects/closures/GC — the "full TS
+- Roadmap: see `docs/ts-m1-spec.md` 鈥?W2 (pkg + CSS pipeline), W3 (benchmark
+  v2), W4 (TS-M2 runtime semantics: objects/closures/GC 鈥?the "full TS
   compatibility" gate), W5 (acceptance samples). `crates/aoxn-pkg` (W2's
   package manager) landed as beta in v0.29.0; the CSS pipeline + CSS Modules
   landed in v0.34.0 (docs/css-assets.md).
 
-## CSS assets (src/assets.rs, v0.34.0) — B1 phase 1
+## CSS assets (src/assets.rs, v0.34.0) 鈥?B1 phase 1
 
 - **A `.css` file reached through `import` is an ASSET, never source.**
   `load_file` (src/lib.rs) diverts it after include-once/cycle detection and
-  BEFORE the front-end dispatch — otherwise the `is_file()` short-circuit in
+  BEFORE the front-end dispatch 鈥?otherwise the `is_file()` short-circuit in
   `complete_module_path` lets it through and it dies in the Aoxn lexer with
   `unexpected character '{'`, which says nothing useful.
 - **Assets ride into codegen as ordinary `FnDecl`s** whose bodies are
   compile-time string literals, reusing the `TS_RUNTIME_SRC` injection trick
   (src/ts/runtime.rs). So `src/codegen_c.rs` has NO asset dispatch and
-  `selfhost/codegen.ax` needs no mirror — the fixed point holds BY
+  `selfhost/codegen.ax` needs no mirror 鈥?the fixed point holds BY
   CONSTRUCTION. Do not "improve" this by adding a codegen builtin: that
   reintroduces the self-hosting mirror obligation.
 - **Minification is comments + whitespace ONLY.** No selector merging, no
@@ -741,13 +763,13 @@ crates/aoxn-pkg       package manager crate (its own dependency set; see above)
 - **`dependency_files` MUST know about `.css`** (including `@import`ed
   partials) or editing a stylesheet silently serves a stale cached exe.
   `cache_key` (src/main.rs) hashes whatever that returns.
-- **Tailwind is PRE-GENERATED CSS, deliberately** — not a dependency. It is a
+- **Tailwind is PRE-GENERATED CSS, deliberately** 鈥?not a dependency. It is a
   plain-JS npm package with no `aoxn.json`, which `aoxn npm-import` rejects by
   design (`plain_js_package_is_rejected`). Shelling out to the Tailwind CLI
   would make Node a build prerequisite; the one-click install avoids that.
   v0.36.0 added a **built-in utility subset** (`src/tailwind.rs`,
   `--tailwind`) after the user explicitly asked for it. It mines ONLY
-  `class=`/`className=`/`class:` attributes — the earlier "any string shaped
+  `class=`/`className=`/`class:` attributes 鈥?the earlier "any string shaped
   like a class list" heuristic was removed because prose passes the same shape
   test. Keep it that way, and keep naming unsupported utilities at build time.
 - **`--emit-assets <dir>` writes files** (v0.36.0). Emit beside the OUTPUT
@@ -760,14 +782,14 @@ crates/aoxn-pkg       package manager crate (its own dependency set; see above)
   `is_safe_emitted_name` before any write. A stylesheet may influence the
   *contents* of an emitted file (via `url()` rewriting) but never its path.
 - **Programs find assets at runtime via `exe_dir()`/`asset_path()`**
-  (stdlib, `GetModuleFileNameA`), NOT a baked absolute path — baking one
+  (stdlib, `GetModuleFileNameA`), NOT a baked absolute path 鈥?baking one
   would make the exe non-relocatable and leak a build path.
 - A `url()` target that does not resolve **warns and passes through**; it must
   not fail the build (a CDN font or a file another tool copies in is valid).
 - Reference: `docs/css-assets.md`. Tests: `tests/assets.rs`,
   `tests/assets_v36.rs`.
 
-## Web benchmark suite (web/) — facts for future sessions
+## Web benchmark suite (web/) 鈥?facts for future sessions
 
 - Platform direction decided (docs/web-platform-plan.md + docs/ts-m1-spec.md):
   TS front end -> existing pipeline (full TS syntax compatibility goal),
@@ -785,42 +807,42 @@ crates/aoxn-pkg       package manager crate (its own dependency set; see above)
 - Observability: `/metrics` (Prometheus text, RED counters per route, bytes,
   connections, duration sum/max ns, uptime, static counters). Metrics block
   layout is documented above `render_metrics` in http_buf.ax (slot 104 =
-  clock scratch pointer, 136 bytes total since v0.29.6 — slots 112/120 are
+  clock scratch pointer, 136 bytes total since v0.29.6 鈥?slots 112/120 are
   the static-file counters). `net_now_ns(m)` lives in `web/sock_win.ax` and
-  uses QueryPerformanceCounter — **`timespec_get` does NOT link on Windows**
+  uses QueryPerformanceCounter 鈥?**`timespec_get` does NOT link on Windows**
   (clang/MSVC libs), don't retry it.
-- **`load_i64` takes ONE argument (an address)** — offsets go on the address
+- **`load_i64` takes ONE argument (an address)** 鈥?offsets go on the address
   (`load_i64(ts + 8)`); only `load_u8` takes `(base, off)`.
 - **C `int` returns arrive zero-extended in i64** (callee writes EAX): -1
   shows up as 4294967295. The sock modules' `i32()` helper maps it back (a
   true 64-bit -1 passes through). SOCKET/pointer returns are full 64-bit.
 - **`\r` EXISTS since v0.42.0** (six escapes: `\n \t \r \0 \\ \"`). The web
-  layer predates it and still spells CRLF as raw bytes 13/10 (`bb_crlf`) —
+  layer predates it and still spells CRLF as raw bytes 13/10 (`bb_crlf`) 鈥?
   that works and is not a bug; new code can write `"...\r\n..."` directly.
 - Long-running servers must render into byte buffers (`bb_*` in
   `http_buf.ax`): string concat results leak by design, so per-request concat
   would balloon RSS. This is idiomatic (C-style), not a bug.
 - HTTP framing: drain loop in `serve.ax` handles several requests per recv
   and partial requests (scan for `\r\n\r\n`, slide remainder with a byte loop
-  — overlapping `memcpy` is UB). Dynamic responses go out as ONE segment
+  鈥?overlapping `memcpy` is UB). Dynamic responses go out as ONE segment
   (header rendered in front of the body at fixed offset 512 in `bbuf`) with
   TCP_NODELAY; a split header/body send stalls on Nagle (~ms/request).
-  Static file responses (v0.29.6) stream header + body separately — the
+  Static file responses (v0.29.6) stream header + body separately 鈥?the
   body may exceed `bbuf` and is sent straight from the preloaded file's
   memory.
-  `render_body` returns the NEW absolute offset — subtract the body start.
+  `render_body` returns the NEW absolute offset 鈥?subtract the body start.
 - **Static files (W2, 2026-10-02)**: docroot files are PRELOADED into a
-  `FileTable` at startup (`load_static_table` — `read_file` once; requests
+  `FileTable` at startup (`load_static_table` 鈥?`read_file` once; requests
   never touch the disk). Targets are matched against the FIXED name table
-  (`static_names()`), never turned into paths — traversal is impossible by
+  (`static_names()`), never turned into paths 鈥?traversal is impossible by
   construction. ETag is `"<size>.<hash>"` where hash is a BOUNDED
   polynomial (`content_hash`): **do not switch it to FNV/multiplicative
-  hashing** — signed int overflow is UB in the language contract; the Node
+  hashing** 鈥?signed int overflow is UB in the language contract; the Node
   server mirrors the exact arithmetic and parity.mjs pins it. Range
-  parsing follows RFC 9110: syntactically invalid / multi-range → 200,
-  unsatisfiable → 416, valid single/suffix range → 206; `If-None-Match`
-  beats Range (304). Missing docroot files = empty body entries → 404.
-- Winsock bind: do **not** add `SO_REUSEADDR` on Windows — it enables
+  parsing follows RFC 9110: syntactically invalid / multi-range 鈫?200,
+  unsatisfiable 鈫?416, valid single/suffix range 鈫?206; `If-None-Match`
+  beats Range (304). Missing docroot files = empty body entries 鈫?404.
+- Winsock bind: do **not** add `SO_REUSEADDR` on Windows 鈥?it enables
   hijacking of another process's listener. `bench.mjs` has a port pre-flight
   and `web-bench.yml` clears stray listeners instead.
 - Tests: `web/loadtest/parity.mjs` (functional: body parity vs Node, 404,
@@ -828,21 +850,21 @@ crates/aoxn-pkg       package manager crate (its own dependency set; see above)
   interleaved trials, median; raw runs in `last-results.json`).
   `.github/workflows/web-bench.yml` runs parity + a 5s reference bench on
   windows-latest (runner numbers are trend-only).
-  oha binary goes in `loadtest/tools/` (gitignored — download cmd in
+  oha binary goes in `loadtest/tools/` (gitignored 鈥?download cmd in
   `web/README.md`). autocannon is NOT used: single-core client capped at
   ~4k req/s and masked server differences. Even oha caps at ~7k req/s on
-  this machine — use latency/in-flight (Little's law) to tell servers apart,
+  this machine 鈥?use latency/in-flight (Little's law) to tell servers apart,
   not raw rps.
 - Same-machine benchmark caveat: client + server share the 4C8T i5-1135G7;
-  Node p50 jumps 4→9.7ms under 2-client load while Aoxn stays at 0.1ms.
+  Node p50 jumps 4鈫?.7ms under 2-client load while Aoxn stays at 0.1ms.
 
-## API SDKs (stdlib/net/ + stdlib/openai/ + stdlib/anthropic/) — v0.41.0
+## API SDKs (stdlib/net/ + stdlib/openai/ + stdlib/anthropic/) 鈥?v0.41.0
 
 - **A shared transport under two SDKs.** `stdlib/net/` holds the four
   provider-neutral modules (`codec.ax`, `json.ax`, `http.ax`, `sse.ax`,
   prefix `net_`/type `Net*`); `stdlib/openai/` and `stdlib/anthropic/` add
   only their own files. Those four shipped inside `stdlib/openai/` in
-  v0.40.1 and moved in v0.41.0 purely because a second SDK needed them —
+  v0.40.1 and moved in v0.41.0 purely because a second SDK needed them 鈥?
   **do not move them back, and do not put a provider name on a `net_`
   function**. OpenAI's public surface (`oa_*`) is unchanged by the move.
 - **Everything is plain Aoxn** (selfhost-compilable: no dict/None/fn-ptr/
@@ -854,7 +876,7 @@ crates/aoxn-pkg       package manager crate (its own dependency set; see above)
   child buffers are adopted `Vec.data` arrays of slab indices, and the parser
   follows the write-back discipline (`p = jp_value(p)`, extra results through
   `p.res` / `dom.last`). **Empty-dom accessors are guarded** (`slab == 0`
-  reads as null) — a failed `j_parse` hands back an empty dom and every
+  reads as null) 鈥?a failed `j_parse` hands back an empty dom and every
   getter/dumps must tolerate it; the original draft dereferenced NULL there
   and the crash looked like a parser bug. **`-1` must be guarded too** (v0.41.0
   fix): `-1` is the "absent" answer of `j_obj_get`/`j_arr_get`, and the SDK
@@ -865,44 +887,44 @@ crates/aoxn-pkg       package manager crate (its own dependency set; see above)
   nested; hand-escaping it into a string literal is how a missing backslash
   becomes a 400. **Capacity for an OBJ/ARR node lives in its +16 slot** (the
   parser leaves `fval` at 0.0 because neither kind stores a float there),
-  and **a PARSED node has capacity 0** — but "0 means give me the default"
+  and **a PARSED node has capacity 0** 鈥?but "0 means give me the default"
   was a heap-corruption bug (v0.48.0). The parser ADOPTS a `Vec`'s child
   buffer, so the block really is `Vec.cap` slots wide while the node claims
   0; treating that as "capacity 8" and doubling to 16 made `jb_grow_*`
   `realloc` a 20-member object's 256-byte buffer DOWN to 128 and then write
   slot 20. **Any parsed object or array with 16+ members died with
-  0xC0000005 on its first `jb_set`** — which is precisely what
+  0xC0000005 on its first `jb_set`** 鈥?which is precisely what
   `jb_set_raw` exists to do. The rule now: **a grow must floor the capacity
   at the live child count** (`jb_grow_cap`, the one quantity always known),
   because a downward realloc is the failure and `n + 1` prevents it.
   `j_parse_into(dom, src)` parses a fragment into an EXISTING slab so its
   child indices are already correct and no remapping is needed.
 - **THE WRITE-BACK RULE, violated once already**: `jb_set_raw`/`jb_push_raw`
-  used `dom` after `j_parse_into` had realloc'd the slab — the stale
+  used `dom` after `j_parse_into` had realloc'd the slab 鈥?the stale
   `dom.slab` was freed, and the next write was heap corruption (0xC0000374).
   They must continue from `p.dom`. Same shape as the `vec_push` delegation
   trap below: a callee that may grow a buffer hands back the live handle.
 - **`snprintf` CANNOT be used from an Aoxn extern.** Aoxn externs are
   fixed-arity, but printf-family is variadic: the prologue reads its float
   varargs from the XMM spill slots, which a fixed-arity call site never
-  fills — `j_fmt_f(3.25)` printed `2.47e-323` (the bit pattern of 5). Float
+  fills 鈥?`j_fmt_f(3.25)` printed `2.47e-323` (the bit pattern of 5). Float
   formatting is hand-rolled integer math (`j_fmt_f`, ~%.15g). The same trap
   waits for anyone declaring `printf`/`sprintf`/`fprintf`.
 - **`len()` ON A STRING IS `strlen`.** A string cannot carry a body with a
-  NUL byte — which is every multipart upload of a binary file. Request
+  NUL byte 鈥?which is every multipart upload of a binary file. Request
   bodies therefore have TWO entry points: `net_http_request` /
   `net_http_stream_open` (string) and `net_http_request_bytes` /
   `net_http_stream_open_bytes` (ptr + len). The `_bytes` pair holds the
   implementation; the string pair is a wrapper. Do not duplicate either body.
 - **`WINHTTP_QUERY_CUSTOM` (81) DOES NOT WORK HERE.** Reading one header by
   name returns `ERROR_INVALID_PARAMETER` (87) on this platform for every
-  name tried — including with a real buffer and a real `lpdwIndex`. The
+  name tried 鈥?including with a real buffer and a real `lpdwIndex`. The
   transport uses `WINHTTP_QUERY_RAW_HEADERS` (22) once per response and
   `net_header_value` / `net_header_int` scan the block, which also makes the
   parsing pure and offline-testable. Do not "optimize" it back to a by-name
   query.
 - **`net_url_split` KEEPS the query string** (v0.41.0 fix). The object name
-  `WinHttpOpenRequest` takes includes it — the normal WinHTTP spelling.
+  `WinHttpOpenRequest` takes includes it 鈥?the normal WinHTTP spelling.
   v0.40.1 stripped it, which was invisible while the only caller was the
   OpenAI SDK (no query in its paths) and would have made every paginated
   endpoint silently fetch the default page.
@@ -915,7 +937,7 @@ crates/aoxn-pkg       package manager crate (its own dependency set; see above)
   stops. That is what `AnAcc` exists for: it reassembles the stream into a
   finished Message so the ordinary accessors read a streamed and a
   non-streamed answer through one API. **The `{}` that
-  `content_block_start` carries is a PLACEHOLDER, not a prefix** —
+  `content_block_start` carries is a PLACEHOLDER, not a prefix** 鈥?
   `open_acc` holds the fragments and replaces it at flush time; appending to
   the placeholder yields `{}{"city":"Paris"}`.
 - **A content block is a JSON TEXT string, not a struct.** The language has
@@ -928,24 +950,24 @@ crates/aoxn-pkg       package manager crate (its own dependency set; see above)
   language: an empty string, empty `Vec` or zero means "omit this member",
   which is exactly the absent-vs-empty distinction the API draws. The
   vendored reference is a FORK whose body has no `temperature`/`top_p`/
-  `top_k` — do not add them.
-- **`\r` exists since v0.42.0** — the trap below is history. The SDK layers
+  `top_k` 鈥?do not add them.
+- **`\r` exists since v0.42.0** 鈥?the trap below is history. The SDK layers
   were written when the lexer had only four escapes, so header blocks (HTTP
   CRLF) and SSE CRLF fixtures still spell byte 13 via `store_u8`
   (`net_crlf()` in net/http.ax); that is fine, do not churn them. It DID bit
-  twice in the OpenAI session and again in the Anthropic one — which is why
+  twice in the OpenAI session and again in the Anthropic one 鈥?which is why
   the escape now exists.
 - **The JSON serializer failed silently at first**: `j_quote` escaped
-  content but never emitted the surrounding `"` — `j_dumps` produced
+  content but never emitted the surrounding `"` 鈥?`j_dumps` produced
   `{model:gpt-4o}` (invalid JSON) and the round-trip test crashed on the
-  empty-dom NULL above. Round-trip tests (parse → dumps → parse → dumps)
+  empty-dom NULL above. Round-trip tests (parse 鈫?dumps 鈫?parse 鈫?dumps)
   are the pin that caught both.
 - **The end-to-end tests need NO network**: a mock API server written in
   Aoxn (`web/sock_win.ax`, ws2_32) is spawned on a loopback port (env
   `MOCK_PORT`, `MOCK_COUNT` = requests to serve before exit) and the real
-  WinHTTP path walks the flows. **The port-poll consumes a mock slot** — the
+  WinHTTP path walks the flows. **The port-poll consumes a mock slot** 鈥?the
   poll `TcpStream::connect` lands as a request (400 response), so
-  `MOCK_COUNT` must exceed the client's request count by at least one —
+  `MOCK_COUNT` must exceed the client's request count by at least one 鈥?
   plus one per RETRY (a retried 429 costs two).
 - **Expectation tables drift; report every mismatch.** The pure drivers
   print one `PASS <name> <value>` line per check and the Rust side collects
@@ -953,49 +975,49 @@ crates/aoxn-pkg       package manager crate (its own dependency set; see above)
   loop reports one drifted line per test run, which is a slow way to fix a
   hand-transcribed table.
 - **The remaining ~30 stdlib modules are ROADMAPED in `docs/stdlib-todo.md`**
-  (§2: all 31 Python stdlib modules, batched P0–P3 — **11 landed in the
+  (搂2: all 31 Python stdlib modules, batched P0鈥揚3 鈥?**11 landed in the
   v0.44.0 batch** plus the `json.ax` promotion, see the stdlib section above;
-  §5: 15 third-party /
-  large libraries — `numpy`/`pandas`/`flask`/`matplotlib`/`pytorch`… —
-  ordered by their dependency chain, each feasibility-rated). Its §0 holds the
-  SIX HARD constraints that shape every module — read it before writing one.
+  搂5: 15 third-party /
+  large libraries 鈥?`numpy`/`pandas`/`flask`/`matplotlib`/`pytorch`鈥?鈥?
+  ordered by their dependency chain, each feasibility-rated). Its 搂0 holds the
+  SIX HARD constraints that shape every module 鈥?read it before writing one.
   Three of them are load-bearing well beyond that doc:
   **`stdlib/stdlib.ax` is ON THE SELF-HOST CRITICAL PATH** (`selfhost/codegen.ax`
   and `selfhost/driver.ax` both `import *` it), so a new module must be its
-  OWN file under `stdlib/` — or it must stay inside the syntax subset stage-2
+  OWN file under `stdlib/` 鈥?or it must stay inside the syntax subset stage-2
   can emit (no dict/None/fn-ptr/raise); **`Vec` is int-only**
   (`vec_push(v: Vec, item: int)`), so `collections`/`itertools` and any
   numeric container need a generic heap container built first; and there is
   **no `enum` / no runtime-tagged union / no `Any`** (the only union is
   `T | None`, and `dict[V]` has one value type), so heterogeneous records are
-  inexpressible — that is what kills DataFrame and every ORM. The Anthropic
+  inexpressible 鈥?that is what kills DataFrame and every ORM. The Anthropic
   SDK's content blocks (a discriminated union with no union type in the
   language) are the worked example of how far JSON text carries you. The tagged-slab
   design in `stdlib/json.ax` (kind / i64 / f64 / ptrA / ptrB) is the
-  in-repo pattern for dynamic values. (argv landed in v0.42.0 — `argc()` /
-  `arg(i)`, see the language rules above — so `sys`/`argparse` are unblocked;
-  what is still missing is a test runner, see `docs/stdlib-todo.md` §0.7.)
+  in-repo pattern for dynamic values. (argv landed in v0.42.0 鈥?`argc()` /
+  `arg(i)`, see the language rules above 鈥?so `sys`/`argparse` are unblocked;
+  what is still missing is a test runner, see `docs/stdlib-todo.md` 搂0.7.)
   And **there is no `inf`/`nan` literal and float division by zero is emitted
   raw** (`Div => "/"`), so every numeric library must ship a guarded `fdiv`
   and synthesize NaN via `log(-1.0)`.
-- **`docs/language-gaps.md` is the "why" behind that "what"** — every
+- **`docs/language-gaps.md` is the "why" behind that "what"** 鈥?every
   missing language feature with what it blocks, which files a change must
   touch, its cost, and a ranked order for closing them. Read it before
-  proposing a language change; it also carries a cost model (§4) that makes
+  proposing a language change; it also carries a cost model (搂4) that makes
   the price of a feature predictable (a feature that emits NEW C text also
   has to be mirrored in `selfhost/codegen.ax`, so it costs ~2x). Two
   entries there correct easy-to-misread facts: **threads are NOT blocked**
   (`extern def` rejects an fn-pointer parameter, but its own error message
-  says "pass its address as an int" — `CreateThread(0,0,to_int(f),0,0,0)`
-  is ABI-fine on x64), and **`dict` DOES preserve insertion order** — its
+  says "pass its address as an int" 鈥?`CreateThread(0,0,to_int(f),0,0,0)`
+  is ABI-fine on x64), and **`dict` DOES preserve insertion order** 鈥?its
   cost is the O(n) linear scan (`ax_dict_find_T`, `codegen_c.rs:789`), not
-  ordering. The ranked shortlist (§5) puts module namespaces first, because
+  ordering. The ranked shortlist (搂5) puts module namespaces first, because
   every `import` merges into ONE namespace and a duplicate `def` name is a
-  HARD error (`typecheck.rs:94`) — which is why `ui_`/`net_`/`oa_`/`an_`/
+  HARD error (`typecheck.rs:94`) 鈥?which is why `ui_`/`net_`/`oa_`/`an_`/
   `plat_` are hand-prefixed everywhere today.
 - Client defaults mirror the reference clients: 600 s receive / 5 s connect
-  timeouts, 2 retries after the first attempt (0.5 s, 1 s; `Retry-After` ≤
-  120 s wins; transport errors, 409/429/5xx retry — note v0.40.1 parsed
+  timeouts, 2 retries after the first attempt (0.5 s, 1 s; `Retry-After` 鈮?
+  120 s wins; transport errors, 409/429/5xx retry 鈥?note v0.40.1 parsed
   `Retry-After` and then always passed 0, so OpenAI ignored it until
   v0.41.0). OpenAI: base `https://api.openai.com/v1` (`OPENAI_API_KEY`,
   `OPENAI_BASE_URL`, `OPENAI_ORG_ID`, `OPENAI_PROJECT_ID`). Anthropic: base
@@ -1004,30 +1026,30 @@ crates/aoxn-pkg       package manager crate (its own dependency set; see above)
   `anthropic-version: 2023-06-01` header. Errors follow the v0.39.0
   Err-value channel: `oa_resp_ok`/`an_resp_ok` gate and
   `oa_err_msg`/`an_err_msg` render transport / HTTP / the body's `error`
-  object — nothing raises. `an_status_class`/`an_err_type` expose the
+  object 鈥?nothing raises. `an_status_class`/`an_err_type` expose the
   reference's exception taxonomy as data.
 
 
-## Standard library modules (stdlib/ …) — v0.44.0 batch
+## Standard library modules (stdlib/ 鈥? 鈥?v0.44.0 batch
 
-- **The first 13 roadmap modules landed** (`docs/stdlib-todo.md` §6 items
-  1–6 + bisect/heapq): `math` `time` `datetime` `calendar` `pathlib`
+- **The first 13 roadmap modules landed** (`docs/stdlib-todo.md` 搂6 items
+  1鈥? + bisect/heapq): `math` `time` `datetime` `calendar` `pathlib`
   `base64` `hashlib` `hmac` `os` `glob` `json` `bisect` `heapq`, each its
   own file under `stdlib/`, imported BY NAME (`import * from "stdlib/time"`
-  — or, since v0.43.0, `import time` / `time.now_ns`-style namespaces).
+  鈥?or, since v0.43.0, `import time` / `time.now_ns`-style namespaces).
   **`docs/stdlib.md` is the batch reference** (APIs + Python deltas +
   traps); demos `examples/{math,time,pathlib,hashlib,os,json,bisect}_demo.ax`;
   driver tests `tests/{math,pathlib,datetime,hashlib,osglob,containers,
   json_fileio}.rs` (each embeds an .ax driver printing PASS markers; Rust
   asserts the marker list and `DONE fails=0`).
 - **None of the new modules may be imported into `stdlib/stdlib.ax`** (the
-  self-host critical path). All are plain Aoxn EXCEPT `hmac.ax` (fn-ptr —
-  header-marked `selfhost 尚不可编译`, off the fixed-point path).
+  self-host critical path). All are plain Aoxn EXCEPT `hmac.ax` (fn-ptr 鈥?
+  header-marked `selfhost 灏氫笉鍙紪璇慲, off the fixed-point path).
 - **A stdlib module that NAMES one platform's API and nothing else does not
   link on the other one** (v0.50.1 fixed exactly this in `time.ax` +
   `datetime.ax`: `clang: error: linker command failed` with `undefined
   reference to 'GetLocalTime'`). The idiom is `os.ax`'s: **declare every
-  platform's externs and branch on `target_os()`** — the backend emits
+  platform's externs and branch on `target_os()`** 鈥?the backend emits
   `__builtin_strcmp("windows", "linux") == 0`, which clang constant-folds
   BEFORE codegen, so the branch not taken never becomes a call and its
   symbols never reach the object file. Verified at `-O0` as well as `-O3`
@@ -1044,17 +1066,17 @@ crates/aoxn-pkg       package manager crate (its own dependency set; see above)
 - **Getting the clock module to LINK is not getting it to be RIGHT.** The
   symbol pin passed on the Linux job while the module answered 369 years in
   the future (v0.50.3). `time_unix_ft` returns 100 ns ticks from the **1970**
-  origin on BOTH platforms — the Windows branch subtracts the 1601 gap from
+  origin on BOTH platforms 鈥?the Windows branch subtracts the 1601 gap from
   `GetSystemTimeAsFileTime`, and `clock_gettime(CLOCK_REALTIME)` is already
   on 1970, so the POSIX branch subtracts nothing. v0.50.1 read the name
   (`..._ft`, `FT_UNIX_EPOCH`) as "raw FILETIME" and ADDED the gap. Two
-  lessons: (1) a function named after a C type is not that C type — read
+  lessons: (1) a function named after a C type is not that C type 鈥?read
   what the code does, and when a comment contradicts its own body, believe
   the body and FIX THE COMMENT; (2) a symbol-table test proves linkage,
   never values. The value pins are `time-unix-sane` (absolute) and the
   v0.50.3 `now-is-local-and-coherent` (round-trips `datetime_now()` through
   `datetime_to_unix`, which is the only thing that can catch a wrong POSIX
-  `struct tm` offset — a shifted field still yields a well-formed date).
+  `struct tm` offset 鈥?a shifted field still yields a well-formed date).
   `time-unix-ms-agrees` is RELATIVE (two readings of one clock) and is
   blind to any constant offset; do not read it as a sanity check.
 - **A path a stdlib function BUILDS is platform-native; a path it READS
@@ -1062,13 +1084,13 @@ crates/aoxn-pkg       package manager crate (its own dependency set; see above)
   `path_with_suffix`, `path_with_name`, `path_norm`'s join byte and
   `glob`'s two root branches all hardcoded `"\\"`, so on Linux a nested
   glob walked `os_exists("sandbox\\sub")` and found nothing). Use
-  `path_sep()` / `path_sep_byte()` from pathlib — they are the only legal
+  `path_sep()` / `path_sep_byte()` from pathlib 鈥?they are the only legal
   spelling in a dual-platform module, and
   `stdlib_defect_pins::cross_platform_modules_never_hardcode_a_path_separator`
   enforces it (comment-stripping, Windows-only modules exempt by
   construction since they name `\` inside a `target_os()` arm). The trap is
   the mirror image of the clock one: **a test that hardcodes the expected
-  spelling pins the bug instead of catching it** — `tests/pathlib.rs` and
+  spelling pins the bug instead of catching it** 鈥?`tests/pathlib.rs` and
   `tests/osglob.rs` both asserted `"a\\b"`, so they would have failed on
   Linux even after the code was correct, and `tests/stdlib_perf_pins.rs`
   pinned `"C:\\a\\c"` the same way and did not surface until v0.50.6. Build
@@ -1080,10 +1102,10 @@ crates/aoxn-pkg       package manager crate (its own dependency set; see above)
   can decide - which is why this one recurred after the stdlib scan was
   already in place.
 - **`as_string` is a CAST, not a copy** (`codegen_c.rs` emits `((char*)(x))`),
-  so its result ALIASES the buffer it is given — freeing that buffer is a
+  so its result ALIASES the buffer it is given 鈥?freeing that buffer is a
   use-after-free, and the language's own rule is that strings leak by design.
   v0.50.5 was `os_cwd()` doing exactly that on the POSIX arm: it returned
-  `as_string(p)` and freed `buf` (`p` IS `buf`). It is not a rare crash —
+  `as_string(p)` and freed `buf` (`p` IS `buf`). It is not a rare crash 鈥?
   glibc returns the same 4096-byte chunk on the next request, so the second
   `os_cwd()` overwrote the first answer IN PLACE and the two strings compared
   **equal with the cwd having moved**. A caller that captured a cwd and
@@ -1091,7 +1113,7 @@ crates/aoxn-pkg       package manager crate (its own dependency set; see above)
   after that failed: one use-after-free, nine reported failures, and the
   apparent "glob finds nothing / json I/O is broken" symptoms were all
   downstream of it. **When a function returns a string it built, either copy
-  into an exact-sized buffer (what `os_from_wide` does) or do not free — and
+  into an exact-sized buffer (what `os_from_wide` does) or do not free 鈥?and
   never `free` a buffer an `as_string` result points at.** All 60 `as_string`
   sites in `stdlib/` were audited for this; the near-misses that are NOT bugs
   are listed in CHANGELOG 0.50.5 (mutually exclusive arms; a Win32 call that
@@ -1101,7 +1123,7 @@ crates/aoxn-pkg       package manager crate (its own dependency set; see above)
   alias ran through two different variable names (`as_string(p)` aliasing a
   buffer freed as `buf`), which is exactly what defeated the first attempt at
   such a check. `tests/osglob.rs::cwd-answers-own-their-buffer` asserts the
-  observable property instead — two `os_cwd()` calls around a `chdir` must
+  observable property instead 鈥?two `os_cwd()` calls around a `chdir` must
   differ. **Instrument before theorising**: v0.50.4's `FAIL chdir` said
   nothing, and splitting it into named terms made v0.50.5 a one-line
   diagnosis. When a failure's cause is not yet known, spend the edit on the
@@ -1112,20 +1134,20 @@ crates/aoxn-pkg       package manager crate (its own dependency set; see above)
   performs EXACTLY the fold a Linux build performs (clang constant-folds
   `__builtin_strcmp` of two literals in the frontend), so the resulting
   object's undefined-symbol table IS the Linux link's problem list. Use it
-  before concluding that a platform bug "cannot be checked here" — it took
+  before concluding that a platform bug "cannot be checked here" 鈥?it took
   three hand-rolled rounds of this series (time/datetime, the separator
   sweep, `net/http.ax`) before the method was written down as a test:
   `stdlib_defect_pins::dual_platform_modules_reference_no_foreign_platform_symbols`
   simulates Linux for both dual-platform groups and asserts no Win32 API is
   named. That is how v0.50.7 found `net/http.ax`: its two entry points guard
   themselves, but four helpers called WinHTTP unguarded and leaked five
-  symbols into a Linux link — and the SDK tests are `#![cfg(windows)]`, so no
+  symbols into a Linux link 鈥?and the SDK tests are `#![cfg(windows)]`, so no
   Linux build of that module existed in CI to fail. **A guard in the caller
   never protects a callee** (same law as the `os_cwd`/`as_string` case), and
-  grepping for `target_os()` sites is not enough either — an early `return`
+  grepping for `target_os()` sites is not enough either 鈥?an early `return`
   in the caller makes ITS OWN calls dead while a sibling helper's survive, so
   the check has to be the object file.
-- **A test written on Windows cannot see the Linux spelling of ANYTHING** —
+- **A test written on Windows cannot see the Linux spelling of ANYTHING** 鈥?
   and that bit this pin twice (v0.50.8, then v0.50.9). The backend folds
   `target_os()` to the BUILD HOST's name as the FIRST argument of the
   comparison, so the text is `("windows","windows")` on Windows and
@@ -1133,54 +1155,54 @@ crates/aoxn-pkg       package manager crate (its own dependency set; see above)
   then "fixed" the CI failure by adding the one other spelling I could
   *imagine*. **Never guess the other platform's output: derive it, or make it
   switchable.** `target_os_name()` takes exactly three values, so the
-  general fix enumerates them — and the real capability is a temporary
+  general fix enumerates them 鈥?and the real capability is a temporary
   `AOXN_FAKE_LINUX` hook in `platform.rs` that makes the compiler fold as
   Linux, which runs the Linux configuration of a test from a Windows machine
   (used in v0.50.9 to show the pin both passes and still bites there).
   Consider promoting that hook to a documented permanent capability.
 - **UCRT symbol collisions are a LINK-TIME trap**: a lowercase `nan`,
   `inf` or `copysign` DEFINITION duplicates UCRT symbols (the math externs
-  share object files with them) → `lld-link: duplicate symbol`. That is why
+  share object files with them) 鈫?`lld-link: duplicate symbol`. That is why
   math.ax spells them `NaN()/Inf()/NInf()/copysign_f()`. Extern DECLARATIONS
-  matching CRT names (sin/exp/pow/…) are fine.
+  matching CRT names (sin/exp/pow/鈥? are fine.
 - **hashlib's uint32-on-i64 rules**: mask every add/rotate under 2^32 (so
   `>>` stays logical) and rotate via `hash_rotr`/`hash_rol`, which mask
   BEFORE the left shift (a 32-bit value `<< 32` overflows i64). The context
-  block is 784 bytes with an **80-word** schedule scratch — SHA-1 needs 80;
+  block is 784 bytes with an **80-word** schedule scratch 鈥?SHA-1 needs 80;
   the original 64 was a heap-corruption bug (0xC0000374) caught by the
   sha1 vector.
 - **`os.ax` zero-extension trap**: `GetFileAttributesW` returns a DWORD,
-  which arrives zero-extended in i64 — the INVALID sentinel is compared as
+  which arrives zero-extended in i64 鈥?the INVALID sentinel is compared as
   **4294967295**, never -1. `os_unsetenv` deletes via a NULL value (the
   empty string would create an empty variable). **`os_getenv` must keep the
-  two-call Win32 sizing pattern** (NULL buffer → required size → allocate →
+  two-call Win32 sizing pattern** (NULL buffer 鈫?required size 鈫?allocate 鈫?
   read): a fixed buffer silently returned `""` for values longer than
-  2048 chars, and the CI runners' `PATH` is longer — that is the v0.44.1
+  2048 chars, and the CI runners' `PATH` is longer 鈥?that is the v0.44.1
   fix, pinned by the `env-long-value` driver check. The UTF-16 helpers are
   deliberately duplicated from `net/codec.ax` (same precedent codec set
-  against ui.ax) — keep the copies in sync.
+  against ui.ax) 鈥?keep the copies in sync.
 - **`glob.ax` keeps Python's dotfile rule** (`*` does not match a leading
   `.` unless the pattern segment starts with one), sorts output byte-wise,
   and does NOT support `**` (documented gap). The walk's recursion returns
-  the grown Vec — the write-back discipline again.
+  the grown Vec 鈥?the write-back discipline again.
 - **`stdlib/json.ax` is the promoted DOM** (moved from `stdlib/net/json.ax`
   in v0.44.0; the SDKs import `../json.ax`), plus the file-I/O pair:
-  `j_read_file` (err 2 = I/O failure vs 1 = parse error — a missing file is
+  `j_read_file` (err 2 = I/O failure vs 1 = parse error 鈥?a missing file is
   upgraded via an fopen probe; readable-but-EMPTY stays 1) and
   `j_write_file`. `net/codec.ax` keeps `net_b64_encode_*`; base64.ax is the
   general module with the decode direction.
 - **`len()` ON A STRING IS `strlen`, EMITTED INLINE AT EVERY USE SITE**
-  (`codegen_c.rs:1973`) — this is the single most expensive thing to get
+  (`codegen_c.rs:1973`) 鈥?this is the single most expensive thing to get
   wrong in this stdlib, and in v0.48.0 it was the cause of THREE quadratic
   loops found in one audit: `j_at`'s end-of-input test (every character of
-  every token re-scanned the whole document — the JSON parser ran at
+  every token re-scanned the whole document 鈥?the JSON parser ran at
   ~33 KB/s, 266 KB took 7 s), `jp_str`'s initial buffer size, and
   `b64_decode`'s loop bound (1.4 MB did not finish in 600 s). **A `while`
   whose condition mentions `len(s)` on a string is O(n) per iteration.** Hoist
   it into an `int` before the loop, exactly as `b64_encode(data, length)`
   already took its length as a parameter. `JParse` now carries the source
   length in an `sn` field for the same reason. The same audit also found
-  `out = out + ...` in a loop (`j_dumps`) — concatenation allocates a fresh
+  `out = out + ...` in a loop (`j_dumps`) 鈥?concatenation allocates a fresh
   buffer per step and abandons the old one, so it is O(n^2) allocations AND
   O(n^2) leaked bytes; the serializer is now one pass into a byte sink that
   grows geometrically (`JOut`/`jw_*`), threaded BY VALUE because the language
@@ -1189,37 +1211,37 @@ crates/aoxn-pkg       package manager crate (its own dependency set; see above)
   the JSON builder (`jb_grow_*`, above). When the recorded capacity of a
   buffer may be 0 or stale while the block is really wider, floor the new
   capacity at the live element count rather than trusting the record.
-- **"Vec[T] 基座" resolved as slot views, not a new type** (stdlib-todo
-  §0.3): a Vec slot is 8 bytes — int/bool natively, f64 via
+- **"Vec[T] 鍩哄骇" resolved as slot views, not a new type** (stdlib-todo
+  搂0.3): a Vec slot is 8 bytes 鈥?int/bool natively, f64 via
   `store_f64`/`load_f64` views (the bisect `_f` family is the worked
   example), strings via `as_ptr` (`vec_push_str`/`vec_get_str`). Generic
   STRUCT containers remain impossible (no address-of-struct/no sizeof);
   heterogeneous records still go through the tagged-slab pattern.
 
 
-## IDE (ide/) — Tauri 2 + Next.js + Monaco workbench (v0.31.0, continued v0.31.1)
+## IDE (ide/) 鈥?Tauri 2 + Next.js + Monaco workbench (v0.31.0, continued v0.31.1)
 
-- `ide/src-tauri` is EXCLUDED from the root Cargo workspace — a plain
+- `ide/src-tauri` is EXCLUDED from the root Cargo workspace 鈥?a plain
   `cargo test` at the repo root must never compile a Tauri app. Its tests
   run separately: `cargo test --manifest-path ide/src-tauri/Cargo.toml`.
 - Frontend tests/typecheck: `pnpm --dir ide test` (node:test on
   `test/*.test.ts`, no framework) and `pnpm --dir ide typecheck`.
 - **It drives the real compiler** (`ide_check`/`ide_build`/`ide_run` shell
-  out to `aoxn`); Check runs `aoxn check` (v0.31.1) — NOT `aoxn c`, which
+  out to `aoxn`); Check runs `aoxn check` (v0.31.1) 鈥?NOT `aoxn c`, which
   prints the generated C and would flood the output panel.
-- **Never round-trip a file path through Monaco's `model.uri`** — the
+- **Never round-trip a file path through Monaco's `model.uri`** 鈥?the
   wrapper parses the `path` prop into a URI and a Windows path does not
   survive `uri.toString()`; v0.31.0 had Ctrl+S silently no-op in the native
   app because of exactly that. Always pass the doc's path prop through.
 - Monaco language + theme are registered in the Editor's `beforeMount`
   (strictly between Monaco's load and the first model's creation); a
   page-level effect raced the mount in v0.31.0 (light-theme flash).
-- `fs::canonicalize` on Windows returns `\\?\D:\...` verbatim paths —
+- `fs::canonicalize` on Windows returns `\\?\D:\...` verbatim paths 鈥?
   `fsops::pretty` strips the prefix so the tree, the log and the compiler's
   echoed diagnostics all spell plain `D:\...`.
 - **The Packages panel is a remote control, not a reimplementation**
   (v0.33.0): `pkg.rs` runs the real `aoxn pkg` from the workspace root, and
-  `ALLOWED_SUBCOMMANDS` is the whole surface — publish/yank/cache/trust
+  `ALLOWED_SUBCOMMANDS` is the whole surface 鈥?publish/yank/cache/trust
   bootstrap/npm-import are refused in Rust, never merely hidden in the UI.
   `default-run = "aoxn"` in the root Cargo.toml is what keeps bare
   `cargo run -- <cmd>` working now that the repo ships two binaries (aoxn +
@@ -1231,14 +1253,14 @@ crates/aoxn-pkg       package manager crate (its own dependency set; see above)
   AST `load_program` already built. The outline, Ctrl+click and Ctrl+Shift+O
   all read that one table (`ide/lib/symbols.ts`), so they cannot disagree;
   the ranking and jump rules are pure functions there precisely so they are
-  testable without a render. It stops after the PARSER on purpose — an
+  testable without a render. It stops after the PARSER on purpose 鈥?an
   editor re-asks on every file switch and clang is far too slow for that.
   **Do not add an editor-side regex outline**: it cannot know where a
   declaration ends, which name is a parameter, or that `extern def` has no
   body.
 - **Diagnostics are STRUCTURED first, text second** (v0.35.0): the IDE runs
   `check`/`build`/`run` with `--json`, and `ExecResult.diags` carries the
-  parsed report BESIDE the raw `output` — the panel shows the words, the
+  parsed report BESIDE the raw `output` 鈥?the panel shows the words, the
   markers use the structure. `lib/diagnostics.ts`'s text scanner is the
   fallback for a pre-v0.35.0 compiler or a command that died before
   printing; keep it, and keep it tested. `toolchain::json_document`
@@ -1250,10 +1272,10 @@ crates/aoxn-pkg       package manager crate (its own dependency set; see above)
   agree on how a file is written or cross-file navigation silently breaks.
   `src/setup/main.rs` keeps the same rule for the payload it unpacks.
 - `pnpm dev` runs the whole workbench in a browser against an in-memory
-  fixture (`lib/bridge.ts`, tree derived by `lib/tree.ts`) — layout work
+  fixture (`lib/bridge.ts`, tree derived by `lib/tree.ts`) 鈥?layout work
   without a 12-minute native rebuild.
 
-## Known issues (deliberately unfixed — do not "drive by" fix)
+## Known issues (deliberately unfixed 鈥?do not "drive by" fix)
 
 - The self-hosted loader opens files with narrow `fopen` (stdlib `read_file`),
   so non-ASCII paths fail there; the Rust compiler is unaffected. Tests keep
@@ -1261,43 +1283,43 @@ crates/aoxn-pkg       package manager crate (its own dependency set; see above)
 
 ## Repo layout
 
-- `examples/*.ax` — demo programs (hello, fib, primes, vectors, strings, benchmarks, stdlib_demo, ui_demo, ui_gallery); since v0.30.0 they import the stdlib **by name** (`"stdlib"`, `"stdlib/ui_win"`), so the ones shipped in a release archive run from any directory — `selfhost/load.ax` does NOT do name resolution (repo-bound, relative paths only)
-- `web/` — web benchmark suite: HTTP/1.1 server written in Aoxn (FFI sockets)
+- `examples/*.ax` 鈥?demo programs (hello, fib, primes, vectors, strings, benchmarks, stdlib_demo, ui_demo, ui_gallery); since v0.30.0 they import the stdlib **by name** (`"stdlib"`, `"stdlib/ui_win"`), so the ones shipped in a release archive run from any directory 鈥?`selfhost/load.ax` does NOT do name resolution (repo-bound, relative paths only)
+- `web/` 鈥?web benchmark suite: HTTP/1.1 server written in Aoxn (FFI sockets)
   vs pnpm+Node.js+Next.js; see `web/README.md` + `docs/web-benchmark.md`
-- `stdlib/stdlib.ax` — the standard library core, written in Aoxn itself;
-  `stdlib/ui.ax` + `stdlib/ui_win.ax` — the Qt-flavored immediate-mode UI
+- `stdlib/stdlib.ax` 鈥?the standard library core, written in Aoxn itself;
+  `stdlib/ui.ax` + `stdlib/ui_win.ax` 鈥?the Qt-flavored immediate-mode UI
   toolkit v3 (layout engine, text selection/multi-line editing, menus,
   tree/table model+view, signal-slot events);
   `stdlib/{math,time,datetime,calendar,pathlib,base64,hashlib,hmac,os,glob,json,bisect,heapq}.ax`
-  — the v0.44.0 module batch (`docs/stdlib.md` is its reference;
+  鈥?the v0.44.0 module batch (`docs/stdlib.md` is its reference;
   `stdlib/net/` holds the SDK-shared transport, `stdlib/openai/` +
   `stdlib/anthropic/` the two SDKs)
-- `selfhost/` — the compiler rewritten in Aoxn (fixed point reached; C emitter)
-- `crates/aoxn-pkg/` — the package manager (`aoxn pkg`, beta)
-- `ide/` — the Aoxn IDE (Tauri 2 + Next.js + Monaco); `docs/ide.md` is its
+- `selfhost/` 鈥?the compiler rewritten in Aoxn (fixed point reached; C emitter)
+- `crates/aoxn-pkg/` 鈥?the package manager (`aoxn pkg`, beta)
+- `ide/` 鈥?the Aoxn IDE (Tauri 2 + Next.js + Monaco); `docs/ide.md` is its
   reference; `ide/src-tauri` is its own Cargo workspace (excluded above)
-- `dist/package.ps1` — builds the single-file installer;
-  `src/setup/` — the installer stub and its Win32 window
-- `docs/selfhost.md` — historical self-hosting assessment (v0.19-era);
-  `docs/install.md` — install guide (Windows);
-  `docs/platform-support.md` — what "Windows only" means and what a port
+- `dist/package.ps1` 鈥?builds the single-file installer;
+  `src/setup/` 鈥?the installer stub and its Win32 window
+- `docs/selfhost.md` 鈥?historical self-hosting assessment (v0.19-era);
+  `docs/install.md` 鈥?install guide (Windows);
+  `docs/platform-support.md` 鈥?what "Windows only" means and what a port
   would need;
-  `docs/spec.md` — language spec + roadmap;
-  `docs/ui.md` — UI toolkit reference (v3);
-  `docs/llvm-independence-report.md` — why/how LLVM was removed;
-  `docs/ts-m1-spec.md` / `docs/web-platform-plan.md` — TS platform decisions
-- `AGENTS.md` — this file: agent/contributor working agreement (published
+  `docs/spec.md` 鈥?language spec + roadmap;
+  `docs/ui.md` 鈥?UI toolkit reference (v3);
+  `docs/llvm-independence-report.md` 鈥?why/how LLVM was removed;
+  `docs/ts-m1-spec.md` / `docs/web-platform-plan.md` 鈥?TS platform decisions
+- `AGENTS.md` 鈥?this file: agent/contributor working agreement (published
   since v0.29.3)
-- Repo: github.com/AlonechatWorkspace/Aoxn-language · Apache-2.0 · CI: two
+- Repo: github.com/AlonechatWorkspace/Aoxn-language 路 Apache-2.0 路 CI: two
   jobs. `windows-latest` (winget clang) runs the suite, packages the
   single-file installer, installs it into a scratch prefix and runs
-  `aoxn doctor` — a broken installer fails the build. `ubuntu-latest`
+  `aoxn doctor` 鈥?a broken installer fails the build. `ubuntu-latest`
   (v0.46.0) runs the whole suite plus the X11 probe under Xvfb
   (`apt install clang libx11-dev libxft-dev libfontconfig1-dev xvfb`).
 - **Cfg-gated code needs a cross-check before it lands.** `rustup target
   add x86_64-unknown-linux-gnu` (std only, no linker needed) +
   `cargo check --workspace --tests --target x86_64-unknown-linux-gnu`
-  catches every `#[cfg(not(windows))]` mistake locally — the v0.46.0 CI run
+  catches every `#[cfg(not(windows))]` mistake locally 鈥?the v0.46.0 CI run
   caught `setup/main.rs` calling `ui::wizard` on Linux exactly because this
   was not done. Windows-only test crates that link Windows libraries
   (`winhttp`, `ws2_32`) are gated with `#![cfg(windows)]` at the top.

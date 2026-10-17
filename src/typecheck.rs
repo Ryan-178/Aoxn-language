@@ -44,6 +44,10 @@ type Scopes = HashMap<String, Type, FastBuild>;
 pub struct FnSig {
     pub params: Vec<Type>,
     pub ret: Type,
+    /// how many parameters have NO default (v0.51.0). A call passes between
+    /// `required` and `params.len()` arguments; the missing tail is filled in
+    /// at the call site, which is why the C signature is unchanged.
+    pub required: usize,
 }
 
 /// mutable checking context shared by the recursive walkers
@@ -163,9 +167,38 @@ pub fn check(program: &Program) -> Result<CheckOutput, Diag> {
                         format!("extern function '{}' cannot take a function-pointer parameter; pass its address as an int", f.name),
                     ));
                 }
+                // an extern is a C declaration, so there is no Aoxn call site
+                // that could supply a default — and the C prototype would be
+                // a lie about a symbol the C library owns
+                if p.default.is_some() {
+                    return Err(Diag::at(
+                        "type",
+                        p.pos.file,
+                        p.pos.line,
+                        p.pos.col,
+                        format!("extern function '{}' cannot have a default parameter value", f.name),
+                    ));
+                }
             }
         }
         resolve_ty(&f.ret, &structs).map_err(|m| Diag::at("type", f.pos.file, f.pos.line, f.pos.col, m))?;
+        // Python's rule, enforced because the alternative is a hole: a
+        // defaulted parameter must be followed only by defaulted ones, so
+        // "which argument am I?" has exactly one answer.
+        let mut seen_default: Option<&Param> = None;
+        for p in &f.params {
+            if p.default.is_some() {
+                seen_default = Some(p);
+            } else if let Some(d) = seen_default {
+                return Err(Diag::at(
+                    "type",
+                    p.pos.file,
+                    p.pos.line,
+                    p.pos.col,
+                    format!("parameter '{}' has no default value but follows '{}', which does", p.name, d.name),
+                ));
+            }
+        }
         if has_generic_len(&f.ret) {
             return Err(Diag::at("type", f.pos.file, f.pos.line, f.pos.col, "array length parameters are only valid inside generic functions"));
         }
@@ -179,6 +212,7 @@ pub fn check(program: &Program) -> Result<CheckOutput, Diag> {
             FnSig {
                 params: f.params.iter().map(|p| p.ty.clone()).collect(),
                 ret: f.ret.clone(),
+                required: required_arity(&f.params),
             },
         );
     }
@@ -193,6 +227,20 @@ pub fn check(program: &Program) -> Result<CheckOutput, Diag> {
         }
         if f.name == "main" {
             return Err(Diag::at("type", f.pos.file, f.pos.line, f.pos.col, "'main' cannot be generic"));
+        }
+        // A default would have to be re-checked per monomorphized instance
+        // (its type can mention the type parameters), and the caller fills
+        // it in textually — an instance that disagrees with its own
+        // declaration is worse than not having the form at all. Reject it
+        // here rather than accept one that silently mis-checks.
+        if let Some(p) = f.params.iter().find(|p| p.default.is_some()) {
+            return Err(Diag::at(
+                "type",
+                p.pos.file,
+                p.pos.line,
+                p.pos.col,
+                format!("a generic function cannot have a default parameter value (found '{}')", p.name),
+            ));
         }
         if sigs.contains_key(&f.name) || generics.contains_key(&f.name) {
             return Err(Diag::at("type", f.pos.file, f.pos.line, f.pos.col, format!("function '{}' is defined more than once", f.name)));
@@ -265,6 +313,43 @@ impl<'a> Tc<'a> {
         // so a map preserves the old reversed-linear-scan semantics
         let mut scopes: Scopes =
             f.params.iter().map(|p| (p.name.clone(), p.ty.clone())).collect();
+        // Default values (v0.51.0) are checked in an EMPTY scope, and a
+        // reference to one of the function's own parameters is an error
+        // rather than a silent `void`. The reason is the mechanism, not
+        // taste: a default is not evaluated where the `def` runs, it is
+        // written TEXTUALLY into every call that omits the argument. A
+        // default naming a parameter would therefore read a name that does
+        // not exist at the call site — a C compile error at best, and at
+        // worst a caller's local of the same name. The language has no
+        // module-level variables, so what IS available is literals, other
+        // functions, and operators over them.
+        for p in &f.params {
+            let Some(d) = &p.default else { continue };
+            if let Some(name) = first_var_naming(d, &|n| f.params.iter().any(|q| q.name == n)) {
+                return Err(Diag::at(
+                    "type",
+                    d.pos().file,
+                    d.pos().line,
+                    d.pos().col,
+                    format!(
+                        "the default value for parameter '{}' refers to parameter '{name}': a default is written into the call, \
+                         so only module-level names are in scope",
+                        p.name
+                    ),
+                ));
+            }
+            let mut outer: Scopes = Scopes::default();
+            let t = self.check_expr(d, &mut outer)?;
+            if !assignable(&p.ty, &t) {
+                return Err(Diag::at(
+                    "type",
+                    d.pos().file,
+                    d.pos().line,
+                    d.pos().col,
+                    format!("default value for parameter '{}' must be {}, found {}", p.name, p.ty, t),
+                ));
+            }
+        }
         // per-function warning state (W001): what was bound, what was read
         self.local_decls.clear();
         self.local_reads.clear();
@@ -840,12 +925,20 @@ impl<'a> Tc<'a> {
                     return Ok(Type::Str);
                 }
                 if name == "print" {
-                    if args.len() != 1 || args[0].name.is_some() {
-                        return Err(self.err(pos.line, pos.col, "print expects exactly 1 positional argument"));
+                    // v0.51.0: Python's `print` takes any number of values and
+                    // separates them with one space; `print()` prints an empty
+                    // line. Keyword arguments (`sep=`/`end=`) stay refused —
+                    // they would be the first keyword arguments in the
+                    // language, and half of them is not a feature, it is a
+                    // question.
+                    if args.iter().any(|a| a.name.is_some()) {
+                        return Err(self.err(pos.line, pos.col, "print takes positional arguments only"));
                     }
-                    let t = self.check_expr(&args[0].value, scopes)?;
-                    if !t.is_printable() {
-                        return Err(self.err(pos.line, pos.col, format!("print requires int, float, bool, or string, found {t}")));
+                    for a in args {
+                        let t = self.check_expr(&a.value, scopes)?;
+                        if !t.is_printable() {
+                            return Err(self.err(a.value.pos().line, a.value.pos().col, format!("print requires int, float, bool, or string, found {t}")));
+                        }
                     }
                     return Ok(Type::Void);
                 }
@@ -1025,14 +1118,15 @@ impl<'a> Tc<'a> {
                 // borrow the signature piecewise: params/ret are read between
                 // argument checks, never across a `&mut self` call
                 let nparams = self.sigs[name].params.len();
+                let required = self.sigs[name].required;
                 if args.iter().any(|a| a.name.is_some()) {
                     return Err(self.err(pos.line, pos.col, format!("function '{}' takes positional arguments only", name)));
                 }
-                if args.len() != nparams {
+                if args.len() < required || args.len() > nparams {
                     return Err(self.err(pos.line, pos.col, format!(
                             "function '{}' expects {} argument(s), found {}",
                             name,
-                            nparams,
+                            if required == nparams { format!("{nparams}") } else { format!("{required} to {nparams}") },
                             args.len()
                         )));
                 }
@@ -1156,6 +1250,22 @@ impl<'a> Tc<'a> {
                             Err(self.err(pos.line, pos.col, format!("'%' requires two int operands, found ({lt}, {rt})")))
                         }
                     }
+                    // `**` (v0.51.0): two ints or two floats, like every other
+                    // arithmetic operator — there is no promotion, so
+                    // `2 ** 0.5` is an error and `to_float(2) ** 0.5` is how
+                    // you ask for a fractional power. int**int is exact
+                    // (exponentiation by squaring); Python would return a
+                    // float for a negative exponent, which int cannot
+                    // hold, so Aoxn yields 0 instead.
+                    Pow => {
+                        if (lt == Type::Int || lt == Type::Float) && lt == rt {
+                            Ok(lt)
+                        } else {
+                            Err(self.err(pos.line, pos.col, format!(
+                                    "'**' requires two int or two float operands, found ({lt}, {rt})"
+                                )))
+                        }
+                    }
                     // Bitwise and shift operators are int-only, exactly like
                     // `%`: there is no implicit promotion to float, because
                     // Aoxn has no implicit int/float conversion at all.
@@ -1171,7 +1281,30 @@ impl<'a> Tc<'a> {
                     }
                 }
             }
+            Expr::IfExp { then_expr, cond, else_expr, pos } => {
+                self.check_if_exp(then_expr, cond, else_expr, *pos, scopes)
+            }
         }
+    }
+
+    /// `a if c else b` (v0.51.0). The condition is `bool` like every other
+    /// condition, and both branches must have the SAME type — Aoxn has no
+    /// implicit conversion, and admitting a pair that only "unifies" would
+    /// mean inventing a conversion rule at exactly the place a reader is
+    /// least looking for one.
+    fn check_if_exp(&mut self, then_expr: &Expr, cond: &Expr, else_expr: &Expr, pos: Pos, scopes: &mut Scopes) -> Result<Type, Diag> {
+        let ct = self.check_expr(cond, scopes)?;
+        if ct != Type::Bool {
+            return Err(self.err(pos.line, pos.col, format!("the condition of a conditional expression must be bool, found {ct}")));
+        }
+        let tt = self.check_expr(then_expr, scopes)?;
+        let et = self.check_expr(else_expr, scopes)?;
+        if tt != et {
+            return Err(self.err(pos.line, pos.col, format!(
+                    "both branches of a conditional expression must have the same type, found {tt} and {et}"
+                )));
+        }
+        Ok(tt)
     }
 
     /// unify arguments against the generic declaration, create/reuse the
@@ -1393,6 +1526,38 @@ fn has_generic_len(t: &Type) -> bool {
     match t {
         Type::Array { elem, len } => *len == GENERIC_LEN || has_generic_len(elem),
         _ => false,
+    }
+}
+
+/// How many leading parameters a call MUST pass (v0.51.0): the ones with no
+/// default. The declaration check already rejects a defaulted parameter
+/// followed by a plain one, so the defaulted ones are always a suffix and
+/// counting the prefix is exact.
+fn required_arity(params: &[Param]) -> usize {
+    params.iter().take_while(|p| p.default.is_none()).count()
+}
+
+/// The first variable an expression names that `is_forbidden` accepts, for
+/// the default-value check above. Every sub-expression is visited: a default
+/// may legally nest a call, and a parameter reference can hide inside one.
+fn first_var_naming(e: &Expr, is_forbidden: &dyn Fn(&str) -> bool) -> Option<String> {
+    match e {
+        Expr::Var { name, .. } => is_forbidden(name).then(|| name.clone()),
+        Expr::Unary { expr, .. } | Expr::Cast { expr, .. } => first_var_naming(expr, is_forbidden),
+        Expr::Binary { lhs, rhs, .. } => first_var_naming(lhs, is_forbidden).or_else(|| first_var_naming(rhs, is_forbidden)),
+        Expr::Index { arr, idx, .. } => first_var_naming(arr, is_forbidden).or_else(|| first_var_naming(idx, is_forbidden)),
+        Expr::IfExp { then_expr, cond, else_expr, .. } => first_var_naming(cond, is_forbidden)
+            .or_else(|| first_var_naming(then_expr, is_forbidden))
+            .or_else(|| first_var_naming(else_expr, is_forbidden)),
+        Expr::Field { obj, .. } => first_var_naming(obj, is_forbidden),
+        Expr::ArrayLit { elems, .. } => elems.iter().find_map(|x| first_var_naming(x, is_forbidden)),
+        Expr::ArrayRep { elem, .. } => first_var_naming(elem, is_forbidden),
+        Expr::DictLit { entries, .. } => entries
+            .iter()
+            .find_map(|(k, v)| first_var_naming(k, is_forbidden).or_else(|| first_var_naming(v, is_forbidden))),
+        Expr::StructLit { fields, .. } => fields.iter().find_map(|(_, v)| first_var_naming(v, is_forbidden)),
+        Expr::Call { args, .. } => args.iter().find_map(|a| first_var_naming(&a.value, is_forbidden)),
+        Expr::Int(..) | Expr::Float(..) | Expr::Str(..) | Expr::Bool(..) | Expr::NoneLit(_) => None,
     }
 }
 
@@ -1697,6 +1862,7 @@ fn op_str(op: BinOp) -> &'static str {
         Add => "+",
         Sub => "-",
         Mul => "*",
+        Pow => "**",
         Div => "/",
         Mod => "%",
         Shl => "<<",

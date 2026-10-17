@@ -282,7 +282,7 @@ impl Parser {
                 let d = self.sentinel(&ty, self.pos_of(&pt));
                 opts.push((params.len(), d));
             }
-            params.push(Param { name: pname, ty, pos: self.pos_of(&pt) });
+            params.push(Param { name: pname, ty, pos: self.pos_of(&pt), default: None });
             if !self.eat_punct(",") {
                 break;
             }
@@ -351,7 +351,7 @@ impl Parser {
             }
             self.expect_punct(":")?;
             let ty = self.map_type()?;
-            fields.push(Param { name: fname, ty, pos: self.pos_of(&ft) });
+            fields.push(Param { name: fname, ty, pos: self.pos_of(&ft), default: None });
             // fields may be separated by `;`, `,`, or a line break
             self.eat_punct(";");
             self.eat_punct(",");
@@ -508,7 +508,7 @@ impl Parser {
             let mut ft = HashMap::new();
             for (i, e) in elems.iter().enumerate() {
                 let fname = format!("_{i}");
-                fields.push(Param { name: fname.clone(), ty: e.clone(), pos: Pos { line: 0, col: 0, file: self.file } });
+                fields.push(Param { name: fname.clone(), ty: e.clone(), pos: Pos { line: 0, col: 0, file: self.file }, default: None });
                 ft.insert(fname, e.clone());
             }
             self.struct_fields.insert(name.clone(), ft);
@@ -1004,14 +1004,23 @@ impl Parser {
     }
 
     fn assign_expr(&mut self) -> Result<Expr, Diag> {
-        let lhs = self.or_expr()?;
+        let cond = self.or_expr()?;
         // assignment operators are consumed by the statement layer
-        // (simple_assign_stmt); only the ternary is rejected here
-        let t = self.peek().clone();
-        if matches!(&t.tok, Tok::Punct("?")) {
-            return Err(self.err(t, "the ternary operator lands with the S2 expression slice"));
+        // (simple_assign_stmt). The ternary lowers to the SAME node the Aoxn
+        // surface's `a if c else b` produces (v0.51.0) — TypeScript spells it
+        // `c ? a : b`, the operand order is all that differs.
+        if !matches!(&self.peek().tok, Tok::Punct("?")) {
+            return Ok(cond);
         }
-        Ok(lhs)
+        let q = self.bump();
+        let then_expr = self.assign_expr()?;
+        self.expect_punct(":")?;
+        let else_expr = self.assign_expr()?;
+        let pos = self.pos_of(&q);
+        let _ = &q;
+        // `expect_punct(":")` already reported a missing colon; the position
+        // of the whole form is the `?`, which is what the checker points at
+        Ok(Expr::IfExp { then_expr: Box::new(then_expr), cond: Box::new(cond), else_expr: Box::new(else_expr), pos })
     }
 
     fn or_expr(&mut self) -> Result<Expr, Diag> {
@@ -1558,6 +1567,7 @@ impl Parser {
                 Some(Type::Array { elem: Box::new(et), len: *count })
             }
             Expr::StructLit { name, .. } => Some(Type::Struct(name.clone())),
+            Expr::IfExp { then_expr, .. } => self.infer_type(then_expr),
         }
     }
 
@@ -1767,6 +1777,11 @@ fn fill_expr(e: &mut Expr, opts: &HashMap<String, Vec<(usize, Expr)>>, totals: &
         Expr::Index { arr, idx, .. } => {
             fill_expr(arr, opts, totals);
             fill_expr(idx, opts, totals);
+        }
+        Expr::IfExp { then_expr, cond, else_expr, .. } => {
+            fill_expr(cond, opts, totals);
+            fill_expr(then_expr, opts, totals);
+            fill_expr(else_expr, opts, totals);
         }
         Expr::Field { obj, .. } => fill_expr(obj, opts, totals),
         Expr::ArrayLit { elems, .. } => {

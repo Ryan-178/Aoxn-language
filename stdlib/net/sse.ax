@@ -45,12 +45,32 @@ struct NetSse:
     done: bool      # saw "data: [DONE]"
     res: string     # data payload of the frame extracted by the last next()
     event: string   # its "event:" name ("" when the frame carried none)
-    data: string    # data-line accumulator for the frame being built
+    data: string    # data payload of the finished frame ("" while building one)
     ev: string      # event-line accumulator for the frame being built
+    # The data-line accumulator is a byte buffer, NOT a string (v0.51.0).
+    # `data = data + "\n" + payload` copied everything accumulated so far on
+    # every `data:` line, and Aoxn's concatenation never frees the old buffer,
+    # so one frame with N data lines cost O(N^2) bytes AND time. Measured on
+    # this machine: 1 000 lines 0.08 s, 2 000 0.19 s, 4 000 0.70 s, 8 000
+    # 2.83 s — a single streamed response could pin a thread for minutes.
+    dbuf: int       # accumulator buffer (malloc'd, grown geometrically)
+    dcap: int
+    dn: int         # bytes accumulated in it
 
 def net_sse_new() -> NetSse:
     cap = 8192
-    return NetSse(buf=malloc(cap), cap=cap, n=0, pos=0, done=False, res="", event="", data="", ev="")
+    return NetSse(buf=malloc(cap), cap=cap, n=0, pos=0, done=False, res="", event="", data="", ev="", dbuf=malloc(1024), dcap=1024, dn=0)
+
+# grow the data accumulator so it can take `need` more bytes
+def net_sse_reserve(s: NetSse, need: int) -> NetSse:
+    if s.dn + need + 1 <= s.dcap:
+        return s
+    newcap = s.dcap * 2
+    if newcap < s.dn + need + 1:
+        newcap = s.dn + need + 1
+    s.dbuf = realloc(s.dbuf, newcap)
+    s.dcap = newcap
+    return s
 
 # append network bytes (does NOT parse; call net_sse_next after feeding)
 def net_sse_feed(s: NetSse, p: int, n: int) -> NetSse:
@@ -87,15 +107,21 @@ def net_sse_next(s: NetSse) -> NetSse:
         s.pos = i + 1
         if len(line) == 0:
             # blank line: dispatch the accumulated frame
-            if len(s.data) > 0:
+            if s.dn > 0:
                 s.event = s.ev
                 s.ev = ""
-                if s.data == "[DONE]":
+                store_u8(s.dbuf, s.dn, 0)
+                # COPY, do not alias: the accumulator is reused by the next
+                # frame, and `s.res` outlives this call (a caller reads it
+                # after further net_sse_next calls). Handing out the
+                # accumulator's address made every earlier frame read back as
+                # the newest one — `e1` and `e2` both came out "[DONE]".
+                frame = buf_str(s.dbuf, s.dn)
+                s.dn = 0
+                if frame == "[DONE]":
                     s.done = True
-                    s.data = ""
                     return s
-                s.res = s.data
-                s.data = ""
+                s.res = frame
                 return s
             # a frame with only an event name and no data line carries
             # nothing this SDK can use; drop the name rather than leak it
@@ -112,10 +138,19 @@ def net_sse_next(s: NetSse) -> NetSse:
             payload = str_sub(line, 5, len(line))
             if len(payload) > 0 and load_u8(payload, 0) == 32:
                 payload = str_sub(payload, 1, len(payload))
-            if len(s.data) > 0:
-                s.data = s.data + "\n" + payload
-            else:
-                s.data = payload
+            # append into the accumulator, geometrically grown (see the
+            # `dbuf` field): one reallocation per doubling, not one per line.
+            # The separator is written AT the current end and the counter
+            # advanced after it — the other order writes one byte past the
+            # data and then overwrites it with the next payload.
+            pl = len(payload)
+            if s.dn > 0:
+                s = net_sse_reserve(s, 1)
+                store_u8(s.dbuf, s.dn, 10)     # the '\n' between data lines
+                s.dn = s.dn + 1
+            s = net_sse_reserve(s, pl)
+            memcpy(s.dbuf + s.dn, as_ptr(payload), pl)
+            s.dn = s.dn + pl
         # `id:` / `retry:` / anything else: irrelevant for these APIs, ignored
     # compact consumed bytes so the buffer cannot grow without bound
     if s.pos > 0:

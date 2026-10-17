@@ -277,6 +277,60 @@ the information needed to protect users even if the reporter disagrees.
   not print an `AnClient` / `OaClient` struct: `print` on a struct renders
   its fields, key included.
 
+## Known, open findings (v0.51.0 audit)
+
+An audit of the shipped code on 2026-10-17 produced the findings below.
+Those marked **fixed in v0.51.0** are in the CHANGELOG with their root cause.
+The rest are **still present** and are listed here so nobody has to re-derive
+them from an audit report — they are ordered by severity, and every one is a
+real, reproducible issue, not a theoretical one.
+
+- **Fixed in v0.51.0 — cross-origin redirect leaked a credential**
+  (`stdlib/net/http.ax`). WinHTTP followed redirects itself and carried the
+  request headers, including Anthropic's `x-api-key`, to the redirect target.
+  Redirects are no longer followed automatically; `r.location` carries the
+  target.
+- **Fixed in v0.51.0 — heap out-of-bounds read in the UTF-8 → UTF-16 encoder**
+  (`stdlib/net/codec.ax`). A truncated multi-byte sequence read past the end
+  of the buffer (ASan: heap-buffer-overflow READ). Now validated, with U+FFFD
+  substitution.
+- **Fixed in v0.51.0 — non-terminating `j_dumps` on an infinite float**
+  (`stdlib/json.ax`). Five bytes of valid JSON (`1e400`) could hang the
+  thread; a deeply nested document could instead overflow the stack.
+- **Fixed in v0.51.0 — a truncated HTTP response was reported as a clean
+  200** (`stdlib/net/http.ax`), so a partial body could be accepted as
+  complete. Read failures now set `err`.
+- **Fixed in v0.51.0 — quadratic SSE frame accumulation** (`stdlib/net/sse.ax`).
+- **Open (high) — package archives can write outside the extraction
+  directory.** `crates/aoxn-pkg/src/tarball.rs` strips a textual prefix and
+  rejects `..`, but not an ABSOLUTE remainder: an entry named
+  `demo/C:/…/outside.txt` makes `dest.join(path)` discard `dest`. Content
+  integrity is verified only AFTER extraction, so a failing check cannot undo
+  the write.
+- **Open (high) — unrestricted archive hard links.** An archive may make a
+  package file a hard link to an external target. The manifest hash covers
+  content, not link identity, so a checksum computed over the target's known
+  original bytes passes, and a later `fs::write` of that path follows the
+  link and overwrites the external file.
+- **Open (high) — dependency-map keys are not validated before a recursive
+  delete.** A key such as `../victim` resolves to `aox_modules/../victim`,
+  and the destination is removed recursively BEFORE extraction and before any
+  integrity check.
+- **Open (medium) — registry checksums are used as cache paths unvalidated.**
+  A `checksum` of `../escaped` writes outside the `tarballs/` namespace,
+  before the content check.
+- **Open (medium, conditional) — the IDE's workspace root can be replaced by
+  the webview.** `ide_open_folder` trusts a path submitted by the frontend
+  and replaces application state without a native approval step, so an XSS
+  in the trusted webview could widen the file boundary. Needs a native folder
+  picker in the backend to fix properly.
+- **Open (medium) — IDE build output can overwrite an outside file through a
+  pre-existing hard link**, since the destination is published with a write
+  that follows links.
+- **Open (low) — the IDE explorer follows directory junctions outside the
+  workspace**, disclosing directory names and structure (the bounded *read*
+  command correctly rejects the same link).
+
 ## Out of scope (documented behavior)
 
 These are deliberate design decisions, documented in

@@ -67,6 +67,10 @@ pub enum Tok {
     Plus,
     Minus,
     Star,
+    /// `**` — power (v0.51.0), Python's spelling. Not the augmented form and
+    /// not a second `Star`: the parser needs them apart to get the
+    /// precedence (tighter than `*`, right-associative) right.
+    PowStar,
     Slash,
     Percent,
     Bang,
@@ -595,6 +599,10 @@ impl<'c> Lexer<'c> {
                     adv!(self);
                     adv!(self);
                     Tok::StarAssign
+                } else if two!('*') {
+                    adv!(self);
+                    adv!(self);
+                    Tok::PowStar
                 } else {
                     adv!(self);
                     Tok::Star

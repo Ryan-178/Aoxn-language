@@ -62,6 +62,11 @@ struct FnSig {
     /// parameter types, kept so a function used as a VALUE can be typed
     /// (`Type::FnPtr`) without re-reading the AST (v0.40.0)
     params: Vec<Type>,
+    /// default value expressions, positionally aligned with `params` (v0.51.0).
+    /// `None` on a parameter that has none. The C prototype keeps every
+    /// parameter; a call site that omits a trailing one emits its default
+    /// here, so a program spelling no default emits byte-identical C.
+    defaults: Vec<Option<Expr>>,
 }
 
 /// which functions can raise, directly or through a callee (v0.40.0)? The
@@ -163,6 +168,11 @@ fn scan_fn_body(f: &FnDecl) -> (bool, Vec<String>) {
                 walk_expr(arr, raised, calls);
                 walk_expr(idx, raised, calls);
             }
+            Expr::IfExp { then_expr, cond, else_expr, .. } => {
+                walk_expr(cond, raised, calls);
+                walk_expr(then_expr, raised, calls);
+                walk_expr(else_expr, raised, calls);
+            }
             Expr::Field { obj, .. } => walk_expr(obj, raised, calls),
             Expr::ArrayLit { elems, .. } => {
                 for e in elems {
@@ -175,6 +185,18 @@ fn scan_fn_body(f: &FnDecl) -> (bool, Vec<String>) {
     let mut raised = false;
     let mut calls = Vec::new();
     walk_block(&f.body, &mut raised, &mut calls);
+    // A default value (v0.51.0) is emitted TEXTUALLY at every call site, so a
+    // call it makes happens inside THIS function's body. Leaving it out would
+    // make the raise fixpoint blind to it: `def g(n: int = boom())` called
+    // from a function would unwind with no slot check after the statement.
+    // Adding the names here is enough — the fixpoint below closes the chain
+    // transitively, because the same rule applies to every function it lands
+    // in.
+    for p in &f.params {
+        if let Some(d) = &p.default {
+            walk_expr(d, &mut raised, &mut calls);
+        }
+    }
     (raised, calls)
 }
 
@@ -324,6 +346,10 @@ struct GenC<'a> {
     /// wrapper; a program that does not ask for its arguments keeps the
     /// byte-identical `int main(void)` text (v0.42.0)
     used_argv: bool,
+    /// `**` on two ints needs an exact integer power (v0.51.0). The float
+    /// arm is `__builtin_pow`, which needs no helper. Emitted only when a
+    /// program actually raises an integer to an integer power.
+    used_pow_i: bool,
 }
 
 impl<'a> GenC<'a> {
@@ -357,6 +383,7 @@ impl<'a> GenC<'a> {
             used_raw: false,
             used_exit: false,
             used_argv: false,
+            used_pow_i: false,
         };
         for s in &program.structs {
             g.struct_names.insert(s.name.clone());
@@ -404,7 +431,15 @@ impl<'a> GenC<'a> {
             } else {
                 g.c_ident(&f.name)
             };
-            g.sigs.insert(f.name.clone(), FnSig { c_name, ret: f.ret.clone(), params: f.params.iter().map(|p| p.ty.clone()).collect() });
+            g.sigs.insert(
+                f.name.clone(),
+                FnSig {
+                    c_name,
+                    ret: f.ret.clone(),
+                    params: f.params.iter().map(|p| p.ty.clone()).collect(),
+                    defaults: f.params.iter().map(|p| p.default.as_deref().cloned()).collect(),
+                },
+            );
         }
         // struct field types register their array typedefs up front so the
         // type graph is complete for the topological assembly
@@ -647,6 +682,23 @@ impl<'a> GenC<'a> {
                  char* buf = (char*)__builtin_malloc(64);\n    \
                  __builtin_snprintf(buf, 64, \"%f\", v);\n    \
                  return buf;\n}\n\n",
+            );
+        }
+        // exact integer power for `**` on two ints (v0.51.0). Exponentiation
+        // by squaring with a sign-correct tail loop: Python returns a float
+        // for a negative exponent, which an int cannot hold, so this answers
+        // 0 (and 1 for a base of 1 or -1, whose powers alternate) instead of
+        // wrapping. The float arm is `__builtin_pow` and needs no helper.
+        if self.used_pow_i {
+            s.push_str(
+                "static long long ax_pow_int(long long b, long long e) {\n    \
+                 if (e < 0) return (b == 1 || b == -1) ? (e % 2 == 0 ? 1 : b) : 0;\n    \
+                 long long r = 1;\n    \
+                 while (e > 0) {\n        \
+                 if ((e & 1) != 0) r *= b;\n        \
+                 e >>= 1;\n        \
+                 if (e > 0) b *= b;\n    }\n    \
+                 return r;\n}\n\n",
             );
         }
         if self.used_raw {
@@ -1149,6 +1201,9 @@ fn block_returns_all(block: &Block) -> bool {
             Expr::Binary { lhs, rhs, .. } => self.expr_may_raise(lhs) || self.expr_may_raise(rhs),
             Expr::Unary { expr, .. } | Expr::Cast { expr, .. } => self.expr_may_raise(expr),
             Expr::Index { arr, idx, .. } => self.expr_may_raise(arr) || self.expr_may_raise(idx),
+            Expr::IfExp { then_expr, cond, else_expr, .. } => {
+                self.expr_may_raise(cond) || self.expr_may_raise(then_expr) || self.expr_may_raise(else_expr)
+            }
             Expr::Field { obj, .. } => self.expr_may_raise(obj),
             Expr::ArrayLit { elems, .. } => elems.iter().any(|e| self.expr_may_raise(e)),
             _ => false,
@@ -1734,6 +1789,22 @@ fn block_returns_all(block: &Block) -> bool {
                 self.out.push_str(&n);
                 Ok(fty)
             }
+            // `a if c else b` (v0.51.0). The C conditional operator already
+            // has Aoxn's value semantics for free: both branches are values of
+            // one type and the result is that type, including the aggregate
+            // types the backend spells as single-field structs. The outer
+            // parentheses are mandatory — `x + (a if c else b)` must not
+            // splice a `?:` into the middle of a larger expression.
+            Expr::IfExp { then_expr, cond, else_expr, .. } => {
+                self.out.push_str("((");
+                self.emit_expr_inner(cond)?;
+                self.out.push_str(") ? ");
+                self.emit_expr_inner(then_expr)?;
+                self.out.push_str(" : ");
+                self.emit_expr_inner(else_expr)?;
+                self.out.push(')');
+                self.hint(then_expr)
+            }
             Expr::ArrayLit { elems, .. } => {
                 if elems.is_empty() {
                     return Err("internal error: empty array literal at codegen".into());
@@ -1926,33 +1997,56 @@ fn block_returns_all(block: &Block) -> bool {
             return Ok(Type::Str);
         }
         if name == "print" {
-            if args.len() != 1 {
-                return Err("internal error: print expects 1 argument".into());
+            // v0.51.0: any number of values, one space between them, one
+            // newline at the end — Python's rule. The single-argument form
+            // emits the exact text it always did, so every existing program's
+            // C is unchanged; the multi-argument form is a format string with
+            // one conversion per value, which is why the value types are
+            // gathered before anything is written (a bailing emission would
+            // leave half a printf in `self.out`).
+            if args.is_empty() {
+                // Python's `print()` prints an empty line
+                self.out.push_str("__builtin_printf(\"\\n\")");
+                return Ok(Type::Void);
             }
-            let t = self.hint(&args[0].value)?;
-            match t {
-                Type::Bool => {
-                    self.out.push_str("__builtin_printf(\"%s\\n\", (");
-                    self.emit_expr_inner(&args[0].value)?;
-                    self.out.push_str(") ? \"true\" : \"false\")");
+            let mut fmt = String::new();
+            let mut kinds: Vec<Type> = Vec::with_capacity(args.len());
+            // interleaved on purpose: the separator belongs BETWEEN two
+            // conversions, so collecting every conversion first and adding
+            // the spaces afterwards puts them all at the end of the format
+            for (i, a) in args.iter().enumerate() {
+                if i > 0 {
+                    fmt.push(' ');
                 }
-                Type::Int => {
-                    self.out.push_str("__builtin_printf(\"%lld\\n\", ");
-                    self.emit_expr_inner(&args[0].value)?;
-                    self.out.push(')');
+                let t = self.hint(&a.value)?;
+                match t {
+                    Type::Bool => fmt.push_str("%s"),
+                    Type::Int => fmt.push_str("%lld"),
+                    Type::Float => fmt.push_str("%f"),
+                    Type::Str => fmt.push_str("%s"),
+                    other => return Err(format!("internal error: unexpected print type {other}")),
                 }
-                Type::Float => {
-                    self.out.push_str("__builtin_printf(\"%f\\n\", ");
-                    self.emit_expr_inner(&args[0].value)?;
-                    self.out.push(')');
-                }
-                Type::Str => {
-                    self.out.push_str("__builtin_printf(\"%s\\n\", ");
-                    self.emit_expr_inner(&args[0].value)?;
-                    self.out.push(')');
-                }
-                other => return Err(format!("internal error: unexpected print type {other}")),
+                kinds.push(t);
             }
+            // a real newline byte: `c_string_lit` is what turns it into the
+            // two characters `\n` in the emitted text, exactly as the
+            // hand-written `"%s\\n"` used to spell it
+            fmt.push('\n');
+            let literal = Self::c_string_lit(&fmt);
+            self.out.push_str(&format!("__builtin_printf({literal}"));
+            for (i, a) in args.iter().enumerate() {
+                self.out.push_str(", ");
+                if matches!(kinds[i], Type::Bool) {
+                    // the parenthesized spelling is the one the single-value
+                    // form has always emitted, kept byte for byte
+                    self.out.push('(');
+                    self.emit_expr_inner(&a.value)?;
+                    self.out.push_str(") ? \"true\" : \"false\"");
+                } else {
+                    self.emit_expr_inner(&a.value)?;
+                }
+            }
+            self.out.push(')');
             return Ok(Type::Void);
         }
         if name == "to_int" || name == "to_float" {
@@ -2232,6 +2326,28 @@ fn block_returns_all(block: &Block) -> bool {
                 }
             }
         }
+        // omitted trailing parameters are filled in with their defaults at the
+        // CALL SITE (v0.51.0). The typechecker already proved that every
+        // omitted parameter HAS one, so the else arm is a compiler-internal
+        // error rather than a silent zero.
+        for i in args.len()..nparams {
+            if i > 0 {
+                self.out.push_str(", ");
+            }
+            let w = self.sigs[name].params[i].clone();
+            match self.sigs[name].defaults[i].clone() {
+                Some(d) => {
+                    self.emit_coerced(&d, &w)?;
+                }
+                None => {
+                    return Err(format!(
+                        "internal error: parameter {} of '{}' has no default but was not passed",
+                        i + 1,
+                        name
+                    ));
+                }
+            }
+        }
         self.out.push(')');
         Ok(ret)
     }
@@ -2315,6 +2431,28 @@ if matches!(op, Is | IsNot) {
                 _ => return Err("internal error: invalid string operator".into()),
             }
         }
+        // `**` (v0.51.0) has no C spelling, so it is emitted as a call before
+        // the operator table is consulted. The checker has already settled
+        // that both sides are numeric and of the SAME type — there is no
+        // promotion in this language, so `2 ** 0.5` never reaches here.
+        if matches!(op, Pow) {
+            let base_ty = self.hint(lhs)?;
+            if base_ty == Type::Float {
+                self.out.push_str("__builtin_pow(");
+                self.emit_expr_inner(lhs)?;
+                self.out.push_str(", ");
+                self.emit_expr_inner(rhs)?;
+                self.out.push(')');
+            } else {
+                self.used_pow_i = true;
+                self.out.push_str("ax_pow_int(");
+                self.emit_expr_inner(lhs)?;
+                self.out.push_str(", ");
+                self.emit_expr_inner(rhs)?;
+                self.out.push(')');
+            }
+            return Ok(base_ty);
+        }
         let arith = match op {
             // `is`/`is not` return before this point (nullable identity)
             Add => "+",
@@ -2340,6 +2478,7 @@ if matches!(op, Is | IsNot) {
             Ge => ">=",
             And | Or => return Err("internal error: boolean operator reached arithmetic codegen".into()),
             Is | IsNot => return Err("internal error: nullable identity reached arithmetic codegen".into()),
+            Pow => return Err("internal error: '**' reached arithmetic codegen".into()),
         };
         self.out.push_str("((");
         self.emit_expr_inner(lhs)?;
@@ -2450,6 +2589,9 @@ if matches!(op, Is | IsNot) {
                 Type::Dict(val) => Ok(*val),
                 other => Err(format!("internal error: index on {other} in type hint")),
             },
+            // both branches have the same type (the checker proved it), so
+            // either one answers the question
+            Expr::IfExp { then_expr, .. } => self.hint(then_expr),
             Expr::Field { obj, name, .. } => match self.hint(obj)? {
                 Type::Struct(sname) => self
                     .struct_fields

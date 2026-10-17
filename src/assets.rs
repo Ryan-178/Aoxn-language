@@ -1018,7 +1018,7 @@ pub fn inject_all(assets: &AssetSet, mut structs: Option<&mut Vec<StructDecl>>, 
                 name: type_name.clone(),
                 fields: fields
                     .iter()
-                    .map(|(name, _)| Param { name: name.clone(), ty: Type::Str, pos })
+                    .map(|(name, _)| Param { name: name.clone(), ty: Type::Str, pos, default: None })
                     .collect(),
                 pos,
             });
@@ -1105,7 +1105,7 @@ fn class_lookup_fn(name: &str, classes: &[(String, String)], pos: Pos) -> FnDecl
         name: name.to_string(),
         type_params: Vec::new(),
         len_param: None,
-        params: vec![Param { name: param, ty: Type::Str, pos }],
+        params: vec![Param { name: param, ty: Type::Str, pos, default: None }],
         ret: Type::Str,
         body: Block { stmts },
         is_extern: false,
