@@ -480,7 +480,7 @@ fn prefetch(
         if sel.registry.starts_with("path+") {
             continue;
         }
-        if ctx.cache.tar_path(&sel.checksum).exists() {
+        if ctx.cache.tar_path(&sel.checksum)?.exists() {
             reused += 1;
             continue;
         }
@@ -719,14 +719,31 @@ fn install_registry_dep(
     version: &str,
     checksum: &str,
 ) -> Result<(), PkgError> {
-    let tarball = cache.tar_path(checksum);
+    let tarball = cache.tar_path(checksum)?;
     if !tarball.exists() {
         return Err(PkgError::Offline(format!(
             "{name}@{version} is not cached yet and resolution was skipped; \
              run `aoxn install` online once"
         )));
     }
+    // Defence in depth for the same reason: `dest` is about to be passed to
+    // `remove_dir_all`. A dependency name reaches this function from the
+    // manifest AND from registry metadata, and `Manifest::validate` already
+    // applies the strict allowlist — but the operation in this function is a
+    // recursive delete, so it checks the one property it actually depends on
+    // (the name is a single safe path component) at the point of use.
+    crate::manifest::validate_name(name).map_err(|_| {
+        PkgError::Registry(format!("refusing to install package `{name}`: not a valid package name"))
+    })?;
     let dest = modules_dir.join(name);
+    // `join` of a validated name cannot escape; this asserts that the two
+    // still agree, and fails loudly rather than deleting something.
+    if dest.parent() != Some(&modules_dir) || dest.file_name().is_none() {
+        return Err(PkgError::Registry(format!(
+            "refusing to install package `{name}`: destination escapes {}",
+            modules_dir.display()
+        )));
+    }
     if dest.exists() {
         std::fs::remove_dir_all(&dest)?;
     }

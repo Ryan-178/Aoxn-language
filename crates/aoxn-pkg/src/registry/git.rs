@@ -195,6 +195,7 @@ impl Registry for GitRegistry {
         offline: bool,
     ) -> Result<PathBuf, PkgError> {
         let cached = cache.tar_path(checksum);
+        let cached = cached?;
         if cached.exists() {
             return Ok(cached);
         }

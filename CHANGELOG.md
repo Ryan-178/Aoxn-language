@@ -5,6 +5,38 @@ minor bumps while pre-1.0: each minor version is a language milestone.
 
 ## [Unreleased]
 
+## [0.51.1] - 2026-10-17
+
+The four `crates/aoxn-pkg` findings and the three IDE findings from the
+2026-10-17 audit. No new language surface; grouped with the v0.51.0 stdlib
+fixes as one security release. Full rationale — including two bugs the work
+itself introduced and the tests that caught them — is in the commit message.
+
+- **An archive could write outside the extraction directory** (high) — an
+  entry whose remainder is ABSOLUTE passes a substring `..` test, and
+  `Path::join` with an absolute path discards the destination. Components are
+  now walked; absolute, drive-prefixed, `..` and `.` are refused, and the old
+  false positive (`a..b`) is gone.
+- **Archive links are refused outright** (high) — `tar::Entry::unpack` honours
+  the archive's own link targets, so a hard link to an outside file passed the
+  CONTENT check (the manifest hash covers content, not link identity) and the
+  shim write then truncated it. Symlink parents are covered by the same rule.
+- **Dependency keys are validated** (high) — a key becomes a directory that is
+  removed recursively BEFORE extraction, so `../victim` deleted `app/victim`.
+  `Manifest::validate` now applies `validate_name` to every key, and
+  `install_registry_dep` re-checks at the point of the delete.
+- **A checksum can no longer become a path** (medium) — `tar_path` is a
+  validating choke point: 64 lowercase hex digits or an error, before the write
+  that precedes the content check.
+- **IDE: the webview can no longer replace the workspace boundary** (high) —
+  `ide_open_folder` opens the NATIVE dialog itself and takes no path.
+- **IDE: a build cannot overwrite a file through a hard link** (medium) — the
+  artifact destination is removed first, so the compiler creates a fresh file
+  instead of writing through an existing inode. Portable, no unstable API.
+- **IDE: the explorer no longer follows a directory link out of the workspace**
+  (low) — the test is containment, so an in-workspace link is still shown.
+
+Tests: aoxn-pkg 100 (was 94), IDE 40 (was 37).
 ## [0.51.0] - 2026-10-17
 
 Python syntax sugar, part 1, plus four security fixes in the standard

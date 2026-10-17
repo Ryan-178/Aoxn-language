@@ -18,6 +18,20 @@ use sha2::{Digest, Sha256};
 
 use crate::errors::PkgError;
 
+/// A manifest checksum is exactly 64 lowercase hex digits (`sha256_hex`
+/// below). Anything else is refused BEFORE it reaches a path, because the
+/// places a checksum is used are filesystem-shaped and a registry supplies it.
+pub fn validate_checksum(cksum: &str) -> Result<(), PkgError> {
+    let ok = cksum.len() == 64
+        && cksum.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b));
+    if ok {
+        return Ok(());
+    }
+    Err(PkgError::Registry(format!(
+        "invalid checksum `{cksum}`: expected 64 lowercase hex digits (sha256)"
+    )))
+}
+
 pub fn sha256_hex(data: &[u8]) -> String {
     let mut h = Sha256::new();
     h.update(data);
@@ -73,8 +87,19 @@ impl Cache {
         self.registries().join(key)
     }
 
-    pub fn tar_path(&self, checksum: &str) -> PathBuf {
-        self.tarballs().join(format!("{checksum}.tar.gz"))
+    /// The cache path for a tarball.
+    ///
+    /// The checksum is interpolated into a FILESYSTEM PATH, so it is
+    /// validated here rather than trusted: a registry advertising
+    /// `"checksum": "../escaped"` made this write to `<cache>/escaped.tar.gz`,
+    /// outside the `tarballs/` namespace — and the write happens BEFORE the
+    /// content-integrity check, so a failing check never undoes it. A real
+    /// checksum is `hex::encode(sha256(..))`: exactly 64 lowercase hex
+    /// digits, which is what this accepts (a lockfile written by any other
+    /// tool is rejected outright instead of escaping).
+    pub fn tar_path(&self, checksum: &str) -> Result<PathBuf, PkgError> {
+        validate_checksum(checksum)?;
+        Ok(self.tarballs().join(format!("{checksum}.tar.gz")))
     }
 
     /// Copy a tarball into the cache, keyed by the package's manifest
@@ -82,12 +107,16 @@ impl Cache {
     /// after extraction against the manifest hash (see `tarball::manifest_hash`),
     /// so no byte-level check happens here.
     pub fn store_tar(&self, src: &Path, checksum: &str) -> Result<PathBuf, PkgError> {
-        let dst = self.tar_path(checksum);
+        let dst = self.tar_path(checksum)?;
         if dst.exists() {
             return Ok(dst);
         }
         self.create_dirs()?;
-        let tmp = self.tarballs().join(format!("{}.tmp-{}", &checksum[..12.min(checksum.len())], std::process::id()));
+        let tmp = self.tarballs().join(format!(
+            "{}.tmp-{}",
+            &checksum[..12],
+            std::process::id()
+        ));
         std::fs::copy(src, &tmp)?;
         std::fs::rename(&tmp, &dst)?;
         Ok(dst)
@@ -188,5 +217,24 @@ mod tests {
         let d = c.registry_dir("https://example.com/other");
         assert_eq!(a, b);
         assert_ne!(a, d);
+    }
+
+    /// The checksum is interpolated into a cache PATH, and the write happens
+    /// before the content check that would have caught a bad archive. A
+    /// registry advertising `"checksum": "../escaped"` wrote
+    /// `<cache>/escaped.tar.gz`, outside the `tarballs/` namespace.
+    #[test]
+    fn a_malformed_checksum_never_becomes_a_path() {
+        let c = Cache { root: std::env::temp_dir().join(format!("aoxn-pkg-cksum-{}", std::process::id())) };
+        for bad in ["../escaped", "..", "deadbeef", "", &"A".repeat(64), &"g".repeat(64)] {
+            let err = c.tar_path(bad).unwrap_err();
+            assert!(
+                format!("{err}").contains("expected 64 lowercase hex digits"),
+                "checksum `{bad}` must be refused: {err}"
+            );
+        }
+        // a real one still resolves inside the cache
+        let ok = c.tar_path(&"d".repeat(64)).unwrap();
+        assert!(ok.starts_with(c.tarballs()));
     }
 }

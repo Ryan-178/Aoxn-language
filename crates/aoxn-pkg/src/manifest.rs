@@ -213,6 +213,14 @@ impl Manifest {
             )));
         }
         for (dep, spec) in self.dependencies.iter().chain(&self.dev_dependencies) {
+            // The KEY becomes a directory: `aox_modules/<name>`, and that
+            // directory is removed RECURSIVELY before extraction and before
+            // any integrity check. A key like `../victim` therefore deleted
+            // `app/victim` (reproduced). `validate_name` is the same strict
+            // allowlist that governs the project's own name — lowercase
+            // a-z, 0-9, `-`, `_` — which cannot spell a separator, a drive
+            // letter or a dot segment, so no key can escape.
+            validate_name(dep)?;
             match spec {
                 DependencySpec::Registry { req, registry: _ } => {
                     if req.parse::<semver::VersionReq>().is_err() {
@@ -452,5 +460,39 @@ mod tests {
         .unwrap();
         let err = m.validate().unwrap_err();
         assert!(format!("{err}").contains("invalid requirement"), "{err}");
+    }
+
+    /// A dependency KEY becomes `aox_modules/<key>`, and that directory is
+    /// removed RECURSIVELY before extraction and before any integrity check —
+    /// so the key `"../victim"` deleted `app/victim` outright (reproduced).
+    /// The project's own name has been validated by a strict allowlist since
+    /// long before this; the keys were not, and they are the ones that reach
+    /// a filesystem.
+    #[test]
+    fn dependency_keys_are_validated_as_names() {
+        for bad in ["../victim", "..", "a/b", "a\\b", "C:name", "./x", "..\\..\\y"] {
+            let json_bad = bad.replace(0x5Cu8 as char, "\\\\");
+            let m: Manifest = serde_json::from_str(&format!(
+                r#"{{"name":"app","version":"1.0.0","dependencies":{{"{json_bad}":"^1.0.0"}}}}"#
+            ))
+            .unwrap();
+            let err = m.validate().unwrap_err();
+            assert!(
+                format!("{err}").contains("invalid package name"),
+                "dependency key `{bad}` must be refused as a name: {err}"
+            );
+        }
+        // devDependencies reach the same directory, so they get the same rule
+        let d: Manifest = serde_json::from_str(
+            r#"{"name":"app","version":"1.0.0","devDependencies":{"../victim":"^1.0.0"}}"#,
+        )
+        .unwrap();
+        assert!(format!("{:?}", d.validate().unwrap_err()).contains("invalid package name"));
+        // and a legitimate key still passes
+        let ok: Manifest = serde_json::from_str(
+            r#"{"name":"app","version":"1.0.0","dependencies":{"my-lib_2":"^1.0.0"}}"#,
+        )
+        .unwrap();
+        ok.validate().unwrap();
     }
 }

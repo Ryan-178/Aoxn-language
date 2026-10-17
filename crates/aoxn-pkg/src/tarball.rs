@@ -148,8 +148,79 @@ pub fn pack(pkg_dir: &Path, pkg_name: &str, out_path: &Path) -> Result<usize, Pk
     Ok(files.len())
 }
 
+/// Reject any entry path that could write outside `dest`.
+///
+/// The old check was `stripped.contains("..")`, which is a substring test on
+/// a *relative* path and therefore says nothing about an ABSOLUTE one. An
+/// entry named `demo/C:/Users/victim/outside.txt` strips to
+/// `C:/Users/victim/outside.txt`; `Path::join` with an absolute path DISCARDS
+/// `dest` entirely, so the file landed wherever it pointed — and because
+/// integrity is verified only after extraction, the failing check could not
+/// undo the write. (`demo//etc/passwd` is the same escape on POSIX.)
+///
+/// Components are inspected rather than the string, so a legitimate
+/// `a..b` is no longer rejected while `a/../b`, `/abs`, `C:\abs` and `` are.
+fn check_contained(rel: &std::path::Path, entry_name: &str) -> Result<(), PkgError> {
+    let bad = |why: &str| {
+        Err(PkgError::Registry(format!(
+            "malformed package tarball: entry `{entry_name}` {why}"
+        )))
+    };
+    if rel.as_os_str().is_empty() {
+        return bad("has an empty path");
+    }
+    if rel.is_absolute() {
+        return bad("is an absolute path");
+    }
+    for comp in rel.components() {
+        use std::path::Component;
+        match comp {
+            Component::Normal(_) => {}
+            Component::CurDir => return bad("contains a `.` component"),
+            Component::ParentDir => return bad("escapes the package directory"),
+            Component::RootDir | Component::Prefix(_) => {
+                return bad("is an absolute path")
+            }
+        }
+    }
+    Ok(())
+}
+
+/// A package archive carries SOURCE, so it carries no links.
+///
+/// `tar::Entry::unpack` — unlike `unpack_in` — honours the archive's own link
+/// targets, and every link interpretation here is an escape:
+///
+/// - a hard link to an absolute path writes outside `dest` outright;
+/// - the manifest hash covers CONTENT, not link identity, so a checksum
+///   computed over a known external file's original bytes PASSES, and the
+///   shim write that follows (`install::write_shim_if_needed`) then truncates
+///   that external file;
+/// - a symlink parent turns a later, ordinary-looking entry into an escape.
+///
+/// Refusing links outright is both simpler and stronger than resolving them:
+/// `pack` never emits one, so a legitimate archive loses nothing, and there is
+/// no relative-target interpretation left to get wrong.
+fn reject_link(entry: &tar::Entry<impl std::io::Read>, entry_name: &str) -> Result<(), PkgError> {
+    let kind = entry.header().entry_type();
+    if kind.is_hard_link() || kind.is_symlink() {
+        let target = entry
+            .link_name()
+            .ok()
+            .flatten()
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|| "<none>".to_string());
+        return Err(PkgError::Registry(format!(
+            "malformed package tarball: entry `{entry_name}` is a {} pointing at `{target}`; a package may not contain links",
+            if kind.is_symlink() { "symlink" } else { "hard link" }
+        )));
+    }
+    Ok(())
+}
+
 /// Extract a tarball into `dest` (created if missing). All entries must be
-/// rooted at `pkg_name/` and stay inside `dest` — anything else is rejected
+/// rooted at `pkg_name/`, stay inside `dest` as plain relative components,
+/// and any link must resolve inside `dest` too — anything else is rejected
 /// as malformed (and treated as a potential supply-chain attack).
 pub fn unpack(tarball: &Path, dest: &Path, pkg_name: &str) -> Result<(), PkgError> {
     std::fs::create_dir_all(dest)?;
@@ -160,19 +231,18 @@ pub fn unpack(tarball: &Path, dest: &Path, pkg_name: &str) -> Result<(), PkgErro
     for entry in archive.entries()? {
         let mut entry = entry?;
         let path = entry.path()?.to_path_buf();
+        let entry_name = path.display().to_string();
         let Some(stripped) = path.to_str().and_then(|p| p.strip_prefix(&root)) else {
             return Err(PkgError::Registry(format!(
-                "malformed package tarball: entry `{}` is not rooted at `{root}`",
-                path.display()
+                "malformed package tarball: entry `{entry_name}` is not rooted at `{root}`",
             )));
         };
-        if stripped.contains("..") {
-            return Err(PkgError::Registry(format!(
-                "malformed package tarball: entry `{}` escapes the package directory",
-                path.display()
-            )));
-        }
+        let rel = std::path::Path::new(stripped);
+        check_contained(rel, &entry_name)?;
         let target = dest.join(stripped.replace('/', std::path::MAIN_SEPARATOR_STR));
+        // links are refused before anything is created, so a rejected archive
+        // has written nothing at all
+        reject_link(&entry, &entry_name)?;
         if let Some(parent) = target.parent() {
             std::fs::create_dir_all(parent)?;
         }
@@ -307,6 +377,142 @@ mod tests {
         let err = unpack(&tgz, &dest, "mypkg").unwrap_err();
         assert!(format!("{err}").contains("malformed"), "got: {err}");
         assert!(!dest.join("evil.txt").exists());
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// A tarball the packer would never produce: an entry NAME, an entry KIND
+    /// and an optional LINK TARGET of our choosing. The escapes that matter
+    /// are about the name and the link rather than the bytes, and tar-rs
+    /// refuses to `set_path` some of the names we need to test (any path with
+    /// `..`), so the 512-byte blocks are written directly — the same
+    /// hand-rolling the existing corruption test uses.
+    fn octal(mut v: u64, width: usize) -> Vec<u8> {
+        let mut out = vec![b'0'; width - 1];
+        for i in (0..width - 1).rev() {
+            out[i] = b'0' + (v & 7) as u8;
+            v >>= 3;
+        }
+        out.push(0);
+        out
+    }
+
+    fn raw_header(name: &str, size: u64, typeflag: u8, link: &str) -> Vec<u8> {
+        let mut h = vec![0u8; 512];
+        let put = |h: &mut Vec<u8>, at: usize, bytes: &[u8]| {
+            let n = bytes.len().min(h.len() - at);
+            h[at..at + n].copy_from_slice(&bytes[..n]);
+        };
+        put(&mut h, 0, name.as_bytes());
+        put(&mut h, 100, &octal(0o644, 8));
+        put(&mut h, 108, &octal(0, 8));
+        put(&mut h, 116, &octal(0, 8));
+        put(&mut h, 124, &octal(size, 12));
+        put(&mut h, 136, &octal(0, 12));
+        h[148..156].fill(b' ');
+        h[156] = typeflag;
+        put(&mut h, 157, link.as_bytes());
+        put(&mut h, 257, b"ustar\0");
+        put(&mut h, 263, b"00");
+        let sum: u64 = h.iter().map(|b| *b as u64).sum();
+        let cks = format!("{:06o}\0 ", sum);
+        put(&mut h, 148, cks.as_bytes());
+        h
+    }
+
+    fn raw_tar_gz(dest: &Path, entries: &[(&str, EntryKind, Option<&str>)]) {
+        use std::io::Write as _;
+        let f = File::create(dest).unwrap();
+        let mut gz = flate2::write::GzEncoder::new(f, flate2::Compression::default());
+        for (name, kind, link) in entries {
+            let (flag, lname) = match kind {
+                EntryKind::Link => (b'1', link.unwrap_or("")),
+                EntryKind::Symlink => (b'2', link.unwrap_or("")),
+                _ => (b'0', ""),
+            };
+            gz.write_all(&raw_header(name, 0, flag, lname)).unwrap();
+        }
+        gz.write_all(&[0u8; 1024]).unwrap();
+        gz.finish().unwrap();
+    }
+
+    use tar::EntryType as EntryKind;
+    /// THE FIRST ESCAPE: an entry whose remainder is ABSOLUTE. `Path::join`
+    /// with an absolute path discards the destination entirely, so
+    /// `stripped.contains("..")` never got a chance to fire and the file
+    /// landed at the path it named. Reproduced on Windows with a drive
+    /// letter and on POSIX with a leading `/` (`demo//etc/passwd`).
+    #[test]
+    fn unpack_rejects_an_absolute_entry_path() {
+        let tmp = temp_root("abs");
+        let outside = tmp.join("outside-archive.txt");
+        let tgz = tmp.join("evil.tar.gz");
+        let abs = if cfg!(windows) {
+            format!("C:{}", outside.display().to_string().replace('\\', "/"))
+        } else {
+            outside.display().to_string().clone()
+        };
+        raw_tar_gz(&tgz, &[("demo/C:/Users/victim/outside-archive.txt", EntryKind::Regular, None)]);
+        let dest = tmp.join("out");
+        let err = unpack(&tgz, &dest, "demo").unwrap_err();
+        assert!(format!("{err}").contains("absolute"), "got: {err}");
+        assert!(!outside.exists(), "the archive wrote outside the destination");
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// A POSIX-shaped absolute remainder, checked on Windows too, because the
+    /// component walk is what rejects it and it must not depend on the host.
+    #[test]
+    fn unpack_rejects_a_posix_absolute_remainder() {
+        let tmp = temp_root("posixabs");
+        let tgz = tmp.join("evil.tar.gz");
+        raw_tar_gz(&tgz, &[("demo//etc/passwd", EntryKind::Regular, None)]);
+        let dest = tmp.join("out");
+        let err = unpack(&tgz, &dest, "demo").unwrap_err();
+        assert!(format!("{err}").contains("absolute"), "got: {err}");
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// The escape that DID work before still works as a defence, and the
+    /// substring test's false positive is gone: `a..b` is a legal name.
+    #[test]
+    fn unpack_rejects_parent_segments_but_allows_dots_in_a_name() {
+        let tmp = temp_root("dots");
+        let tgz = tmp.join("ok.tar.gz");
+        raw_tar_gz(&tgz, &[("demo/a..b/keep.txt", EntryKind::Regular, None)]);
+        unpack(&tgz, &tmp.join("ok"), "demo").unwrap();
+        assert!(tmp.join("ok").join("a..b").join("keep.txt").exists());
+
+        let tgz2 = tmp.join("bad.tar.gz");
+        raw_tar_gz(&tgz2, &[("demo/a/../../escape.txt", EntryKind::Regular, None)]);
+        let err = unpack(&tgz2, &tmp.join("bad"), "demo").unwrap_err();
+        assert!(format!("{err}").contains("escapes"), "got: {err}");
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// THE SECOND ESCAPE: `tar::Entry::unpack` honours the archive's own
+    /// link targets. A hard link to a file outside the destination passes the
+    /// content check (the manifest hash covers CONTENT, not link identity),
+    /// and the shim write that follows it overwrites the external file. Links
+    /// are now refused outright — absolute, climbing, and in-package alike —
+    /// which also closes the symlink-parent variant (an entry under a symlinked
+    /// directory becomes an escape without any link target at all).
+    #[test]
+    fn unpack_rejects_links_outright() {
+        let tmp = temp_root("links");
+        let cases: [(&str, EntryKind, &str); 3] = [
+            ("demo/index.ax", EntryKind::Link, "C:/Users/victim/important.txt"),
+            ("demo/index.ax", EntryKind::Link, "../../outside/important.txt"),
+            ("demo/lib.ax", EntryKind::Symlink, "demo/index.ax"),
+        ];
+        for (i, (name, kind, target)) in cases.iter().enumerate() {
+            let tgz = tmp.join(format!("case{i}.tar.gz"));
+            raw_tar_gz(&tgz, &[(name, *kind, Some(target))]);
+            let dest = tmp.join(format!("out{i}"));
+            let err = unpack(&tgz, &dest, "demo").unwrap_err();
+            let msg = format!("{err}");
+            assert!(msg.contains("may not contain links"), "case {i}: {msg}");
+            assert!(!dest.join("index.ax").exists(), "case {i} wrote something");
+        }
         let _ = std::fs::remove_dir_all(&tmp);
     }
 }

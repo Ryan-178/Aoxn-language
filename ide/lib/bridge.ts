@@ -205,8 +205,14 @@ async function call<T>(cmd: string, args?: Record<string, unknown>, fallback?: (
 
 // ---- commands ----
 
-export const openFolder = (root: string): Promise<TreeNode[]> =>
-  call('ide_open_folder', { root }, () => fixtureTree())
+/**
+ * Ask the backend to open a project folder. There is deliberately NO path
+ * argument: the backend opens a native folder dialog itself, so a compromised
+ * webview cannot name a directory the user never picked. Cancelling the dialog
+ * leaves the current workspace untouched.
+ */
+export const openFolder = (): Promise<TreeNode[]> =>
+  call('ide_open_folder', undefined, () => fixtureTree())
 
 export const scan = (): Promise<TreeNode[]> =>
   call('ide_scan', undefined, () => fixtureTree())

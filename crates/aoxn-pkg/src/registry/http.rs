@@ -117,7 +117,7 @@ impl Registry for HttpRegistry {
         tarball_sha256: Option<&str>,
         offline: bool,
     ) -> Result<std::path::PathBuf, PkgError> {
-        let dst = cache.tar_path(checksum);
+        let dst = cache.tar_path(checksum)?;
         if dst.exists() {
             return Ok(dst);
         }
@@ -583,7 +583,10 @@ mod tests {
             &test_cache(&server),
             "demo",
             "1.0.0",
-            "deadbeef",
+            // a real manifest checksum: sha256 hex. The cache path is built from
+            // this string, so a malformed one is refused BEFORE it reaches
+            // the filesystem (that is what `../escaped` used to exploit).
+            &"d".repeat(64),
             Some(&tarball_sha256),
             false,
         ) {

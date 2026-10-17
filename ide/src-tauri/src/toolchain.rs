@@ -291,6 +291,35 @@ pub fn run_args(path: &str) -> Vec<String> {
 
 /// Where a build artifact should land: beside the source, as `name.exe` on
 /// Windows and `name` elsewhere.
+///
+/// This variant is the one commands use, and it CLEANS the destination first.
+/// Validating the source is not enough: the compiler publishes the artifact
+/// with a write that follows an existing destination, so a pre-existing HARD
+/// LINK named `hello.exe` pointing outside the workspace turns a build into
+/// an overwrite of that file (reproduced: an outside marker became a 112 KB
+/// PE image). Canonicalisation cannot see a hard link — two names for one
+/// inode are not a path escape — and asking "is this a link" needs a
+/// platform API that is not stable in this toolchain.
+///
+/// Removing the entry answers it without the question: unlinking a hard link
+/// removes THAT NAME and leaves the other name with its data intact, so the
+/// compiler then creates a fresh file instead of writing through an existing
+/// inode. That closes the class on every platform, for links and symlinks
+/// alike.
+pub fn artifact_path_prepared(src: &str) -> Result<String, String> {
+    let out = artifact_path(src);
+    let p = Path::new(&out);
+    match std::fs::symlink_metadata(p) {
+        Ok(_) => std::fs::remove_file(p).map_err(|e| {
+            format!("cannot replace the existing build artifact `{out}`: {e}")
+        })?,
+        Err(_) => {}
+    }
+    Ok(out)
+}
+
+/// Where a build artifact should land: beside the source, as `name.exe` on
+/// Windows and `name` elsewhere.
 pub fn artifact_path(src: &str) -> String {
     let p = Path::new(src);
     let stem = p.file_stem().map(|s| s.to_string_lossy().into_owned());
@@ -492,5 +521,51 @@ mod tests {
     #[test]
     fn run_reports_a_missing_program_as_an_error() {
         assert!(run("definitely-not-a-real-binary-xyz", &[], None).is_err());
+    }
+    use super::*;
+
+    /// THE BUILD-OVERWRITE ESCAPE: a pre-existing HARD LINK named after the
+    /// artifact turns a build into an overwrite of an unrelated file, because
+    /// the compiler publishes through a write that follows an existing
+    /// destination (reproduced: an outside marker became a 112 KB PE image).
+    ///
+    /// The mitigation does not ask whether the destination is a link — that
+    /// needs an unstable Windows API — it REMOVES the entry, so the compiler
+    /// creates a fresh file. Unlinking a hard link removes that NAME and
+    /// leaves the other name's data alone, which is exactly the property this
+    /// test asserts.
+    #[test]
+    fn preparing_an_artifact_leaves_an_outside_hard_link_untouched() {
+        let dir = tempfile::tempdir().unwrap();
+        let outside = dir.path().join("outside.txt");
+        std::fs::write(&outside, "ORIGINAL").unwrap();
+
+        let src = dir.path().join("hello.ax");
+        std::fs::write(&src, "def main() -> int:\n    return 0\n").unwrap();
+        let out = artifact_path_prepared(&src.to_string_lossy()).unwrap();
+        assert!(out.ends_with(if cfg!(windows) { "hello.exe" } else { "hello" }));
+
+        // plant the link the audit used: the artifact name IS the outside file
+        let planted = dir.path().join(if cfg!(windows) { "hello.exe" } else { "hello" });
+        std::fs::hard_link(&outside, &planted).unwrap();
+
+        let prepared = artifact_path_prepared(&src.to_string_lossy()).unwrap();
+        assert!(!Path::new(&prepared).exists(), "the link entry should be gone");
+        assert_eq!(
+            std::fs::read_to_string(&outside).unwrap(),
+            "ORIGINAL",
+            "preparing the artifact modified the file the link pointed at"
+        );
+        // the outside file still has its own name and its data
+    }
+
+    /// A missing artifact is the ordinary case and must not error.
+    #[test]
+    fn preparing_an_absent_artifact_is_a_no_op() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("x.ax");
+        std::fs::write(&src, "def main() -> int:\n    return 0\n").unwrap();
+        let out = artifact_path_prepared(&src.to_string_lossy()).unwrap();
+        assert!(out.contains("x"));
     }
 }

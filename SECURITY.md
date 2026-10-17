@@ -277,60 +277,68 @@ the information needed to protect users even if the reporter disagrees.
   not print an `AnClient` / `OaClient` struct: `print` on a struct renders
   its fields, key included.
 
-## Known, open findings (v0.51.0 audit)
+## Audit findings and where they stand (2026-10-17 audit)
 
-An audit of the shipped code on 2026-10-17 produced the findings below.
-Those marked **fixed in v0.51.0** are in the CHANGELOG with their root cause.
-The rest are **still present** and are listed here so nobody has to re-derive
-them from an audit report — they are ordered by severity, and every one is a
-real, reproducible issue, not a theoretical one.
+An audit of the shipped code on 2026-10-17 produced thirteen findings. The
+six in the standard library were fixed in v0.51.0; the four in the package
+manager and the three in the IDE were fixed in v0.51.1. **All thirteen are
+closed.** They are listed here because the reasoning is the useful part, not
+because any of them is still open.
 
-- **Fixed in v0.51.0 — cross-origin redirect leaked a credential**
+- **Fixed v0.51.0 — cross-origin redirect leaked a credential**
   (`stdlib/net/http.ax`). WinHTTP followed redirects itself and carried the
-  request headers, including Anthropic's `x-api-key`, to the redirect target.
-  Redirects are no longer followed automatically; `r.location` carries the
-  target.
-- **Fixed in v0.51.0 — heap out-of-bounds read in the UTF-8 → UTF-16 encoder**
-  (`stdlib/net/codec.ax`). A truncated multi-byte sequence read past the end
-  of the buffer (ASan: heap-buffer-overflow READ). Now validated, with U+FFFD
-  substitution.
-- **Fixed in v0.51.0 — non-terminating `j_dumps` on an infinite float**
-  (`stdlib/json.ax`). Five bytes of valid JSON (`1e400`) could hang the
-  thread; a deeply nested document could instead overflow the stack.
-- **Fixed in v0.51.0 — a truncated HTTP response was reported as a clean
-  200** (`stdlib/net/http.ax`), so a partial body could be accepted as
-  complete. Read failures now set `err`.
-- **Fixed in v0.51.0 — quadratic SSE frame accumulation** (`stdlib/net/sse.ax`).
-- **Open (high) — package archives can write outside the extraction
-  directory.** `crates/aoxn-pkg/src/tarball.rs` strips a textual prefix and
-  rejects `..`, but not an ABSOLUTE remainder: an entry named
-  `demo/C:/…/outside.txt` makes `dest.join(path)` discard `dest`. Content
-  integrity is verified only AFTER extraction, so a failing check cannot undo
-  the write.
-- **Open (high) — unrestricted archive hard links.** An archive may make a
-  package file a hard link to an external target. The manifest hash covers
-  content, not link identity, so a checksum computed over the target's known
-  original bytes passes, and a later `fs::write` of that path follows the
-  link and overwrites the external file.
-- **Open (high) — dependency-map keys are not validated before a recursive
-  delete.** A key such as `../victim` resolves to `aox_modules/../victim`,
-  and the destination is removed recursively BEFORE extraction and before any
-  integrity check.
-- **Open (medium) — registry checksums are used as cache paths unvalidated.**
-  A `checksum` of `../escaped` writes outside the `tarballs/` namespace,
-  before the content check.
-- **Open (medium, conditional) — the IDE's workspace root can be replaced by
-  the webview.** `ide_open_folder` trusts a path submitted by the frontend
-  and replaces application state without a native approval step, so an XSS
-  in the trusted webview could widen the file boundary. Needs a native folder
-  picker in the backend to fix properly.
-- **Open (medium) — IDE build output can overwrite an outside file through a
-  pre-existing hard link**, since the destination is published with a write
-  that follows links.
-- **Open (low) — the IDE explorer follows directory junctions outside the
-  workspace**, disclosing directory names and structure (the bounded *read*
-  command correctly rejects the same link).
+  request headers, including Anthropic's `x-api-key`. Redirects are no longer
+  followed automatically; `r.location` carries the target so only the code
+  holding the credential decides to follow it.
+- **Fixed v0.51.0 — heap out-of-bounds read in the UTF-8 → UTF-16 encoder**
+  (`stdlib/net/codec.ax`). A truncated multi-byte sequence read past the end of
+  the buffer. Sequence length, continuation bytes and overlong/surrogate forms
+  are validated; malformed input becomes U+FFFD and consumes only the lead
+  byte, so a rejected sequence can never become an infinite loop.
+- **Fixed v0.51.0 — non-terminating `j_dumps` on an infinite float**
+  (`stdlib/json.ax`). `j_parse("1e400")` is five bytes of valid JSON and
+  `j_dumps` divided it by ten until it was under ten. A value that does not
+  move IS the non-terminating case. A deeply nested document could instead
+  overflow the stack; `J_MAX_DEPTH()` is now checked before the recursion.
+- **Fixed v0.51.0 — a truncated HTTP response was reported as a clean 200**
+  (`stdlib/net/http.ax`), so a partial body could be accepted as complete.
+- **Fixed v0.51.0 — quadratic SSE frame accumulation** (`stdlib/net/sse.ax`).
+- **Fixed v0.51.1 — an archive could write outside the extraction directory**
+  (`crates/aoxn-pkg/src/tarball.rs`). The guard was a substring `..` test on a
+  relative path, which says nothing about an absolute one, and `Path::join`
+  with an absolute path discards the destination. Components are walked now.
+  This also removed the old false positive: `a..b` is a legal file name.
+- **Fixed v0.51.1 — archive links are refused outright** (`tarball.rs`).
+  `tar::Entry::unpack` honours the archive's own link targets, so a hard link
+  to an outside file passed the CONTENT check — the manifest hash covers
+  content, not link identity — and the generated shim then truncated that file.
+  Refusing links removes the whole interpretation, symlink parents included.
+- **Fixed v0.51.1 — dependency keys are validated**
+  (`manifest.rs`, `install.rs`). A key becomes `aox_modules/<key>`, removed
+  RECURSIVELY before extraction and before any integrity check, so `../victim`
+  deleted a sibling directory. The project's own name was already checked
+  against a strict allowlist; the keys — the ones that reach a filesystem —
+  were not.
+- **Fixed v0.51.1 — a checksum can no longer become a path** (`cache.rs`).
+  `checksum` is interpolated into cache paths and the write precedes the
+  content check, so `../escaped` wrote outside the `tarballs/` namespace.
+  `tar_path` is now a validating choke point.
+- **Fixed v0.51.1 — the webview could replace the workspace boundary**
+  (`ide/src-tauri/src/lib.rs`). `ide_open_folder` trusted a frontend-supplied
+  path. It now opens the native dialog itself and takes no path.
+- **Fixed v0.51.1 — a build could overwrite a file through a hard link**
+  (`ide/src-tauri/src/toolchain.rs`). The artifact destination is removed
+  first, so the compiler creates a fresh file. This was chosen over asking
+  whether the destination is a link, because that needs an unstable Windows
+  API — and it closes the class on every platform.
+- **Fixed v0.51.1 — the explorer followed directory links out of the workspace**
+  (`ide/src-tauri/src/fsops.rs`). The test is containment, so a link that stays
+  inside is still shown.
 
+Two things the audit could not settle are now also closed as a side effect:
+the symlink-parent extraction escape (links are refused at all) and the
+question of whether a hard link can be detected portably (it cannot be asked
+about cheaply, but it does not have to be).
 ## Out of scope (documented behavior)
 
 These are deliberate design decisions, documented in

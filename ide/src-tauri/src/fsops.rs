@@ -126,7 +126,10 @@ impl Workspace {
         Ok(resolved)
     }
 
-    fn within(&self, candidate: &Path) -> bool {
+    /// Is this real path inside the open folder? The same component-wise
+    /// rule `resolve` uses, exposed so the explorer walk can apply it to a
+    /// path it has not been asked to resolve.
+    pub fn within(&self, candidate: &Path) -> bool {
         candidate
             .strip_prefix(&self.root)
             .map(|rest| {
@@ -209,6 +212,16 @@ pub fn create_dir(ws: &Workspace, path: &str) -> Result<(), String> {
     fs::create_dir_all(&real).map_err(|e| format!("cannot create '{}': {e}", real.display()))
 }
 
+/// Component-wise containment of a REAL path under a REAL root — the same
+/// rule `Workspace::within` applies, as a free function so the walk can use
+/// it for a path nobody asked it to resolve. `starts_with` on strings would
+/// accept `C:\proj-evil` for `C:\proj`.
+pub fn within_root(root: &Path, candidate: &Path) -> bool {
+    candidate
+        .strip_prefix(root)
+        .map(|rest| !rest.components().any(|c| matches!(c, Component::ParentDir)))
+        .unwrap_or(false)
+}
 /// Walk the workspace into a flat, sorted tree.
 pub fn scan(ws: &Workspace, max_depth: u32) -> Vec<TreeNode> {
     let mut out = Vec::new();
@@ -235,7 +248,19 @@ fn walk(root: &Path, dir: &Path, depth: u32, max_depth: u32, out: &mut Vec<TreeN
         if name.starts_with('.') || SKIP_DIRS.contains(&name.as_str()) {
             continue;
         }
+        // A directory JUNCTION (or symlink) pointing outside the workspace is an
+        // escape for the explorer even though every bounded read refuses it:
+        // `is_dir()` follows the link, so the walk descends and publishes the
+        // outside directory's names and structure to the frontend. The test is
+        // CONTAINMENT, not "is it a link": a link that stays inside the workspace
+        // is still shown, because that is a normal thing for a project to contain.
         let is_dir = entry.path().is_dir();
+        if is_dir {
+            let real = pretty(fs::canonicalize(entry.path()).unwrap_or_else(|_| entry.path()));
+            if !within_root(root, &real) {
+                continue;
+            }
+        }
         items.push((name, is_dir));
     }
     items.sort_by(|a, b| {
@@ -379,5 +404,50 @@ mod tests {
         assert!(!root.starts_with(r"\\?\"), "root: {root}");
         let f = read(&ws, "src/main.ax").expect("read");
         assert!(!f.path.starts_with(r"\\?\"), "file: {}", f.path);
+    }
+
+    /// The explorer's boundary is the same rule `resolve` applies, and it is
+    /// a COMPONENT comparison: `C:\proj-evil` must not pass a test against
+    /// `C:\proj`. This is the pure form of what `walk` now asks per entry.
+    #[test]
+    fn within_root_compares_components_not_strings() {
+        let root = Path::new("C:\\proj");
+        assert!(within_root(root, Path::new("C:\\proj")));
+        assert!(within_root(root, Path::new("C:\\proj\\src")));
+        assert!(!within_root(root, Path::new("C:\\proj-evil")));
+        assert!(!within_root(root, Path::new("C:\\other")));
+    }
+
+    /// A directory link pointing outside the workspace used to be walked: the
+    /// explorer published the outside directory's names and structure, even
+    /// though every bounded READ refuses the same path. Symlink creation can
+    /// need a privilege this environment may not have, so the test says so
+    /// out loud rather than pretending to have checked it.
+    #[test]
+    fn the_explorer_does_not_follow_a_directory_link_out() {
+        let (dir, ws) = tmp_ws();
+        let outside = dir.path().join("outside");
+        fs::create_dir_all(&outside).unwrap();
+        fs::write(outside.join("secret.txt"), "nope").unwrap();
+
+        let link = ws.root().join("linked");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&outside, &link).unwrap();
+        #[cfg(windows)]
+        if let Err(e) = std::os::windows::fs::symlink_dir(&outside, &link) {
+            // Developer Mode / SeCreateSymbolicLinkPolicy not available here:
+            // the containment logic itself is pinned by the test above.
+            eprintln!("skipped: cannot create a directory link ({e})");
+            return;
+        }
+
+        let names: Vec<String> = scan(&ws, 8).into_iter().map(|n| n.name).collect();
+        assert!(
+            !names.iter().any(|n| n == "secret.txt"),
+            "the explorer followed a link out of the workspace: {names:?}"
+        );
+        // and the bounded read still refuses it, which is the property the
+        // walk was leaking around
+        assert!(ws.resolve(&link.join("secret.txt").to_string_lossy()).is_err());
     }
 }

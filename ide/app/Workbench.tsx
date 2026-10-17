@@ -442,17 +442,15 @@ export default function Workbench() {
   // ---- workspace ----
 
   const openFolder = useCallback(async () => {
-    const picked = await api.pickFolder()
-    if (!picked) {
-      say('Folder picking needs the desktop app (pnpm ide:dev).')
-      return
-    }
+    // No path is passed: the backend opens a NATIVE folder dialog and the
+    // user picks there, so the webview cannot name a workspace itself.
     try {
-      const nodes = await api.openFolder(picked)
+      const nodes = await api.openFolder()
       setTree(nodes)
-      setRoot(picked)
+      const opened = await api.workspaceRoot()
+      setRoot(opened ?? '')
       setExpanded(new Set(nodes.filter((n) => n.isDir && n.depth === 0).map((n) => n.path)))
-      appendLog('meta', `• opened ${picked}`)
+      appendLog('meta', `• opened ${opened ?? ''}`)
       await refreshPkg()
     } catch (e) {
       appendLog('err', String(e))

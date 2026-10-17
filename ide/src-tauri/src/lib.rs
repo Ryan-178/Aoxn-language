@@ -60,9 +60,34 @@ fn set_workspace(state: &State<AppState>, ws: Workspace) -> Result<(), String> {
 // ---- workspace ----
 
 /// Open a folder and make it the boundary for every later command.
+///
+/// The folder is chosen by a NATIVE dialog the backend opens itself. The
+/// command used to take a `root` string from the frontend, which meant any
+/// JavaScript already running in the trusted webview could name a directory
+/// the user never picked and then read and write it through `ide_read` /
+/// `ide_save` — defeating the documented property that a rendering compromise
+/// cannot reach outside the folder the user chose. The webview now supplies no
+/// path at all: it asks for a folder, the user picks one in a native dialog,
+/// and only then does the boundary move. A webview that can run code can still
+/// *ask* for a folder; it cannot answer.
 #[tauri::command]
-fn ide_open_folder(root: String, state: State<AppState>) -> Result<Vec<TreeNode>, String> {
-    let ws = Workspace::open(&root)?;
+async fn ide_open_folder(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+) -> Result<Vec<TreeNode>, String> {
+    use tauri_plugin_dialog::DialogExt;
+    let picked = app
+        .dialog()
+        .file()
+        .set_title("Open project folder")
+        .blocking_pick_folder();
+    let Some(picked) = picked else {
+        // the user cancelled: keep whatever workspace is open
+        let ws = workspace(&state)?;
+        return Ok(fsops::scan(&ws, 8));
+    };
+    let path = picked.into_path().map_err(|e| e.to_string())?;
+    let ws = Workspace::open(&path.to_string_lossy())?;
     let tree = fsops::scan(&ws, 8);
     set_workspace(&state, ws)?;
     Ok(tree)
@@ -196,7 +221,7 @@ fn ide_check(path: String, state: State<AppState>) -> Result<ExecResult, String>
 fn ide_build(path: String, state: State<AppState>) -> Result<ExecResult, String> {
     let ws = workspace(&state)?;
     let path = ws.resolve(&path)?.to_string_lossy().into_owned();
-    let out = toolchain::artifact_path(&path);
+    let out = toolchain::artifact_path_prepared(&path)?;
     toolchain::run(
         &toolchain::compiler_command(),
         &toolchain::build_args(&path, &out),
@@ -222,7 +247,7 @@ fn ide_run(path: String, state: State<AppState>) -> Result<ExecResult, String> {
 fn ide_build_and_run(path: String, state: State<AppState>) -> Result<ExecResult, String> {
     let ws = workspace(&state)?;
     let path = ws.resolve(&path)?.to_string_lossy().into_owned();
-    let out = toolchain::artifact_path(&path);
+    let out = toolchain::artifact_path_prepared(&path)?;
     let built = toolchain::run(
         &toolchain::compiler_command(),
         &toolchain::build_args(&path, &out),
