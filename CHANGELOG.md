@@ -5,6 +5,23 @@ minor bumps while pre-1.0: each minor version is a language milestone.
 
 ## [Unreleased]
 
+
+### Fixed
+
+- **The release workflow's own installer gate could not work** 鈥?it threw
+  "the installer reported a failure" on a *successful* install, with `aoxn
+  doctor` printing `status: ok` underneath the exception. The cause is a
+  platform fact, not a typo: `aoxn-setup.exe` is a **GUI-subsystem** binary
+  (PE subsystem 2, so double-clicking it does not flash a console window), and
+  PowerShell's call operator **does not wait for a GUI-subsystem process and
+  does not set `$LASTEXITCODE` from it**. So `& $setup` returned while the
+  install was still running, `$LASTEXITCODE` was still unset, and
+  `if ($LASTEXITCODE -ne 0)` fired on `$null -ne 0`. The ordering in the log
+  was the tell 鈥?the failure appeared *before* the installer's own last lines.
+  `release.yml` now uses `Start-Process -Wait -PassThru` and the process's real
+  `ExitCode`, and `docs/install.md` documents the pattern for anyone scripting
+  the installer, since this traps every wrapper, not only CI.
+
 ## [0.51.1] - 2026-10-17
 
 The four `crates/aoxn-pkg` findings and the three IDE findings from the

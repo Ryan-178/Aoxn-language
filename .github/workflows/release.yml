@@ -55,9 +55,18 @@ jobs:
         run: |
           $ErrorActionPreference = "Stop"
           $setup = (Get-ChildItem "dist\release\*Setup.exe").FullName
-          $prefix = Join-Path $env:RUNNER_TEMP "aoxn-install"
-          & $setup -Console -Prefix $prefix
-          if ($LASTEXITCODE -ne 0) { throw "the installer reported a failure" }
+          # `aoxn-setup.exe` is a WINDOWS_GUI subsystem binary (PE subsystem 2),
+          # because double-clicking it must not flash a console window. The
+          # PowerShell call operator does NOT wait for a GUI-subsystem process and
+          # does NOT set $LASTEXITCODE from it -- so `& $setup` returned while the
+          # installer was still running, $LASTEXITCODE was still UNSET, and
+          # `if ($LASTEXITCODE -ne 0)` fired on `$null -ne 0`. That threw "the
+          # installer reported a failure" while doctor was still printing
+          # "status: ok" underneath it; the ordering in the log was the tell.
+          # `Start-Process -Wait -PassThru` waits for a GUI process and reports
+          # its real exit code, which is what the gate actually means.
+          $proc = Start-Process -FilePath $setup -ArgumentList @("-Console", "-Prefix", $prefix) -Wait -PassThru -NoNewWindow
+          if ($proc.ExitCode -ne 0) { throw "the installer reported a failure (exit $($proc.ExitCode))" }
           $aoxn = Join-Path $prefix "bin\aoxn.exe"
           # Check for the binary BEFORE invoking it. Without this, a file
           # that vanished between install and use (Windows Defender /

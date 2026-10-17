@@ -34,6 +34,29 @@ Scripted / unattended installs (no window, progress on stdout):
 .\Aoxn-0.36.0-Setup.exe -Console -Prefix C:\Tools\aoxn
 ```
 
+
+**Waiting for it from PowerShell.** The setup binary is a **GUI-subsystem**
+executable (PE subsystem 2), because double-clicking it must not flash a
+console window. The PowerShell call operator does **not** wait for a
+GUI-subsystem process and does **not** set `$LASTEXITCODE` from it, so the
+obvious gate does not do what it looks like it does:
+
+```powershell
+& $setup -Console -Prefix $prefix
+if ($LASTEXITCODE -ne 0) { throw "install failed" }   # WRONG
+```
+
+`& $setup` returns immediately, the install is still running, `$LASTEXITCODE`
+is still unset 鈥?and `$null -ne 0` is **true**, so the gate throws on the spot
+while the install carries on in the background. Use:
+
+```powershell
+$p = Start-Process -FilePath $setup -ArgumentList @("-Console", "-Prefix", $prefix) -Wait -PassThru -NoNewWindow
+if ($p.ExitCode -ne 0) { throw "install failed (exit $($p.ExitCode))" }
+```
+
+The tell in a log is the ordering: the failure appears *before* the install's
+own last lines.
 | flag | meaning |
 | --- | --- |
 | `-Console`, `-Quiet` | no window; write progress on stdout (CI, scripts) |
@@ -41,7 +64,9 @@ Scripted / unattended installs (no window, progress on stdout):
 | `-InstallClang` | download LLVM via winget if no clang is found (off by default) |
 | `-NoClang` | never download anything (the default) |
 | `-Uninstall` | remove the install and the PATH entry |
+
 | `-?` | help |
+
 
 Uninstalling is the same file with `-Uninstall`.
 
