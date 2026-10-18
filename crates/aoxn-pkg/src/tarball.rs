@@ -80,9 +80,26 @@ pub fn list_files(pkg_dir: &Path) -> Result<Vec<(String, PathBuf)>, PkgError> {
 /// docs). Computed at publish time, stored in the registry index, pinned in
 /// the lockfile, re-verified over the extracted tree at install time.
 pub fn manifest_hash(pkg_dir: &Path) -> Result<String, PkgError> {
+    manifest_hash_skipping(pkg_dir, "")
+}
+
+/// The manifest hash with ONE root-level file excluded from the walk.
+///
+/// `index.ax` matters here for one reason: `install_registry_dep` writes a
+/// loader shim at the package root AFTER the integrity check (when the
+/// manifest's entry is not `index.ax`), so an installed tree and a published
+/// tree legitimately differ by that one file. The shipment checksum pins the
+/// published bytes only; the warm-install check must therefore ask "does the
+/// tree equal the release modulo the shim we added", which is what this one
+/// knob expresses. Nothing else may use it: skipping any other name would
+/// turn the supply-chain compare into a partial compare.
+pub fn manifest_hash_skipping(pkg_dir: &Path, skip: &str) -> Result<String, PkgError> {
     let files = list_files(pkg_dir)?;
     let mut acc = String::new();
     for (rel, abs) in &files {
+        if rel.as_str() == skip {
+            continue;
+        }
         let content = std::fs::read(abs)?;
         acc.push_str(&format!("{rel}\0{}\n", sha256_hex(&content)));
     }
@@ -446,11 +463,6 @@ mod tests {
         let tmp = temp_root("abs");
         let outside = tmp.join("outside-archive.txt");
         let tgz = tmp.join("evil.tar.gz");
-        let abs = if cfg!(windows) {
-            format!("C:{}", outside.display().to_string().replace('\\', "/"))
-        } else {
-            outside.display().to_string().clone()
-        };
         raw_tar_gz(&tgz, &[("demo/C:/Users/victim/outside-archive.txt", EntryKind::Regular, None)]);
         let dest = tmp.join("out");
         let err = unpack(&tgz, &dest, "demo").unwrap_err();

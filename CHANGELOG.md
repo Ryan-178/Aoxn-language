@@ -5,6 +5,53 @@ minor bumps while pre-1.0: each minor version is a language milestone.
 
 ## [Unreleased]
 
+## [0.54.0] - 2026-10-18
+
+Package-manager measurement round two, on a synthetic registry built through
+the REAL publish flow (every package packed into a tarball by `aoxn pkg
+publish` at 4/8/16/32/64/128/256 independent dependencies). The numbers found
+one hot spot, and it was not resolution.
+
+### Changed
+
+- **A warm install no longer destroys a correct tree to find out it is
+  correct.** `install_registry_dep` always ran `remove_dir_all` + re-extract +
+  re-verify for every package on *every* `aoxn pkg install`, so the command
+  every CI re-run performs deleted and rebuilt megabytes it had just verified.
+  Measured on this machine, one project with 256 tiny packages: full warm
+  install ~3.1 s, of which ~1.7 s was the `rm -r` and most of the rest was
+  re-extracting and re-hashing the SAME bytes that had just been deleted.
+  The keep-or-rebuild verdict now measures BEFORE destroying:
+  - the tree is kept when `manifest_hash(dest)` — the same tree read the
+    extract-then-verify has always done — matches the lockfile checksum, so
+    **the integrity pin is exactly as strong as before**: a hand-edited file
+    mismatches and falls through to the rebuild (pinned by test);
+  - `index.ax` is EXCLUDED from that compare, because it is the loader shim
+    `install` writes after the verify and the checksum pins the *published*
+    tree that never contained it; a hand-deleted shim is instead REGENERATED
+    from the manifest without an extract (compare-then-write, so a clean warm
+    install touches no mtime at all);
+  - warm install of the same project: **3.1 s → 0.23 s** (16 deps: 279→45 ms,
+    64: 710→75 ms, 128: 1308→114 ms). First installs are unchanged.
+- **Dot entries in `aox_modules/` survive the prune.** Package names admit
+  only `a-z`, `0-9`, `-`, `_` (`validate_name`). So a name starting with `.`
+  can never be a package: tooling may keep state in the install directory
+  without `aoxn pkg install` sweeping it (a stale *package-shaped* name is
+  still removed, as always).
+- `manifest_hash` gained one parameterised sibling, `manifest_hash_skipping`,
+  used for exactly the shim exclusion above; nothing else may skip files.
+
+### Traps recorded
+
+- The shim makes the naive fast path DEAD code: comparing a warm tree against
+  the checksum directly never matches for a package whose `main` is not
+  `index.ax`, so the "optimization" optimizes nothing. The exclusion is not a
+  hole — it is the precise spelling of "equal to the release plus the shim we
+  added".
+- `materialize` gates on the LOCKFILE (`lock.get(dep)`), not on the
+  resolution: a fixture with an empty lockfile installs nothing and reports
+  nothing. Unit tests pinning install behaviour must seed the lock.
+
 ## [0.53.0] - 2026-10-18
 
 Import system and package manager, optimized together. Every change below was

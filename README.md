@@ -897,6 +897,33 @@ Full reference, including limits: [`docs/css-assets.md`](docs/css-assets.md).
 
 ## Status
 
+**v0.54.0** — **A warm install no longer destroys a tree to learn that it is
+correct** — 440 tests green (336 in the compiler workspace + 104 in
+`aoxn-pkg`; the IDE adds 36 Rust + 62 frontend tests of its own) ·
+
+The second measurement round, against a synthetic registry built through the
+REAL `aoxn pkg publish` flow, at 4/8/16/32/64/128/256 independent
+dependencies. The number that mattered was the *warm* install — the
+`aoxn pkg install` every CI re-run performs: until now it ran
+`remove_dir_all` + re-extract + re-verify for EVERY installed package, so a
+no-op install at 256 deps spent ~3.1 s deleting and rebuilding bytes it had
+just verified (~1.7 s of that was the `rm -r`).
+
+**keep-or-rebuild: measure BEFORE destroying.** The tree is kept when
+`manifest_hash(dest)` — the same tree read the extract-then-verify has always
+done — matches the lockfile checksum. `index.ax` is excluded from that
+compare because it is the loader shim install writes AFTER the verify, and
+the checksum pins the *published* tree that never contained it; a deleted
+shim is instead regenerated from the manifest, without an extract.
+A hand-edited file still mismatches the checksum and rebuilds (pinned by
+test). Warm install of the 256-dep project: **3.1 s → 0.23 s** (16 deps:
+279→45 ms, 64: 710→75 ms, 128: 1308→114 ms). First installs are unchanged.
+
+**Dot entries in `aox_modules/` survive the prune.** Package names admit only
+`a-z`, `0-9`, `-`, `_`, so a `.tool` entry can never be a package — tooling
+may keep state in the install directory without `aoxn pkg install` sweeping
+it. A stale *package-shaped* name is still removed, as always.
+
 **v0.53.0** — **Import system and package manager optimized together** —
 436 tests green (336 in the compiler workspace + 100 in `aoxn-pkg`; the IDE
 adds 36 Rust + 62 frontend tests of its own) ·
@@ -1946,6 +1973,27 @@ print(asset_path(styles_fingerprint()))   # 鈥assets\82b4fb25鈥?css
 瀹屾暣璇存槑涓庨檺鍒惰 [`docs/css-assets.md`](docs/css-assets.md)銆?
 
 ## 现状
+
+**v0.54.0** · **warm install 不再靠"删掉重装"来确认一棵树是好的** ·
+440 测试全绿（编译器工作区 336 + `aoxn-pkg` 104；IDE 另有 36 个 Rust + 62 个前端测试）·
+
+第二轮测量，注册表用**真实的 `aoxn pkg publish` 流程**造出来，4/8/16/32/64/128/256
+个独立依赖各测一遍。要紧的数字是 **warm install**——CI 每次重跑都在执行的那条
+`aoxn pkg install`：到 v0.53.0 为止，它对每一个已安装的包都执行
+`remove_dir_all` + 重新解包 + 重新校验，所以在 256 个依赖的项目里，一次什么都不
+变的安装花了约 3.1 秒去删除并重铸它刚刚校验过的字节（其中 ~1.7 秒就是 `rm -r`）。
+
+**keep-or-rebuild：先量，再动手。** `manifest_hash(dest)`——与解包后的校验走的
+完全同一棵树读——与 lockfile 的 checksum 对得上，树就保留。`index.ax` 从这次比较
+里**排除**：它是 install 在校验**之后**写入的 loader shim，而 checksum 钉的是
+不含它的发布树；被删掉的 shim 会从 manifest 重新推导出来（不重解包）。手工改过
+的文件仍然对不上 checksum、仍会重建（有测试钉住）。256 依赖项目的 warm install：
+**3.1 秒 → 0.23 秒**（16 依赖：279→45ms，64：710→75ms，128：1308→114ms）。
+首次安装完全不变。
+
+**`aox_modules/` 里的点开头条目不再被 prune 扫掉。** 包名只允许 `a-z`、`0-9`、
+`-`、`_`，所以点开头的名字永远不可能是包——工具可以把状态放进安装目录，不怕被
+`aoxn pkg install` 收走。真正的陈旧包名照旧被扫。
 
 **v0.53.0** · **导入系统与包管理器放在一起优化** ·
 436 测试全绿（编译器工作区 336 + `aoxn-pkg` 100；IDE 另有 36 个 Rust + 62 个前端测试）·

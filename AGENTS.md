@@ -512,6 +512,17 @@ crates/aoxn-pkg       package manager crate (its own dependency set; see above)
   - **导入性能从来不是瓶颈**：合成 10→1000 个模块、三种形状实测，编译时间从
     11 个文件到 171 个文件是**平的**（进程启动主导，整次加载不到 1ms）。**先量
     再改**——否则会去优化一个不存在的问题。
+  - **keep-or-rebuild（v0.54.0）**：`install_registry_dep` 在**删除之前**先做
+    `manifest_hash(dest)`（排除 `index.ax`——那是我们自己的 loader shim，checksum
+    钉的是发布树，不含我们后写的 shim），对上就跳过 rm+extract+重hash。实测
+    N=256 的 warm install 3112ms→227ms（16 包：279→45ms）；删掉的文件哈希不同会
+    照旧重建，被删的 shim 由 `write_shim_if_needed` 在不重解包的前提下重新生成
+    （compare-then-write：内容相同**一个字节都不写**，否则会把每次 warm install
+    的 shim mtime 都盖一遍）。**站在后来者的角度，回访次序是：能不能证明"跳过"
+    保留了完整性**（哈希排除项只能是自身产物），**以及 materialize 的门在
+    lockfile（`lock.get(dep)`）而不是 resolution**——空 lockfile 的单测装不了
+    任何东西、也不报错。dot 开头的目录项永远不会被 prune 扫掉（包名不允许
+    `.` 开头），工具可以把状态放进 `aox_modules/`。
 - **`not` 的优先级改成 Python**（v0.52.0）——`src/parser.rs` 的
   `not_expr` 位于 `and_expr` 与 `bitor_expr` 之间，`unary_expr` **不再**接受
   `Tok::Bang`。`selfhost/parser.ax` 必须同步（`parse_not`）：两个阶段文法不一致

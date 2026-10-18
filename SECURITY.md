@@ -16,8 +16,8 @@ minors do not.
 
 | Version | Supported |
 |---|---|
-| `0.51.x` (current) | — yes |
-| `0.50.x` and earlier | — no · please reproduce on `main` or the latest release |
+| `0.54.x` (current) | — yes |
+| `0.53.x` and earlier | — no · please reproduce on `main` or the latest release |
 | `main` (development) | ✅ yes, fixes land here first |
 
 Fix versions are always noted in [`CHANGELOG.md`](CHANGELOG.md). If you need a
@@ -209,6 +209,13 @@ the information needed to protect users even if the reporter disagrees.
   merely skip the wire check; any traversal in `tarball::unpack`; any registry
   handle shared across the download threads added in v0.32.0 (each worker must
   keep its own `Registry::fork()` — backends carry mutable state).
+  **Since v0.54.0 the keep path is part of the same contract**: a warm install
+  may reuse an existing `aox_modules/<name>/` tree ONLY when `manifest_hash`
+  of that tree — measured before anything is destroyed, excluding exactly ONE
+  file, the `index.ax` shim install itself writes after the verify — matches
+  the lockfile checksum, and a mismatched tree is removed and re-extracted. A
+  keep verdict that did not re-measure, or an exclusion list wider than that
+  one shim of our own making, is a vulnerability.
 - **Trust-tier handling** (since v0.32.0: `crates/aoxn-pkg/src/trust.rs`) —
   `trust.json` is a curated registry's *claims about itself*, parsed from
   untrusted text like any other registry file. `None` (no trust index) and
@@ -483,8 +490,8 @@ Aoxn 处于 pre-1.0 阶段：只有最新的版本线接收安全修复，旧的
 
 | 版本 | 支持情况 |
 |---|---|
-| `0.50.1`（当前） | ✅ 支持 |
-| `0.50.0` 及更早 | ❌ 不支持——请在 `main` 或最新发布上复现 |
+| `0.54.x`（当前） | ✅ 支持 |
+| `0.53.x` 及更早 | ❌ 不支持——请在 `main` 或最新发布上复现 |
 | `main`（开发线） | ✅ 支持，修复最先落在这里 |
 
 修复版本永远记在 [`CHANGELOG.md`](CHANGELOG.md)。如需把修复反向移植到旧
@@ -617,7 +624,13 @@ tag，请在报告里说明，我们再商量。
   中钉住的值做 manifest 哈希校验」就落盘的路径；任何把传输摘要变成可选时
   **绕过**内容校验（而非仅跳过线路校验）的改动；`tarball::unpack` 中的任何
   目录穿越；v0.32.0 新增的下载线程之间共享 registry 句柄（每个 worker 必须
-  持有自己的 `Registry::fork()`——后端带可变状态）。
+  持有自己的 `Registry::fork()`——后端带可变状态）。**v0.54.0 起，keep 路径
+  纳入同一契约**：一次 warm install 只有在**先量、后删**，且该树的
+  `manifest_hash`（排除**恰好一个**文件——install 自身在校验之后写入的
+  `index.ax` shim）与 lockfile 的 checksum 一致时，才允许复用已有的
+  `aox_modules/<name>/` 目录树；对不上的内容一律删除并重新解包。没有重新
+  测量就给出 keep 结论，或把排除清单放宽到不止我们自己写的那一个 shim，
+  均属漏洞。
 - **信任等级的处理**（v0.31.0 起，`crates/aoxn-pkg/src/trust.rs`）——
   `trust.json` 是策展 registry 对**自己**的声明，和其他 registry 文件一样解析自
   不可信文本。`None`（没有信任清单）与 `unreviewed` 必须彼此可区分，也必须与

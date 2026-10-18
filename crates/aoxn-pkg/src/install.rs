@@ -679,11 +679,21 @@ fn materialize(
     }
 
     // prune managed-but-stale entries
+    //
+    // A name starting with `.` can never be a package (`validate_name` admits
+    // only a-z / 0-9 / `-` / `_`), so a dot entry in `aox_modules/` belongs to
+    // tooling, not to the lock. It is left alone: the sweep's job is to
+    // reconcile package names against the lock, and swallowing other tools'
+    // state would make this directory hostile. (Real precedent: the IDE's
+    // language service drops its own marker here.)
     let mut removed = Vec::new();
     if modules_dir.exists() {
         for e in std::fs::read_dir(&modules_dir)? {
             let e = e?;
             let name = e.file_name().to_string_lossy().to_string();
+            if name.starts_with('.') {
+                continue;
+            }
             if !keep.contains(&name) {
                 let p = e.path();
                 if p.is_dir() {
@@ -745,6 +755,49 @@ fn install_registry_dep(
         )));
     }
     if dest.exists() {
+        // The tree may already be exactly what the lockfile describes, and on
+        // a warm install -- the `aoxn pkg install` every CI re-run and
+        // staleness check performs -- the old rm -r it took to find out was
+        // the dominant cost. Measured on this machine, one project with 256
+        // tiny packages: full warm install ~2.5 s, of which ~1.7 s was
+        // `remove_dir_all` and most of the rest was re-extracting and
+        // re-hashing the SAME bytes that had just been deleted.
+        //
+        // So measure BEFORE destroying. The compare is the same tree read the
+        // extract-then-verify below does, but it must EXCLUDE `index.ax`:
+        // that file is written here (write_shim_if_needed, below) after the
+        // extract-time verify, and only when the manifest's entry is not
+        // already index.ax. The checksum pins the PUBLISHED tree, which never
+        // contained our shim; a warm tree differs from it by that one file of
+        // our own making, and the skip is how the compare says so.
+        //
+        // The entry probe closes one hole the hash alone cannot see: if the
+        // entry IS index.ax and a hand deletes that file, the excluding-hash
+        // still matches -- but the loader needs an entry, so the tree must be
+        // rebuilt. Anything else that made the tree wrong ALSO mismatches and
+        // falls through to the rebuild, which is the pin working.
+        //
+        // A hand-edited package FILE before the install therefore still
+        // rebuilds: only a tree genuinely worth keeping is kept. If the skip
+        // ever skipped anything real, this is the line to revisit first.
+        let ok_to_keep = if let Ok(actual) =
+            crate::tarball::manifest_hash_skipping(&dest, "index.ax")
+        {
+            actual == checksum
+        } else {
+            false
+        };
+        if ok_to_keep {
+            // The tree is kept, but the shim is REGENERATED if it is missing
+            // or differs from what the manifest demands: it is excluded from
+            // the compare above, so a hand-deleted shim leaves the hash
+            // intact -- and `write_shim_if_needed` is what puts it back
+            // without an extract. The loader resolves through the manifest
+            // either way; this keeps the install dir self-healing exactly as
+            // the always-rebuild did, minus the rebuild.
+            write_shim_if_needed(&dest)?;
+            return Ok(());
+        }
         std::fs::remove_dir_all(&dest)?;
     }
     std::fs::create_dir_all(modules_dir)?;
@@ -779,10 +832,15 @@ fn write_shim_if_needed(pkg_dir: &Path) -> Result<(), PkgError> {
             return Ok(());
         }
         let rel = format!("/{}", entry.to_string_lossy().replace('\\', "/"));
-        std::fs::write(
-            pkg_dir.join("index.ax"),
-            format!("import * from \".{rel}\"\n"),
-        )?;
+        let text = format!("import * from \".{rel}\"\n");
+        // Compare-then-write: this now runs on EVERY kept-tree install, and
+        // rewriting a byte-identical shim would restamp its mtime for
+        // nothing. A missing or mangled shim is written; a correct one is
+        // left exactly as it is.
+        let shim = pkg_dir.join("index.ax");
+        if std::fs::read_to_string(&shim).ok().as_deref() != Some(text.as_str()) {
+            std::fs::write(&shim, text)?;
+        }
     }
     Ok(())
 }
@@ -1101,5 +1159,210 @@ mod tests {
         assert_eq!(v["resolved"], 3);
         assert_eq!(v["downloaded"], 1);
         assert_eq!(v["skipped_dev"][0], "harness");
+    }
+
+    // ---- install_registry_dep: keep-or-rebuild ----------------------------
+
+    const SRC_AX: &str = "def util_f() -> int:\n    return 7\n";
+
+    /// A real package the fixture packs into a real tarball. `main` keys util.ax,
+    /// so the loader shim (index.ax) IS involved: every preserve-verdict below
+    /// must survive our own adding of that file.
+    fn pkg_src(parent: &Path) -> Result<PathBuf, PkgError> {
+        let src = parent.join("src");
+        std::fs::create_dir_all(&src)?;
+        std::fs::write(
+            src.join("aoxn.json"),
+            r#"{ "name": "util", "version": "1.0.0", "main": "util.ax" }"#,
+        )?;
+        std::fs::write(src.join("util.ax"), SRC_AX)?;
+        Ok(src)
+    }
+
+    /// Pack + hash + cache: the exact shape `install_registry_dep` consumes.
+    fn cached_package(parent: &Path, cache: &Cache) -> Result<String, PkgError> {
+        let src = pkg_src(parent)?;
+        let tgz = parent.join("util.tar.gz");
+        tarball::pack(&src, "util", &tgz)?;
+        let ck = tarball::manifest_hash(&src)?;
+        cache.store_tar(&tgz, &ck)?;
+        Ok(ck)
+    }
+
+    fn temp_dir(tag: &str) -> PathBuf {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        std::env::temp_dir().join(format!(
+            "aoxn-keep-{}-{tag}-{nanos}",
+            std::process::id()
+        ))
+    }
+
+    /// (rel path, mtime ms) for every file under dir. The mtimes are the
+    /// removal marker: a rebuilt tree has fresh mtimes; a skipped tree has
+    /// exactly the ones it entered with.
+    fn tree_state(dir: &Path) -> BTreeMap<String, u128> {
+        let mut out = BTreeMap::new();
+        let mut stack = vec![dir.to_path_buf()];
+        while let Some(d) = stack.pop() {
+            for e in std::fs::read_dir(&d).unwrap_or_else(|e| panic!("read {}: {e}", d.display())) {
+                let e = e.unwrap();
+                let p = e.path();
+                if p.is_dir() {
+                    stack.push(p);
+                } else {
+                    let m = std::fs::metadata(&p)
+                        .unwrap()
+                        .modified()
+                        .unwrap()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_millis())
+                        .unwrap_or(0);
+                    let k = p
+                        .strip_prefix(dir)
+                        .unwrap()
+                        .to_string_lossy()
+                        .to_string()
+                        .replace('\\', "/");
+                    out.insert(k, m);
+                }
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn a_correct_install_is_not_rebuilt_the_second_time() {
+        let tmp = temp_dir("warm");
+        let cache = Cache { root: tmp.join("cache") };
+        cache.create_dirs().unwrap();
+        let ck = cached_package(&tmp, &cache).unwrap();
+        let modules = tmp.join("modules");
+
+        install_registry_dep(&cache, &modules, "util", "1.0.0", &ck).unwrap();
+        let before = tree_state(&modules);
+        std::thread::sleep(std::time::Duration::from_millis(120));
+        install_registry_dep(&cache, &modules, "util", "1.0.0", &ck).unwrap();
+        let after = tree_state(&modules);
+
+        assert_eq!(before, after, "a warm install must not rewrite a correct tree");
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn a_hand_edited_installed_file_is_restored_not_trusted() {
+        // The preserve fast path must not become a trust fast path: an
+        // edited file mismatches the checksum, and the verify is the same
+        // tree read that install has always done. This is the pin for the
+        // security property the always-rebuild used to provide.
+        let tmp = temp_dir("edit");
+        let cache = Cache { root: tmp.join("cache") };
+        cache.create_dirs().unwrap();
+        let ck = cached_package(&tmp, &cache).unwrap();
+        let modules = tmp.join("modules");
+
+        install_registry_dep(&cache, &modules, "util", "1.0.0", &ck).unwrap();
+        std::fs::write(modules.join("util").join("util.ax"), "def hacked() -> int:\n    return 0\n").unwrap();
+        install_registry_dep(&cache, &modules, "util", "1.0.0", &ck).unwrap();
+
+        let restored = std::fs::read_to_string(modules.join("util").join("util.ax")).unwrap();
+        assert_eq!(restored, SRC_AX, "the tampered file must be put back");
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn a_deleted_shim_is_healed_without_a_rebuild() {
+        // `index.ax` is EXCLUDED from the warm compare (it is our shim, not
+        // the release's content), so deleting it leaves the hash intact.
+        // The keep path regenerates the shim from the manifest; the rest of
+        // the tree must not have been touched, which the mtimes prove.
+        let tmp = temp_dir("entry");
+        let cache = Cache { root: tmp.join("cache") };
+        cache.create_dirs().unwrap();
+        let ck = cached_package(&tmp, &cache).unwrap();
+        let modules = tmp.join("modules");
+
+        install_registry_dep(&cache, &modules, "util", "1.0.0", &ck).unwrap();
+        let shim = modules.join("util").join("index.ax");
+        assert!(shim.exists(), "main=util.ax must have produced the shim");
+        let before = tree_state(&modules);
+        // simulate the damage: the shim disappears entirely
+        std::fs::remove_file(&shim).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(120));
+        install_registry_dep(&cache, &modules, "util", "1.0.0", &ck).unwrap();
+
+        let after = tree_state(&modules);
+        assert!(shim.exists(), "a deleted shim must be regenerated");
+        let body = std::fs::read_to_string(&shim).unwrap();
+        assert!(body.contains("util.ax"), "the shim re-derives the entry: {body}");
+        let healed = tree_state(&modules);
+        // every file EXCEPT the shim keeps its mtime: no rebuild happened
+        let untouched = healed.iter().all(|(k, v)| {
+            k == "util/index.ax" || before.get(k) == Some(v)
+        });
+        assert!(untouched, "the heal must not rebuild the tree: {before:?} -> {healed:?}");
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn dot_entries_are_tool_state_and_survive_the_prune() {
+        // Package names admit a-z / 0-9 / `-` / `_` only, so a dot entry in
+        // aox_modules/ can never be a package. It belongs to tools and is
+        // left alone; a plain (non-dot) stale entry keeps being swept.
+        let tmp = temp_dir("prune");
+        let cache = Cache { root: tmp.join("cache") };
+        cache.create_dirs().unwrap();
+        let ck = cached_package(&tmp, &cache).unwrap();
+        // materialize joins `dir/aox_modules` itself; the planted state goes
+        // THERE so the sweep actually sees it.
+        let modules = tmp.join("aox_modules");
+        std::fs::create_dir_all(&modules).unwrap();
+        std::fs::create_dir_all(modules.join("gone")).unwrap();
+        std::fs::write(modules.join("gone").join("leftover.ax"), "stale").unwrap();
+        std::fs::write(modules.join(".ide-marker"), "tool state").unwrap();
+
+        let mut m = Manifest::synthetic();
+        m.dependencies.insert(
+            "util".into(),
+            DependencySpec::Registry { req: "^1".into(), registry: None },
+        );
+        let mut sel = sel(None);
+        sel.checksum = ck.clone();
+        let res = Resolution {
+            packages: [("util".to_string(), sel)].into_iter().collect(),
+        };
+        // the lock gates what materialize installs: without the util entry,
+        // the dep is silently left alone (`lock.get(dep)` is the gate)
+        let lock = Lockfile {
+            requirements: BTreeMap::new(),
+            packages: vec![LockedPackage {
+                name: "util".into(),
+                version: "1.0.0".into(),
+                registry: "r".into(),
+                checksum: ck,
+                tarball_sha256: None,
+                dev: false,
+                dependencies: vec![],
+            }],
+            ..Lockfile::empty()
+        };
+
+        let (installed, removed, _) = materialize(
+            &tmp, &m, &res, &lock, &[], &cache, DepScope::All,
+            &crate::ui::plain(),
+        )
+        .unwrap();
+
+        assert_eq!(installed, vec!["util"], "the dep installs");
+        assert!(modules.join("util").exists());
+        assert!(
+            modules.join(".ide-marker").exists(),
+            "dot state must survive the sweep"
+        );
+        assert_eq!(removed, vec!["gone"], "only real stale names are swept");
+        assert!(!modules.join("gone").exists());
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 }
