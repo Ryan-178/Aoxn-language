@@ -99,7 +99,7 @@ fn expand_pattern(root: &Path, pattern: &str) -> Result<Vec<PathBuf>, PkgError> 
     };
     let mut out = Vec::new();
     let entries = std::fs::read_dir(&scan_dir)
-        .map_err(|e| PkgError::Config(format!("cannot list {}: {e}", scan_dir.display())))?;
+        .map_err(|e| PkgError::Config(format!("cannot list {}: {}", scan_dir.display(), crate::errors::io_reason(&e))))?;
     let mut names: Vec<_> = entries.flatten().collect();
     names.sort_by_key(|e| e.file_name());
     for e in names {

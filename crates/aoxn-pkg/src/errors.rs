@@ -2,6 +2,51 @@
 
 
 
+// ---------------------------------------------------------------------------
+// A STABLE English reason for an I/O failure.
+//
+// `std::io::Error`'s `Display` is the operating system's own message, so every
+// error that interpolates it changes language with the machine's locale. On a
+// Chinese-locale Windows this printed
+//
+//     cannot read aoxn.json: <the OS's own Chinese message> (os error 2)
+//
+// into an otherwise entirely English package manager. `ErrorKind` is stable
+// and portable, so mapping it to our own English is translatable, greppable,
+// and identical in CI and on a developer machine.
+//
+// This is a deliberate DUPLICATE of `aoxn::io_reason`. `aoxn-pkg` is its own
+// crate with its own dependency set and deliberately does not depend on the
+// compiler -- keeping it that way is a security property (SECURITY.md), so the
+// function is copied rather than shared. Keep the two in sync.
+// ---------------------------------------------------------------------------
+pub fn io_reason(e: &std::io::Error) -> String {
+    use std::io::ErrorKind::*;
+    let phrase = match e.kind() {
+        // Windows maps BOTH a missing file (os error 2) and a missing path
+        // COMPONENT (os error 3) onto `NotFound`. They are different errors
+        // and the codes are the only thing that tells them apart -- an arm
+        // below `NotFound` would be unreachable on Windows, which is where it
+        // matters.
+        NotFound => match e.raw_os_error() {
+            Some(3) => "the directory does not exist",
+            Some(2) => "the file does not exist",
+            _ => "no such file or directory",
+        },
+        PermissionDenied => "permission denied",
+        AlreadyExists => "already exists",
+        InvalidInput => "invalid path",
+        InvalidData => "invalid data",
+        UnexpectedEof => "unexpected end of file",
+        WriteZero => "the file could not be written",
+        _ => "i/o error",
+    };
+    match e.raw_os_error() {
+        Some(code) => format!("{phrase} (os error {code})"),
+        None => phrase.to_string(),
+    }
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum PkgError {
     #[error("manifest error: {0}")]

@@ -283,11 +283,11 @@ fn resolve_location(from: &str, loc: &str) -> String {
 fn http_get(url: &str) -> Result<Response, PkgError> {
     let (host, port, path) = parse_url(url)?;
     let addr = std::net::ToSocketAddrs::to_socket_addrs(&(host.as_str(), port))
-        .map_err(|e| PkgError::Registry(format!("cannot resolve `{host}`: {e}")))?
+        .map_err(|e| PkgError::Registry(format!("cannot resolve `{host}`: {}", crate::errors::io_reason(&e))))?
         .next()
         .ok_or_else(|| PkgError::Registry(format!("cannot resolve `{host}`")))?;
     let mut stream = std::net::TcpStream::connect_timeout(&addr, CONNECT_TIMEOUT)
-        .map_err(|e| PkgError::Registry(format!("cannot connect to `{host}:{port}`: {e}")))?;
+        .map_err(|e| PkgError::Registry(format!("cannot connect to `{host}:{port}`: {}", crate::errors::io_reason(&e))))?;
     stream.set_read_timeout(Some(IO_TIMEOUT))?;
     stream.set_write_timeout(Some(IO_TIMEOUT))?;
 

@@ -469,7 +469,7 @@ fn entry_key(path: &Path) -> String {
 /// a stylesheet is bundled, never resolved, so it is not a module.
 fn load_file(path: &Path, key: &str, state: &mut LoadState) -> Result<Option<usize>, Vec<Diag>> {
     let canonical = std::fs::canonicalize(path)
-        .map_err(|e| vec![Diag::at("io", u32::MAX, 0, 0, format!("cannot open '{}': {e}", path.display()))])?;
+        .map_err(|e| vec![Diag::at("io", u32::MAX, 0, 0, format!("cannot open '{}': {}", path.display(), io_reason(&e)))])?;
     if state.stack.contains(&canonical) {
         let cycle: Vec<String> = state
             .stack
@@ -491,7 +491,7 @@ fn load_file(path: &Path, key: &str, state: &mut LoadState) -> Result<Option<usi
     state.stack.push(canonical.clone());
 
     let src = std::fs::read_to_string(path)
-        .map_err(|e| vec![Diag::at("io", u32::MAX, 0, 0, format!("cannot read '{}': {e}", path.display()))])?;
+        .map_err(|e| vec![Diag::at("io", u32::MAX, 0, 0, format!("cannot read '{}': {}", path.display(), io_reason(&e)))])?;
     // Register the CANONICAL path, not the one we were called with: import
     // resolution canonicalizes, so a name registered from `path` would be
     // spelled `stdlib\ui.ax` when the entry was spelled as an absolute path
@@ -569,6 +569,54 @@ fn load_file(path: &Path, key: &str, state: &mut LoadState) -> Result<Option<usi
 /// Paths are spelled ONE way everywhere they are shown or compared — in
 /// diagnostics, in `Aoxn symbols` output, in the IDE's explorer — so this
 /// lives in one place rather than at each call site.
+
+/// A STABLE English reason for an I/O failure.
+///
+/// `std::io::Error`'s `Display` is the operating system's own message, which
+/// means every diagnostic that interpolates it changes language with the
+/// machine's locale. On a Chinese-locale Windows this produced
+///
+/// ```text
+/// cannot open 'main.ax': <the OS's own Chinese message> (os error 2)
+/// ```
+///
+/// inside a diagnostic set that is otherwise entirely English -- and the
+/// message is the one thing an agent or a CI log has to parse. `ErrorKind` is
+/// a stable, portable enum, so mapping it to our own English is both
+/// translatable and greppable.
+///
+/// The numeric `os error` code is kept deliberately: it is locale-independent
+/// and is what a bug report needs. The localized string is not recoverable
+/// from it, and nothing downstream was parsing it.
+pub fn io_reason(e: &std::io::Error) -> String {
+    use std::io::ErrorKind::*;
+    let phrase = match e.kind() {
+        // Windows maps BOTH a missing file (os error 2) and a missing path
+        // COMPONENT (os error 3) onto `NotFound`, and telling a reader "no
+        // such file" when it is the DIRECTORY that is missing sends them to
+        // the wrong place. The codes are the only thing that tells them
+        // apart, so they are checked here rather than in a catch-all arm --
+        // an arm below `NotFound` is unreachable on Windows, which is the
+        // platform where the distinction matters.
+        NotFound => match e.raw_os_error() {
+            Some(3) => "the directory does not exist",
+            Some(2) => "the file does not exist",
+            _ => "no such file or directory",
+        },
+        PermissionDenied => "permission denied",
+        AlreadyExists => "already exists",
+        InvalidInput => "invalid path",
+        InvalidData => "invalid data",
+        UnexpectedEof => "unexpected end of file",
+        WriteZero => "the file could not be written",
+        _ => "i/o error",
+    };
+    match e.raw_os_error() {
+        Some(code) => format!("{phrase} (os error {code})"),
+        None => phrase.to_string(),
+    }
+}
+
 fn pretty(p: PathBuf) -> PathBuf {
     paths::strip_verbatim(p)
 }
@@ -642,9 +690,30 @@ fn resolve_import_spelled(dir: &Path, import: &str, quoted: bool) -> PathBuf {
             return found;
         }
     }
-    // Nothing matched: return the package path anyway so the diagnostic names
-    // the place the import was looked for.
-    legacy
+    // Nothing matched the package spellings. LAST — and only ever after
+    // both of the above — fall back to the file sitting NEXT TO THE IMPORTER,
+    // which is what a quoted specifier naming a sibling means to almost
+    // everyone who writes it. Before v0.53.0 a quoted `"util"` could not see
+    // `util.ax` two inches away and reported
+    //
+    //     cannot open '...\aox_modules\util': no such file or directory
+    //
+    // naming a path the reader never wrote and almost certainly does not
+    // have, while the file they wanted sat in their own directory.
+    //
+    // Ordering is what keeps this safe: a program that resolves today still
+    // resolves the same way, because this arm is only reached where the
+    // function used to FAIL. A local package still wins over a sibling, and
+    // the stdlib still wins over both.
+    let sibling = complete_module_path(dir.join(p));
+    if sibling.is_file() {
+        return sibling;
+    }
+    // Still nothing. Return the SIBLING path, not `aox_modules/<name>`: with
+    // every other spelling already ruled out, that is the location a reader
+    // will look at first, and it is where a relative `"./name"` would have
+    // found the file.
+    sibling
 }
 
 /// module-style specifier completion: try the exact path, then the source
@@ -674,9 +743,57 @@ fn complete_module_path(base: PathBuf) -> PathBuf {
 
 /// Every source file `load_program` would read for `entries`, imports
 /// included (include-once, resolved relative to the importing file's
-/// directory). Used by the `Aoxn run` build cache to key on the content of the
-/// whole program; returns `None` when a file cannot be read, which disables
-/// the cache for that invocation.
+/// directory), each with a digest of the bytes the walk ALREADY READ.
+///
+/// This is the build cache's key material, and it is deliberately the walk
+/// that does the hashing rather than a walk followed by a second read. Before
+/// v0.53.0 `cache_key` called `dependency_files` (which read every file) and
+/// then `fs::read` every file AGAIN to hash it, so a cold build read every
+/// source twice before `load_program` read it a third time. Hashing here is
+/// free: the bytes are in hand.
+///
+/// Returns `None` when a file cannot be read, which disables the cache for
+/// that invocation.
+pub fn dependency_digests(entries: &[String]) -> Option<Vec<(PathBuf, u64)>> {
+    let mut seen: HashSet<PathBuf> = HashSet::new();
+    let mut out: Vec<(PathBuf, u64)> = Vec::new();
+    let mut stack: Vec<PathBuf> = entries.iter().map(PathBuf::from).collect();
+    while let Some(path) = stack.pop() {
+        let canonical = std::fs::canonicalize(&path).ok()?;
+        if !seen.insert(canonical.clone()) {
+            continue; // include-once, exactly like `load_file`
+        }
+        let src = std::fs::read_to_string(&canonical).ok()?;
+        let dir = canonical.parent().map(|p| p.to_path_buf()).unwrap_or_default();
+        if assets::is_css(&canonical) {
+            // A stylesheet is hashed like any other input, and so is
+            // everything it pulls in: an `@import`ed partial and a `url(...)`
+            // target both change the emitted artifact, so both must
+            // invalidate the cache exactly as editing the entry file does.
+            for dep in assets::scan_css_imports(&src)
+                .into_iter()
+                .chain(assets::scan_css_urls(&src))
+            {
+                let target = dir.join(&dep);
+                if target.is_file() {
+                    stack.push(target);
+                }
+            }
+        } else {
+            for (imp, quoted) in scan_imports(&src) {
+                stack.push(resolve_import_spelled(&dir, &imp, quoted));
+            }
+        }
+        out.push((canonical, hashing::digest_bytes(src.as_bytes())));
+    }
+    out.sort_by(|a, b| a.0.cmp(&b.0));
+    Some(out)
+}
+
+/// Every source file `load_program` would read for `entries`, imports
+/// included (include-once, resolved relative to the importing file's
+/// directory). Returns `None` when a file cannot be read, which disables the
+/// cache for that invocation.
 pub fn dependency_files(entries: &[String]) -> Option<Vec<PathBuf>> {
     let mut seen: HashSet<PathBuf> = HashSet::new();
     let mut out: Vec<PathBuf> = Vec::new();
@@ -971,7 +1088,7 @@ pub fn link_opts(obj_path: &Path, exe_path: &Path, libs: &[String], lib_paths: &
     loop {
         let out = timed("link", || {
             cmd.output().map_err(|e| {
-                vec![Diag::at("link", u32::MAX, 0, 0, format!("failed to spawn {}: {e}", clang.display()))]
+                vec![Diag::at("link", u32::MAX, 0, 0, format!("failed to spawn {}: {}", clang.display(), io_reason(&e)))]
             })
         })?;
 

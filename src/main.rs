@@ -590,7 +590,7 @@ fn temp_exe(input: &str) -> PathBuf {
 /// Run a compiled program, inheriting stdio, and return its exit code.
 fn run_exe(exe: &Path, args: &[String]) -> i32 {
     let status = Command::new(exe).args(args).status().unwrap_or_else(|e| {
-        eprintln!("error: failed to run compiled program {}: {e}", exe.display());
+        eprintln!("error: failed to run compiled program {}: {}", exe.display(), aoxn::io_reason(&e));
         std::process::exit(1);
     });
     status.code().unwrap_or(1)
@@ -628,15 +628,19 @@ fn cache_key(opts: &Opts) -> Option<String> {
     if std::env::var("AOXN_NO_CACHE").is_ok() {
         return None;
     }
-    // every source file the compiler will read, entry + transitive imports
-    let sources = aoxn::dependency_files(&opts.positional)?;
+    // every source file the compiler will read, entry + transitive imports, each
+    // with a digest of the bytes the walk already read (see
+    // `dependency_digests`: this used to be a walk followed by a second read
+    // of every file, so a cold build read each source twice before the load
+    // read it a third time).
+    let sources = aoxn::dependency_digests(&opts.positional)?;
 
     let mut h = aoxn::hashing::FastBuild.build_hasher();
     h.write(b"aoxn-run-cache-v1");
     // source content: the only input that usually changes
-    for path in &sources {
+    for (path, digest) in &sources {
         path.to_string_lossy().hash(&mut h);
-        std::fs::read(path).ok()?.hash(&mut h);
+        digest.hash(&mut h);
     }
     // the compiler binary itself: rebuilding `aoxn` must invalidate the cache
     if let Ok(exe) = std::env::current_exe() {

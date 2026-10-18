@@ -101,8 +101,35 @@ pub fn install_root() -> Option<PathBuf> {
     }
 }
 
-/// Directory holding `stdlib.ax` and the UI toolkit sources.
+// The stdlib directory is asked for on the import path: `resolve_import_spelled`
+// reaches for it every time a package spelling misses, so a program importing
+// N things did up to N rounds of `getenv` + `is_dir` probing against the
+// filesystem. Memoizing is safe because the answer cannot change under a
+// running process: the environment is fixed at exec and the install layout
+// does not move while the compiler walks it. `doctor` deliberately wants the
+// LIVE answer (it is diagnosing this very directory), so it goes through
+// `stdlib_dir_uncached`.
+thread_local! {
+    static STDLIB_DIR: std::cell::RefCell<Option<Option<PathBuf>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Directory holding `stdlib.ax` and the UI toolkit sources, answered once per
+/// process. See [`stdlib_dir_uncached`] for the probe itself and for why the
+/// answer may be cached.
 pub fn stdlib_dir() -> Option<PathBuf> {
+    STDLIB_DIR.with(|c| {
+        if let Some(hit) = c.borrow().as_ref() {
+            return hit.clone();
+        }
+        let fresh = stdlib_dir_uncached();
+        *c.borrow_mut() = Some(fresh.clone());
+        fresh
+    })
+}
+
+/// The uncached probe behind [`stdlib_dir`].
+pub fn stdlib_dir_uncached() -> Option<PathBuf> {
     if let Some(dir) = env_dir("AOXN_STDLIB") {
         return Some(dir);
     }

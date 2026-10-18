@@ -4568,3 +4568,175 @@ fn the_shapes_this_repo_actually_uses_are_unaffected() {
     );
     assert_eq!(out, "1 0\n1 2 0\n");
 }
+// -------------------------------------------------- import & package ergonomics
+//
+// The cache-key work changed how the build key is COMPUTED (one walk that
+// hashes what it reads, instead of a walk plus a second read of every file),
+// so the pins below are not decoration: they are the argument that the change
+// is a speedup and not a stale-build bug.
+
+fn opt_dir(tag: &str) -> PathBuf {
+    let id = COUNTER.fetch_add(1, Ordering::SeqCst) + std::process::id() as usize;
+    let dir = std::env::temp_dir().join(format!("Aoxn-impopt-{tag}-{id}"));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    dir
+}
+
+/// Compile a FILE (not a source string) so imports resolve relative to it,
+/// then run it and return stdout.
+fn run_file(path: &Path) -> String {
+    let exe = path.with_extension(format!("out{}", EXE.trim_start_matches('.')));
+    aoxn::build_paths_exe(&[path.display().to_string()], &exe, true)
+        .unwrap_or_else(|d| panic!("compilation failed: {:?}", d));
+    let out = Command::new(&exe).output().unwrap();
+    let _ = std::fs::remove_file(&exe);
+    String::from_utf8_lossy(&out.stdout).into_owned()
+}
+
+/// The build cache's key material for `entry`. Two builds of one tree must
+/// agree; any edit anywhere in the closure must change it.
+fn digests_of(entry: &Path) -> Vec<(PathBuf, u64)> {
+    aoxn::dependency_digests(&[entry.display().to_string()])
+        .expect("the dependency walk should succeed")
+}
+
+#[test]
+fn the_cache_key_walk_hashes_what_it_already_read() {
+    let dir = opt_dir("digests");
+    std::fs::write(dir.join("leaf.ax"), "def leaf() -> int:\n    return 1\n").unwrap();
+    std::fs::write(
+        dir.join("mid.ax"),
+        "import * from \"./leaf\"\n\ndef mid() -> int:\n    return leaf() + 1\n",
+    )
+    .unwrap();
+    let main = dir.join("main.ax");
+    std::fs::write(
+        &main,
+        "import * from \"./mid\"\n\ndef main() -> int:\n    print(mid())\n    return 0\n",
+    )
+    .unwrap();
+
+    let first = digests_of(&main);
+    assert_eq!(first.len(), 3, "expected the whole closure, got {:?}", first);
+    // sorted, so the order cannot depend on the walk
+    assert_eq!(first, digests_of(&main), "the same tree must produce the same digests");
+    // sorted by PATH, not by digest -- the digests are arbitrary, and the
+    // key must not depend on the order the walk happened to reach files in
+    let paths: Vec<&PathBuf> = first.iter().map(|(p, _)| p).collect();
+    assert!(paths.windows(2).all(|w| w[0] <= w[1]), "paths must be sorted: {paths:?}");
+    let mut windows: Vec<u64> = first.iter().map(|(_, d)| *d).collect();
+
+    for (name, edit) in [
+        ("main.ax", "import * from \"./mid\"\n\ndef main() -> int:\n    print(mid())  # touched\n    return 0\n"),
+        ("mid.ax", "import * from \"./leaf\"\n\ndef mid() -> int:\n    return leaf() + 2\n"),
+        ("leaf.ax", "def leaf() -> int:\n    return 99\n"),
+    ] {
+        std::fs::write(dir.join(name), edit).unwrap();
+        let after: Vec<u64> = digests_of(&main).into_iter().map(|(_, d)| d).collect();
+        assert_ne!(windows, after, "editing {name} did not change the cache key material");
+        windows = after;
+    }
+}
+
+/// A quoted specifier naming a SIBLING file used to be a hard error that named
+/// a path the reader never wrote -- `...\aox_modules\util` -- while `util.ax`
+/// sat in the same directory. The fix has to be strictly additive: a program
+/// that resolves today must resolve the same way, so the sibling probe runs
+/// only after every package spelling has missed.
+#[test]
+fn a_quoted_specifier_finds_a_sibling_module() {
+    let dir = opt_dir("sibling");
+    std::fs::write(dir.join("leaf.ax"), "def leaf() -> int:\n    return 1\n").unwrap();
+    let m = dir.join("main.ax");
+    std::fs::write(&m, "import * from \"leaf\"\n\ndef main() -> int:\n    print(leaf())\n    return 0\n").unwrap();
+    assert_eq!(run_file(&m), "1\n");
+}
+
+/// An installed local package must still WIN over a sibling of the same name --
+/// that is exactly the precedence the fallback could have broken.
+#[test]
+fn an_installed_package_still_wins_over_a_sibling_of_the_same_name() {
+    let dir = opt_dir("precedence");
+    std::fs::write(dir.join("leaf.ax"), "def leaf() -> int:\n    return 1\n").unwrap();
+    std::fs::create_dir_all(dir.join("aox_modules/leaf")).unwrap();
+    std::fs::write(
+        dir.join("aox_modules/leaf/aoxn.json"),
+        "{\"name\":\"leaf\",\"version\":\"1.0.0\",\"main\":\"main.ax\"}",
+    )
+    .unwrap();
+    std::fs::write(dir.join("aox_modules/leaf/main.ax"), "def leaf() -> int:\n    return 4242\n").unwrap();
+    let m = dir.join("main.ax");
+    std::fs::write(&m, "import * from \"leaf\"\n\ndef main() -> int:\n    print(leaf())\n    return 0\n").unwrap();
+    assert_eq!(run_file(&m), "4242\n", "the installed package must win over the sibling leaf.ax");
+}
+
+/// With nothing installed and no sibling, the error must name a location the
+/// reader will actually look at, not the phantom `aox_modules/<name>`.
+#[test]
+fn an_unresolvable_import_names_the_sibling_location() {
+    let dir = opt_dir("unresolved");
+    let m = dir.join("main.ax");
+    std::fs::write(&m, "import * from \"nosuchthing\"\n\ndef main() -> int:\n    return 0\n").unwrap();
+    let exe = dir.join("out.exe");
+    let diags = aoxn::build_paths_exe(&[m.display().to_string()], &exe, true)
+        .err()
+        .expect("an unresolvable import must fail");
+    let msg = &diags[0].message;
+    assert!(msg.contains("nosuchthing"), "the specifier must be named: {msg}");
+    assert!(
+        !msg.contains("aox_modules"),
+        "must not blame a package the reader never asked for: {msg}"
+    );
+}
+
+/// Every I/O diagnostic is English and locale-independent. On a
+/// Chinese-locale Windows this used to print the OS's own message into an
+/// otherwise English set -- and that message is the one part of a diagnostic
+/// an agent or a CI log has to parse.
+#[test]
+fn io_diagnostics_are_english_and_stable() {
+    for e in [
+        std::io::Error::from(std::io::ErrorKind::NotFound),
+        std::io::Error::from(std::io::ErrorKind::PermissionDenied),
+        std::io::Error::from(std::io::ErrorKind::AlreadyExists),
+        std::io::Error::from(std::io::ErrorKind::InvalidInput),
+    ] {
+        let reason = aoxn::io_reason(&e);
+        assert!(
+            reason.chars().all(|c| c.is_ascii()),
+            "io_reason produced non-ASCII text: {reason:?}"
+        );
+        assert!(!reason.is_empty());
+    }
+    // and end to end, on this machine, through the real loader
+    let dir = opt_dir("iomsg");
+    let m = dir.join("main.ax");
+    std::fs::write(&m, "import * from \"./ghost\"\n\ndef main() -> int:\n    return 0\n").unwrap();
+    let exe = dir.join("out.exe");
+    let diags = aoxn::build_paths_exe(&[m.display().to_string()], &exe, true)
+        .err()
+        .expect("a missing import must fail");
+    let msg = &diags[0].message;
+    // The REASON must be ASCII. The PATH need not be: a temp directory
+    // under a user's display name is non-ASCII, and that is the reader's own
+    // name, not the OS leaking its language into our diagnostic. Only the
+    // tail after the quoted path is ours to control.
+    let reason = msg.rsplit_once('\'').map(|(_, t)| t.trim_start_matches(": ")).unwrap_or(msg.as_str());
+    assert!(reason.chars().all(|c| c.is_ascii()), "the OS message leaked: {msg}");
+    assert!(msg.contains("does not exist"), "{msg}");
+}
+
+/// A missing DIRECTORY component and a missing FILE are different mistakes, and
+/// Windows reports both as `ErrorKind::NotFound` -- only the raw code tells them
+/// apart. Saying "no such file" when the directory is missing sends the reader
+/// to the wrong place, so the two codes are separated INSIDE the NotFound arm
+/// (an arm below it is unreachable on Windows, which is where it matters).
+#[test]
+fn a_missing_directory_and_a_missing_file_are_told_apart() {
+    let missing_file = aoxn::io_reason(&std::io::Error::from_raw_os_error(2));
+    let missing_dir = aoxn::io_reason(&std::io::Error::from_raw_os_error(3));
+    assert_ne!(missing_file, missing_dir);
+    assert!(missing_dir.contains("directory"), "{missing_dir}");
+    assert!(missing_file.contains("file"), "{missing_file}");
+}

@@ -19,7 +19,7 @@
 //! then `"types"`, mirroring the npm conditional-exports convention closely
 //! enough for Aoxn's needs.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 
 /// One parsed JSON value. Only the shapes manifest entry resolution needs
@@ -257,10 +257,36 @@ fn exports_target(val: &Json) -> Option<&str> {
     None
 }
 
+// The loader asks this question once per IMPORT, and every module of a package
+// asks it about the same `aoxn.json`. Without the memo below, the manifest was
+// read from disk and JSON-parsed once per import edge -- for a package with N
+// modules that is N reads and N parses of one file. The cache is a
+// `thread_local` because resolution is single-threaded and this is a
+// build-time answer: the tree cannot change under a build already walking it.
+thread_local! {
+    static ENTRY_CACHE: std::cell::RefCell<HashMap<(PathBuf, Option<String>), Option<PathBuf>>> =
+        std::cell::RefCell::new(HashMap::new());
+}
+
 /// Resolve the entry source file for a package rooted at `pkg_dir`, given a
-/// subpath (None or `"."` → the package root; `"./sub"` or `"sub"` → that
+/// subpath (None or `"."` = the package root; `"./sub"` or `"sub"` = that
 /// subpath). Returns the resolved file path only when it exists on disk.
+///
+/// Memoized per process; see the note on `ENTRY_CACHE`.
 pub fn resolve_pkg_entry(pkg_dir: &Path, subpath: Option<&str>) -> Option<PathBuf> {
+    let key = (pkg_dir.to_path_buf(), subpath.map(|s| s.to_string()));
+    ENTRY_CACHE.with(|c| {
+        if let Some(hit) = c.borrow().get(&key) {
+            return hit.clone();
+        }
+        let fresh = resolve_pkg_entry_uncached(pkg_dir, subpath);
+        c.borrow_mut().insert(key, fresh.clone());
+        fresh
+    })
+}
+
+fn resolve_pkg_entry_uncached(pkg_dir: &Path, subpath: Option<&str>) -> Option<PathBuf> {
+
     let manifest_path = pkg_dir.join("aoxn.json");
     let text = std::fs::read_to_string(&manifest_path).ok()?;
     let root = parse(&text)?.as_object()?.clone();

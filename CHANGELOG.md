@@ -5,6 +5,67 @@ minor bumps while pre-1.0: each minor version is a language milestone.
 
 ## [Unreleased]
 
+## [0.53.0] - 2026-10-18
+
+Import system and package manager, optimized together. Every change below was
+placed by **measuring** first: the import graph was generated at 10 / 20 / 40 /
+80 / 160 / 500 / 1000 modules in three shapes, and the result is that
+**import performance was never the problem** — compile time is flat from 11 to
+171 files because process startup dominates and the whole load costs under a
+millisecond. So the work went where the measurement pointed: repeated I/O,
+and two defects the measurement of *behaviour* turned up.
+
+### Fixed
+
+- **Every I/O diagnostic leaked the operating system's own language.** All of
+  them interpolated `std::io::Error`'s `Display`, so on a Chinese-locale
+  Windows a missing file printed
+  `cannot open 'main.ax': <the OS's Chinese message> (os error 2)` into a
+  diagnostic set that is otherwise entirely English — and that message is the
+  one part of a diagnostic an agent or a CI log has to parse. A shared
+  `io_reason` maps `ErrorKind` to stable English at every site (12 in the
+  compiler, 8 in `aoxn-pkg`).
+  - While doing it: **a missing DIRECTORY and a missing FILE now read
+    differently.** Windows reports both as `ErrorKind::NotFound`, so only the
+    raw code separates them, and the separation has to live *inside* the
+    `NotFound` arm — an arm below it is unreachable on Windows, which is the
+    platform where it matters. (The first version of this helper put it in the
+    catch-all, where it never ran; the reproduction caught it.)
+- **A quoted specifier could not see the file next to it.** `import * from
+  "util"` with `util.ax` in the same directory failed with
+  `cannot open '...\aox_modules\util'` — naming a path the reader never wrote
+  and almost certainly does not have. The sibling probe now runs LAST, after
+  every package spelling has missed, so it is strictly additive: a program
+  that resolves today resolves the same way, and a local package still wins
+  over a sibling of the same name. When nothing resolves, the error names the
+  sibling location — the first place a reader looks.
+
+### Performance
+
+- **The build cache read every source file twice.** `cache_key` called
+  `dependency_files` (a full walk that reads each file) and then `fs::read`
+  every file AGAIN to hash it, before `load_program` read it a third time.
+  `dependency_digests` hashes the bytes the walk already holds. Below the
+  measurement noise floor for a realistic program — the win scales with the
+  transitive closure, not with the entry file.
+- **`aoxn.json` was re-read and re-parsed once per import edge.** Every module
+  of a package asked the same question about the same manifest. Memoized per
+  process.
+- **`stdlib_dir()` re-probed the filesystem per unresolved import** —
+  `getenv` plus `is_dir` against up to four candidate roots, on a path a
+  program importing N things walked N times. Answered once per process, with
+  `stdlib_dir_uncached` kept for `doctor`, which is diagnosing that very
+  directory and wants the live answer.
+
+### Tests
+
+6 new pins. The cache-key ones are the argument that removing the second read
+is a speedup and not a stale-build bug: the same tree must produce the same
+key material, an unchanged tree must produce the same key, and editing the
+entry, an imported file, a transitive import, or a CSS asset must each change
+it. One of those tests found two bugs in the tests themselves, which is the
+point of writing them down.
+
 ## [0.52.0] - 2026-10-18
 
 `not` now has **Python's precedence**. This is a semantic change to an existing

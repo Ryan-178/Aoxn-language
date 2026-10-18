@@ -40,3 +40,16 @@ impl Hasher for FastHasher {
         self.0 = (self.0.rotate_left(5) ^ (n as u64)).wrapping_mul(SEED);
     }
 }
+
+/// A digest of file CONTENT, for the build cache key.
+///
+/// This is the same mixer `FastHasher` uses, deliberately: the cache key only
+/// has to notice that a file changed, it does not have to resist an adversary
+/// (and it is not a security boundary -- `aoxn-pkg` pins integrity with
+/// SHA-256, see `tarball::manifest_hash`). Using one hasher means one
+/// definition of "changed" in the compiler rather than two.
+pub fn digest_bytes(bytes: &[u8]) -> u64 {
+    let mut h = FastBuild.build_hasher();
+    h.write(bytes);
+    h.finish()
+}

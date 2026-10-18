@@ -224,7 +224,7 @@ pub fn generate_to_object(
     }
     let c_path = obj_path.with_extension("c");
     std::fs::write(&c_path, &text)
-        .map_err(|e| Diag::internal(format!("cannot write {}: {e}", c_path.display())))?;
+        .map_err(|e| Diag::internal(format!("cannot write {}: {}", c_path.display(), crate::io_reason(&e))))?;
 
     let clang = crate::find_clang()
         .ok_or_else(|| Diag::cc("cannot find clang for the C backend (set AOXN_CLANG or add LLVM to PATH)"))?;
@@ -257,7 +257,7 @@ pub fn generate_to_object(
     cmd.arg("-c").arg(&c_path).arg("-o").arg(obj_path);
     let out = cmd
         .output()
-        .map_err(|e| Diag::cc(format!("failed to spawn {}: {e}", clang.display())))?;
+        .map_err(|e| Diag::cc(format!("failed to spawn {}: {}", clang.display(), crate::io_reason(&e))))?;
     if !out.status.success() {
         // keep the generated C around for debugging
         let stderr = String::from_utf8_lossy(&out.stderr);

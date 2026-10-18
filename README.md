@@ -897,11 +897,48 @@ Full reference, including limits: [`docs/css-assets.md`](docs/css-assets.md).
 
 ## Status
 
-**v0.52.0** — **`not` is Python's now: it moved from C's precedence to
-Python's** — a semantic change to an existing operator, so a minor bump ·
-430 tests green (330 in the compiler workspace + 100 in `aoxn-pkg`; the IDE
+**v0.53.0** — **Import system and package manager optimized together** —
+436 tests green (336 in the compiler workspace + 100 in `aoxn-pkg`; the IDE
 adds 36 Rust + 62 frontend tests of its own) ·
 
+**The measurement came first, and it changed the plan.** Import graphs were
+generated at 10/20/40/80/160/500/1000 modules in three shapes: **compile time
+is flat from 11 to 171 files**, because process startup dominates and the
+whole load costs under a millisecond. Import performance was never the
+problem — so the work went where the measurement actually pointed.
+
+**Two defects the behavioural measurement turned up:**
+
+- **Every I/O diagnostic leaked the operating system's own language.** All of
+  them interpolated `io::Error`'s `Display`, so on a Chinese-locale Windows a
+  missing file printed `<the OS's Chinese message> (os error 2)` into a
+  diagnostic set that is otherwise entirely English — and that message is the
+  one part of a diagnostic an agent or a CI log has to parse. A shared
+  `io_reason` maps `ErrorKind` to stable English at every site (12 in the
+  compiler, 8 in `aoxn-pkg`). A missing **directory** and a missing **file**
+  now also read differently: Windows reports both as `NotFound`, so only the
+  raw code separates them, and the separation has to live *inside* that arm.
+- **A quoted specifier could not see the file next to it.**
+  `import * from "util"` with `util.ax` beside it failed with
+  `cannot open '...\aox_modules\util'` — a path the reader never wrote. The
+  sibling probe now runs LAST, after every package spelling misses, so it is
+  strictly additive and a local package still wins.
+
+**Three pieces of repeated I/O removed:** the build cache read every source
+file **twice** (the key walk read them, then hashed them by reading them
+again, before the load read them a third time); `aoxn.json` was re-read and
+re-parsed once per import edge; `stdlib_dir()` re-probed the filesystem per
+unresolved import.
+
+**The cache-key pins are the argument that this is a speedup and not a
+stale-build bug**: an unchanged tree must produce the same key, and editing
+the entry, an imported file, a transitive import, or a CSS asset must each
+change it.
+
+**v0.52.0** — **`not` is Python's now: it moved from C's precedence to
+Python's** — a semantic change to an existing operator, so a minor bump ·
+436 tests green (336 in the compiler workspace + 100 in `aoxn-pkg`; the IDE
+adds 36 Rust + 62 frontend tests of its own) ·
 `not a == b` is `not (a == b)`, where through v0.51.2 it was `(!a) == b`.
 `not` is looser than every comparison and every bitwise operator, tighter than
 `and`/`or`. Two consequences follow, both matching Python: `a * not b` is now a
@@ -1910,9 +1947,35 @@ print(asset_path(styles_fingerprint()))   # 鈥assets\82b4fb25鈥?css
 
 ## 现状
 
+**v0.53.0** · **导入系统与包管理器放在一起优化** ·
+436 测试全绿（编译器工作区 336 + `aoxn-pkg` 100；IDE 另有 36 个 Rust + 62 个前端测试）·
+
+**先量，而且量完改变了计划。** 合成了 10/20/40/80/160/500/1000 个模块、三种形状的
+导入图：**编译时间从 11 个文件到 171 个文件是平的**——进程启动主导，整次加载不到 1ms。
+**导入性能从来不是瓶颈**，所以工作去了测量真正指向的地方。
+
+**行为测量翻出来的两个缺陷：**
+
+- **每一条 I/O 诊断都在泄漏操作系统自己的语言。** 全部插值了 `io::Error` 的
+  `Display`，于是中文 Windows 上缺文件会打印 `<OS 的中文消息> (os error 2)`
+  混进全英文的诊断集——而那恰好是 agent 和 CI 日志唯一需要解析的部分。统一的
+  `io_reason` 把 `ErrorKind` 映射成稳定英文，覆盖每一个站点（编译器 12 处、
+  `aoxn-pkg` 8 处）。**缺目录和缺文件现在读起来也不同**：Windows 把两者都报成
+  `NotFound`，只有原始错误码能区分，所以这个区分**必须写在那个分支内部**。
+- **引号导入看不见旁边的文件。** `import * from "util"` 而 `util.ax` 就在同目录时，
+  报的是 `cannot open '...\aox_modules\util'`——一个读者从没写过的路径。同目录探测
+  现在排在**最后**（所有包拼法落空之后），因此是**严格增量**的，且本地包仍然优先。
+
+**去掉的三处重复 I/O：** 构建缓存把每个源文件读了**两遍**（算 key 的那遍读完，
+再读一遍做哈希，然后加载再读第三遍）；`aoxn.json` 每条 import 边重读+重解析一次；
+`stdlib_dir()` 每条落空的包拼法都重新探测一次文件系统。
+
+**cache-key 的测试是"这是提速而不是陈旧构建 bug"的论证**：不动的树必须同一个 key，
+改入口、改被导入文件、改传递导入、改 CSS 资源必须各自换 key。
+
 **v0.52.0** · **`not` 的优先级改成 Python：从 C 的层级搬到 Python 的层级**——对一个
 已发布运算符的语义变更，所以是 minor 升级 ·
-430 测试全绿（编译器工作区 330 + `aoxn-pkg` 100；IDE 另有 36 个 Rust + 62 个前端测试）·
+436 测试全绿（编译器工作区 336 + `aoxn-pkg` 100；IDE 另有 36 个 Rust + 62 个前端测试）·
 
 `not a == b` 现在是 `not (a == b)`，而到 v0.51.2 为止是 `(!a) == b`。`not` 比每个
 比较和位运算都松、比 `and`/`or` 紧。两个随之而来的结果都与 Python 一致：`a * not b`

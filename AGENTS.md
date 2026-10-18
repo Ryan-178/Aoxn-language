@@ -487,6 +487,31 @@ crates/aoxn-pkg       package manager crate (its own dependency set; see above)
     self-host fixed point needs **no `selfhost/` mirror** (same status as the
     v0.40.0 features).
 
+- **导入系统与包管理器的 I/O 约定（v0.53.0）**——四条，写下来是因为每条都对应一个
+  已经修掉的缺陷或一个刚测出来的数字：
+  - **不要把 `io::Error` 的 `Display` 插进诊断。** 那是 OS 自己的消息，会跟着机器
+    的语言变。中文 Windows 上曾经打印 `cannot open 'x.ax': <OS 的中文消息>
+    (os error 2)` 混进全英文的诊断集。统一走 `aoxn::io_reason(&e)` /
+    `aoxn_pkg::errors::io_reason(&e)`（**故意重复**：pkg 不依赖编译器，这是
+    SECURITY.md 里的安全属性）。Windows 把"缺文件"和"缺目录"都报成
+    `ErrorKind::NotFound`，所以 2/3 的区分**必须写在 `NotFound` 分支内部**——
+    写在下面的兜底分支里在 Windows 上永远不执行。
+  - **引号导入找不到同目录文件**是这个语言最常见的第一处失误。现在同目录探测
+    **排在最后**（所有包拼法都落空之后），所以是**严格增量**的：今天能解析的程序
+    解析结果不变，本地包仍然优先于同名同目录文件。全都找不到时错误指向同目录
+    位置，而不是幻影 `aox_modules\<name>`。
+  - **`resolve_pkg_entry` 与 `stdlib_dir()` 都有 per-process 记忆。** 前者过去
+    每条 import 边都重读+重解析同一个 `aoxn.json`；后者每次落空的包拼法都要
+    `getenv` + `is_dir` 探测。`doctor` 要**活的**答案，走
+    `stdlib_dir_uncached`——它诊断的就是这个目录。
+  - **构建缓存的 key 由"边走边哈希"得到**（`dependency_digests`）。过去
+    `cache_key` 先 `dependency_files` 读一遍，再 `fs::read` 读第二遍做哈希，
+    然后 `load_program` 读第三遍。改这里**必须**配套 cache-key 的失效测试：
+    不动的树必须同一个 key，改入口 / 改被导入文件 / 改传递导入 / 改 CSS 资源
+    必须各自换 key。这是"这是提速而不是陈旧构建 bug"的**论证**，不是装饰。
+  - **导入性能从来不是瓶颈**：合成 10→1000 个模块、三种形状实测，编译时间从
+    11 个文件到 171 个文件是**平的**（进程启动主导，整次加载不到 1ms）。**先量
+    再改**——否则会去优化一个不存在的问题。
 - **`not` 的优先级改成 Python**（v0.52.0）——`src/parser.rs` 的
   `not_expr` 位于 `and_expr` 与 `bitor_expr` 之间，`unary_expr` **不再**接受
   `Tok::Bang`。`selfhost/parser.ax` 必须同步（`parse_not`）：两个阶段文法不一致

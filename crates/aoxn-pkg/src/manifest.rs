@@ -196,7 +196,7 @@ pub fn validate_name(name: &str) -> Result<(), PkgError> {
 impl Manifest {
     pub fn load(path: &Path) -> Result<Manifest, PkgError> {
         let text = std::fs::read_to_string(path)
-            .map_err(|e| PkgError::Manifest(format!("cannot read {}: {e}", path.display())))?;
+            .map_err(|e| PkgError::Manifest(format!("cannot read {}: {}", path.display(), crate::errors::io_reason(&e))))?;
         let m: Manifest = serde_json::from_str(&text).map_err(|e| {
             PkgError::Manifest(format!("invalid {}: {e}", path.display()))
         })?;
