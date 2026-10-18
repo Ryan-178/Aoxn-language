@@ -198,6 +198,40 @@ implicitly, conditions must be `bool`, array indexing is unchecked (C-style),
 and every function must return a value on all paths. Strictness is a feature:
 the guarantees are simple enough for a machine to reason about.
 
+### v0.52.0 on the surface — `not` is Python's now
+
+A semantic change to an existing operator, so a minor bump. `not` is looser
+than every comparison and every bitwise operator, and tighter than `and` —
+so `not a == b` means `not (a == b)`, where through v0.51.2 it meant
+`(!a) == b`.
+
+```Aoxn
+print(not n == 5)          # false   was: (!n) == 5, a type error
+print(not "o" in s)         # false
+print(not a == b and a)     # false   (not (a == b)) and a  <- the tell
+print(not (n & 1) == 0)     # true    `not` is looser than `&` too
+print(2 * not True)         # syntax error -- same as Python
+```
+
+Every value was diffed line for line against CPython 3
+(`examples/notprec_demo.ax` is the table). Two consequences follow, both
+matching Python: `not` is not a `factor`, so `a * not b` and `-not x` are
+now **syntax errors** (they used to parse as `a * (!b)`); and `not x in s`
+now reports the **`in`**, instead of complaining that `!` was handed a
+non-bool — which used to send the reader after the wrong operator.
+
+**Why this was safe to do at all.** The blast radius was measured, not
+assumed: `!` is never spelled as the prefix operator anywhere in this
+repository (158 uses, all `not`), and **zero** of them have a comparison
+directly behind `not` — the only shape whose meaning changes. The 63 in an
+`and`/`or` chain and the 42 applied to a call parse identically either way.
+And the check that matters: the emitted C for a program that does not use
+the changed shape is **byte-identical to v0.51.2**, verified on seven
+examples. The change is invisible from the backend until a program writes
+the shape it changes. `selfhost/parser.ax` mirrors the new level, because a
+grammar where the two stages disagree passes the fixed point for the wrong
+reason.
+
 ### v0.51.2 on the surface — Python syntax sugar, part 2
 
 Strings and containers get real indexing, slicing and membership. Every value
@@ -235,19 +269,12 @@ def main() -> int:
 - **`for c in s`** walks bytes. The length is read **once**, before the loop,
   so a body that appends to the string cannot extend the iteration.
 
-**Two deliberate deviations, both pinned by tests:**
+**One deliberate deviation, pinned by a test:**
 
 - **An out-of-range index yields `""`.** Indexing an array is unchecked C-style
   and stays that way, but there the caller owns the bytes; inside the
   compiler's own string helpers an unchecked read would be *our* out-of-bounds
   read of someone else's buffer.
-- **`not a in b` keeps C's precedence, not Python's.** Aoxn's `not` is the C
-  prefix `!`, which binds tighter than every comparison, so it parses as
-  `(not a) in b` — and `!` requires a bool, making the unparenthesised
-  spelling a **type error** rather than a silent wrong answer. Write
-  `not (a in b)`. Moving `not` to Python's level would silently change every
-  existing `not b == c`, which is a semantic change to a shipped operator
-  rather than new syntax sugar.
 
 Like part 1, none of this reaches a program that does not use it: the emitted
 C is byte-identical either way, so the self-host fixed point needs no
@@ -870,9 +897,31 @@ Full reference, including limits: [`docs/css-assets.md`](docs/css-assets.md).
 
 ## Status
 
+**v0.52.0** — **`not` is Python's now: it moved from C's precedence to
+Python's** — a semantic change to an existing operator, so a minor bump ·
+430 tests green (330 in the compiler workspace + 100 in `aoxn-pkg`; the IDE
+adds 36 Rust + 62 frontend tests of its own) ·
+
+`not a == b` is `not (a == b)`, where through v0.51.2 it was `(!a) == b`.
+`not` is looser than every comparison and every bitwise operator, tighter than
+`and`/`or`. Two consequences follow, both matching Python: `a * not b` is now a
+**syntax error** (`not` is not a `factor`), and `not x in s` now reports the
+**`in`** instead of complaining that `!` was handed a non-bool. Every value was
+diffed line for line against CPython 3.
+
+**The blast radius was measured, not assumed** — and the measurement is the
+part worth keeping. `!` is never spelled as the prefix operator anywhere in
+this repository (158 uses, all `not`), and **zero** of them have a comparison
+directly behind `not`. More usefully: for **bool** operands the two readings
+are identical in all four combinations, because `not (a == b)` and `(!a) == b`
+are both `a XOR b` — so a discriminating example *has* to use a non-bool
+operand, which is exactly where the old spelling did not even type-check. The
+check that matters is that the emitted C for a program not using the changed
+shape is **byte-identical to v0.51.2**, verified on seven examples.
+
 **v0.51.2** — **Python syntax sugar, part 2: strings and containers get real
-indexing, slicing and membership** —
-427 tests green (327 in the compiler workspace + 100 in `aoxn-pkg`; the IDE
+indexing, slicing and membership** ·
+430 tests green (330 in the compiler workspace + 100 in `aoxn-pkg`; the IDE
 adds 36 Rust + 62 frontend tests of its own) ·
 
 `s[i]` yields a **one-byte string**, `s[a:b]` slices with open and negative
@@ -880,14 +929,10 @@ bounds (both clamped), `x in c` / `x not in c` answers **substring**, **element*
 or **key** depending on the right operand, and `for c in s` walks bytes. Every
 runtime value matches CPython 3.
 
-**Two deviations, both deliberate and both pinned by a test.** An
-out-of-range index yields `""` instead of reading past the terminator —
-unchecked C-style indexing is right where the caller owns the bytes, and wrong
-inside the compiler's own helpers, which would be reading *someone else's*
-buffer. And `not a in b` keeps C's precedence, so the unparenthesised spelling
-is a **type error** rather than a silent wrong answer: moving `not` to Python's
-level would silently change every existing `not b == c`, which is a semantic
-change to a shipped operator, not new syntax.
+**One deliberate deviation, pinned by a test.** An out-of-range index yields
+`""` instead of reading past the terminator — unchecked C-style indexing is
+right where the caller owns the bytes, and wrong inside the compiler's own
+helpers, which would be reading *someone else's* buffer.
 
 **Nothing here reaches a program that does not use it.** The emitted C is
 byte-identical either way — checked against `main` on four existing examples —
@@ -1438,6 +1483,34 @@ def main() -> int:
 锛堣皟璇曚俊鎭€乣-fsanitize=undefined`锛夆€斺€擟 缂栬瘧澶辫触鐜板湪鏄?`cc` 闃舵锛?
 涓嶅啀鏄?`internal`銆?
 
+### v0.52.0 在语言面上加了什���——`not` 的优先级改成 Python
+
+对一个**已发布运算符**的语义变更，所以是 minor 升级。`not` 现在比每个比较和
+位运算都松、比 `and` 紧——于是 `not a == b` 是 `not (a == b)`，而到
+v0.51.2 为止它读作 `(!a) == b`。
+
+```Aoxn
+print(not n == 5)          # false   以前：(!n) == 5，类型错误
+print(not "o" in s)         # false
+print(not a == b and a)     # false   (not (a == b)) and a  <- 关键的一行
+print(not (n & 1) == 0)     # true    `not` 比 `&` 也松
+print(2 * not True)         # 语法错误——和 Python 一样
+```
+
+每个值都和 CPython 3 **逐行**比对过（`examples/notprec_demo.ax` 就是那张表）。
+两个随之而来的结果，都与 Python 一致：`not` 不是 `factor`，所以 `a * not b` 和
+`-not x` 现在是**语法错误**（以前能解析，读作 `a * (!b)`）；`not x in s` 里的
+类型错误现在**指名 `in`**，而不是抱怨 `!` 拿到了非 bool——后者会把读者引到
+错误的运算符上。
+
+**为什么动它是安全的。** 爆炸半径是**量出来的，不是假设的**：`!` 在本仓库里
+从不作为前缀操作符出现（158 处全部拼作 `not`），而且**零处**的 `not` 后面紧跟
+比较——那是唯一一个含义会变的形态。位于 `and`/`or` 链中的 63 处、作用于调用的
+42 处，在两种优先级下解析完全相同。而真正要紧的检查是：不用该形态的程序，
+**生成的 C 与 v0.51.2 逐字节相同**（七个示例验证过）。也就是说这个改动在后端
+是**不可见**的，直到有程序真写出那个形态。`selfhost/parser.ax` 同步了这一层，
+因为两个阶段文法不一致的编译器会因为错误的原因通过不动点测试。
+
 ### v0.51.2 在语言面上加了什���——Python 语法糖第二批
 
 字符串和容器终于有了真正的索引、切片和成员判断。下面每个值都是
@@ -1837,23 +1910,31 @@ print(asset_path(styles_fingerprint()))   # 鈥assets\82b4fb25鈥?css
 
 ## 现状
 
+**v0.52.0** · **`not` 的优先级改成 Python：从 C 的层级搬到 Python 的层级**——对一个
+已发布运算符的语义变更，所以是 minor 升级 ·
+430 测试全绿（编译器工作区 330 + `aoxn-pkg` 100；IDE 另有 36 个 Rust + 62 个前端测试）·
+
+`not a == b` 现在是 `not (a == b)`，而到 v0.51.2 为止是 `(!a) == b`。`not` 比每个
+比较和位运算都松、比 `and`/`or` 紧。两个随之而来的结果都与 Python 一致：`a * not b`
+现在是**语法错误**（`not` 不是 `factor`）；`not x in s` 里的类型错误现在**指名
+`in`**，而不是抱怨 `!` 拿到了非 bool。每个值都和 CPython 3 逐行比对过。
+
+**爆炸半径是量出来的，不是假设的**——而"量"这个动作本身才是值得留下的部分。`!`
+在本仓库里从不作为前缀操作符出现（158 处全部拼作 `not`），而且**零处**后面紧跟
+比较。更有意思的是：对 **bool** 操作数而言两种读法在四种组合下**完全相同**，因为
+`not (a == b)` 和 `(!a) == b` 都是 `a XOR b`——所以能判别的例子**必须**用非 bool
+操作数，而那恰恰是旧写法连类型检查都过不去的地方。真正要紧的检查是：不用该形态的
+程序，生成的 C 与 v0.51.2 **逐字节相同**（七个示例验证过）。
+
 **v0.51.2** · **Python 语法糖第二批：字符串和容器有了真正的索引、切片和成员判断** ·
-427 测试全绿（编译器工作区 327 + `aoxn-pkg` 100；IDE 另有 36 个 Rust + 62 个前端测试）·
+430 测试全绿（编译器工作区 330 + `aoxn-pkg` 100；IDE 另有 36 个 Rust + 62 个前端测试）·
 
 `s[i]` 是**一个字节**的字符串，`s[a:b]` 支持留空和负数边界（两端都会夹住），
 `x in c` / `x not in c` 按**右边**的容器类型分别回答**子串**、**元素**或**键**，
 `for c in s` 走字节。每个运行时的值都与 CPython 3 一致。
 
-**两处有意为之的偏差，都有测试钉住。** 越界索引返回 `""` 而不是读过终止符——
-字节归调用方时无检查的 C 风格是对的，在编译器自己的 helper 里则是**我们**去读
-别人的缓冲区。`not a in b` 保持 C 的优先级，所以不加括号的写法是**类型错误**
-而不是悄悄的错答案：把 `not` 提到 Python 的层级会**静默改变**每一个已有的
-`not b == c`，那是对已发布运算符的语义变更，不是新增语法。
-
-**用不到的���式完全不影响不用它的程序。** 生成的 C 逐字节相同（已在四个现有示例上
-与 `main` 对比验证），所以自举不动点不需要 `selfhost/` 镜像，和 v0.51.0 的
-语法糖同等待遇。`in` 的辅助函数按**排序**而非哈希顺序建表，并且有一个测试让编译器
-在五个独立进程里对同一份源码跑五遍——因为在同一个进程里分配器恰好会掩盖这类 bug。
+**一处有意为之的偏差，有测试钉住。** 越界索引返回 `""` 而不是读过终止符——字节归
+调用方时无检查的 C 风格是对的，在编译器自己的 helper 里则是**我们**去读别人的缓冲区。
 
 **v0.51.1** · 审计提出的 `crates/aoxn-pkg` 四条与 IDE 三条全部关闭，见
 [SECURITY.md](SECURITY.md) ·

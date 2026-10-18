@@ -5,6 +5,67 @@ minor bumps while pre-1.0: each minor version is a language milestone.
 
 ## [Unreleased]
 
+## [0.52.0] - 2026-10-18
+
+`not` now has **Python's precedence**. This is a semantic change to an existing
+operator, which is why it is a minor bump and not a patch.
+
+### Changed
+
+- **`not` moved from C's precedence to Python's** — looser than every
+  comparison, tighter than `and` and `or`. So `not a == b` is now
+  `not (a == b)`, where before it was `(!a) == b`. `!` is the same token and
+  moves with it, as it always has (the two are documented synonyms).
+
+  ```Aoxn
+  not n == 5            # was: (!n) == 5 -> a type error. now: not (5 == 5) -> false
+  not "o" in s          # now: not ("o" in "Aoxn")
+  not a == b and a      # now: (not (a == b)) and a  -- the discriminating line
+  not (n & 1) == 0      # `not` is looser than `|`/`^`/`&` too
+  ```
+
+  Every value matches CPython 3; `examples/notprec_demo.ax` is a parity table
+  that was diffed against `python` line for line.
+
+- **`a * not b` is now a syntax error.** Python does not treat `not` as a
+  `factor` either, so this is the grammar catching up rather than a capability
+  being removed. `-not x` likewise.
+
+- **`not x in s` now reports the `in`.** It used to blame `!` for not receiving
+  a bool ("'!' requires bool, found string"), which sends the reader after the
+  wrong operator.
+
+- **`selfhost/parser.ax` mirrors the new level** (`parse_not`, between
+  `parse_and` and `parse_bitor`). Stage-2 had to move with stage-1: a grammar
+  where the two disagree is a fixed point that passes for the wrong reason.
+- **The TypeScript front end is deliberately NOT changed.** `src/ts/parser.rs`
+  has its own grammar, and in TypeScript `!a === b` means `(!a) === b` because
+  that is what every TypeScript program in existence means by it. Matching
+  Python here would break TypeScript source, which is the wrong trade.
+
+### Why this was safe to do at all
+
+The blast radius was **measured before the change, not assumed**:
+
+- `!` is never spelled as the prefix operator anywhere in this repository
+  (158 uses, all spelled `not`).
+- **Zero** of those uses have a comparison directly behind `not`, which is the
+  only shape whose meaning changes. `not a == b` requires `a` to be a bool
+  (since `!` demands one), and no such program exists here.
+- The 63 uses that sit in an `and`/`or` chain and the 42 applied to a call
+  parse identically under both precedences. `tests/pipeline.rs::
+  the_shapes_this_repo_actually_uses_are_unaffected` pins those two shapes.
+
+And the check that actually matters: **the emitted C for every program that
+does not use the changed shape is byte-identical to v0.51.2** — verified on
+seven examples, including `stdlib_demo.ax` and `ui_demo.ax`. The change is
+invisible from the C until a program writes the shape it changes.
+
+A programming-language compiler reports an operator's precedence as part of
+its contract, so this is a minor bump. Code that relied on the C reading
+should parenthesise; there is none in this repository, but a program outside
+it may need to.
+
 ## [0.51.2] - 2026-10-18
 
 Python syntax sugar, batch 2: strings and containers get real indexing,

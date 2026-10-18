@@ -884,19 +884,45 @@ impl Parser {
     }
 
     fn and_expr(&mut self) -> Result<Expr, Diag> {
-        let mut lhs = self.bitor_expr()?;
+        let mut lhs = self.not_expr()?;
         while *self.peek() == Tok::AndAnd {
             let pos = self.pos();
             self.bump();
-            let rhs = self.bitor_expr()?;
+            let rhs = self.not_expr()?;
             lhs = Expr::Binary { op: BinOp::And, lhs: Box::new(lhs), rhs: Box::new(rhs), pos };
         }
         Ok(lhs)
     }
 
+    /// Python's `not`, at PYTHON's precedence (v0.52.0): looser than every
+    /// comparison, tighter than `and`. `not a == b` is `not (a == b)`, not
+    /// `(!a) == b`.
+    ///
+    /// This used to live in `unary_expr`, which is C's placement and bound a
+    /// thousand times tighter. The blast radius of moving it was measured
+    /// before the move, not assumed: `!` is never spelled as the prefix
+    /// operator anywhere in this repo, and of 158 operator-`not` uses none has
+    /// a comparison directly behind it. What DOES change is that
+    /// `a * not b` becomes a syntax error -- and it already was one in Python,
+    /// where `not` is not a `factor`, so this is the grammar catching up
+    /// rather than a capability being removed.
+    fn not_expr(&mut self) -> Result<Expr, Diag> {
+        if *self.peek() != Tok::Bang {
+            // `|`, `^` and `&` sit UNDER `not` in Python too: `not a | b` is
+            // `not (a | b)`. Pointing this at `eq_expr` instead would skip
+            // those three levels entirely and silently stop parsing them.
+            return self.bitor_expr();
+        }
+        let pos = self.pos();
+        self.bump();
+        let e = self.not_expr()?;
+        Ok(Expr::Unary { op: UnOp::Not, expr: Box::new(e), pos })
+    }
+
     // Bitwise operators bind looser than the comparisons and tighter than
-    // `&&`/`||`, matching C: the chain below is `||` -> `&&` -> `|` -> `^`
-    // -> `&` -> `==`/`!=` -> relational -> `<<`/`>>` -> `+`/`-` -> `*`//`/`.
+    // `&&`/`||`, matching C: the chain below is `||` -> `&&` -> `not` -> `|`
+    // -> `^` -> `&` -> `==`/`!=` -> relational -> `<<`/`>>` -> `+`/`-` ->
+    // `*`//`/`.
     fn bitor_expr(&mut self) -> Result<Expr, Diag> {
         let mut lhs = self.bitxor_expr()?;
         while *self.peek() == Tok::Pipe {
@@ -1104,11 +1130,10 @@ impl Parser {
                 let e = self.unary_expr()?;
                 Ok(Expr::Unary { op: UnOp::Neg, expr: Box::new(e), pos })
             }
-            Tok::Bang => {
-                self.bump();
-                let e = self.unary_expr()?;
-                Ok(Expr::Unary { op: UnOp::Not, expr: Box::new(e), pos })
-            }
+            // `not` is NOT here (v0.52.0): it is at Python's precedence, in
+            // `not_expr` between `and` and the comparisons. Python does not
+            // treat `not` as a `factor` either, so `-not x` and `a * not b`
+            // are syntax errors in both.
             Tok::Tilde => {
                 self.bump();
                 let e = self.unary_expr()?;

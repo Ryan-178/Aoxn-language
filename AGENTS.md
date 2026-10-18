@@ -486,6 +486,16 @@ crates/aoxn-pkg       package manager crate (its own dependency set; see above)
   - Like part 1, nothing here reaches a program that does not use it, so the
     self-host fixed point needs **no `selfhost/` mirror** (same status as the
     v0.40.0 features).
+
+- **`not` 的优先级改成 Python**（v0.52.0）——`src/parser.rs` 的
+  `not_expr` 位于 `and_expr` 与 `bitor_expr` 之间，`unary_expr` **不再**接受
+  `Tok::Bang`。`selfhost/parser.ax` 必须同步（`parse_not`）：两个阶段文法不一致
+  会让不动点因为错误的原因通过。改这条之前量过爆炸半径——`!` 在本仓库从不作
+  前缀操作符，158 处 `not` 里零处后面紧跟比较，而不用该形态的程序生成的 C 与
+  v0.51.2 逐字节相同。教训：**移动一个优先级运算符时，爆炸半径是量出来的，
+  不是假设的**；而编译器会用"函数未使用"这类警告抓住指错层级（我第一次把
+  `not_expr` 指向 `eq_expr`，会整层丢掉 `|`/`^`/`&`）。
+
 - Python-style surface, native semantics: `def`/`elif`/`pass`, `x = 5`
   infers, `x: int = 5` checks, re-assignment keeps the type, `and`/`or`/`not`
   + `True`/`False` are aliases of the symbolic operators.

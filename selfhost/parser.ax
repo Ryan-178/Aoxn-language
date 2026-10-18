@@ -1014,13 +1014,13 @@ def parse_or(p: PState) -> PState:
     return p
 
 def parse_and(p: PState) -> PState:
-    p = parse_bitor(p)
+    p = parse_not(p)
     if p.err == 1:
         return p
     lhs = p.res_node
     while pk(p) == TK_ANDAND() and p.err == 0:
         p = pbump(p)
-        p = parse_bitor(p)
+        p = parse_not(p)
         if p.err == 1:
             return p
         rhs = p.res_node
@@ -1031,6 +1031,23 @@ def parse_and(p: PState) -> PState:
 
 # v0.37.0 位运算符优先级：`||` -> `&&` -> `|` -> `^` -> `&` -> `==`
 # -> 比较 -> `<<`/`>>` -> `+`/`-` -> `*`//`/`（与 C 一致）
+
+# v0.52.0 `not` 的优先级改成 Python：比所有比较松、比 `and` 紧。
+# `not a == b` 现在是 `not (a == b)`，不再是 `(!a) == b`。
+def parse_not(p: PState) -> PState:
+    if pk(p) != TK_BANG():
+        return parse_bitor(p)
+    p = pbump(p)
+    p = parse_not(p)
+    if p.err == 1:
+        return p
+    e = p.res_node
+    p = new_node(p, N_UNARY(), "", OP_NOT())
+    n = p.res_node
+    p = set_child(p, n, e)
+    p.res_node = n
+    return p
+
 def parse_bitor(p: PState) -> PState:
     p = parse_bitxor(p)
     if p.err == 1:
@@ -1238,17 +1255,6 @@ def parse_unary(p: PState) -> PState:
             return p
         e = p.res_node
         p = new_node(p, N_UNARY(), "", OP_NEG())
-        n = p.res_node
-        p = set_child(p, n, e)
-        p.res_node = n
-        return p
-    if k == TK_BANG():
-        p = pbump(p)
-        p = parse_unary(p)
-        if p.err == 1:
-            return p
-        e = p.res_node
-        p = new_node(p, N_UNARY(), "", OP_NOT())
         n = p.res_node
         p = set_child(p, n, e)
         p.res_node = n

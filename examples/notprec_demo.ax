@@ -1,0 +1,45 @@
+# v0.52.0: `not` at Python's precedence.
+# Every `print` below is annotated with what CPython 3 prints for the same
+# expression, so this file doubles as a readable parity table.
+def main() -> int:
+    a: bool = True
+    b: bool = False
+    n: int = 5
+    s: string = "Aoxn"
+
+    # 1. the headline: `not` is looser than a comparison
+    print(not n == 5)            # False   (Python: not (5 == 5))
+    print(not n == 6)            # True    (Python: not (5 == 6))
+    print(not n > 10)            # True
+    print(not "5" in s)          # True    (Python: not ('5' in 'Aoxn'))
+    print(not "o" in s)          # False
+
+    # 2. `not` is TIGHTER than `and` / `or`
+    print(not b and a)           # True    ((not False) and True)
+    print(not a and b)           # False
+    print(not b or a)            # True
+    print(not a or b)            # False
+    # the pairing that distinguishes the two levels from `and`/`or`:
+    print(not a == b and a)      # True    (not (a == b)) and a
+    # NOTE: with BOOL operands this line reads the SAME under both
+    # precedences — `not (a==b)` and `(!a)==b` are both `a XOR b`. The lines
+    # above it, the ones with an int or a string operand, are the ones that
+    # actually discriminate: under C they did not even type-check.
+
+    # 3. it applies to a whole comparison chain
+    print(not (1 < 2 < 3 < 4))  # False   not ((1<2) and (2<3) and (3<4))
+
+    # 4. bitwise sits UNDER `not` too
+    print(not (n & 1) == 0)      # True    not ((n & 1) == 0)
+
+    # 5. double negation and the C spelling
+    print(not not a)             # True
+    print(not b)                 # True
+
+    # 6. a bare operand still works everywhere `not` did
+    if not b:
+        print("bare")           # bare
+    while not a:
+        print("never")
+    print("done")
+    return 0

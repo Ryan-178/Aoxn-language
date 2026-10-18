@@ -391,8 +391,12 @@ arguments are read with `argc()` / `arg(i)`, not from a `main` parameter 闁?
 
 ```ebbnf
 expr  := or_expr ["if" or_expr "else" expr]      # conditional expression
-or    := and ("or"  | "||") and)*
-and   := bitor ("and" | "&&") bitor)*
+or    := and (("or" | "||") and)*
+and   := not_expr (("and" | "&&") not_expr)*
+# `not` sits HERE (Python, v0.52.0): looser than every comparison and every
+# bitwise operator, tighter than `and`/`or`. It is NOT a C prefix operator.
+# `!` is the same token, so the two spellings always agree.
+not_expr := "not" not_expr | bitand
 bitor := bitxor ("|" bitxor)*
 bitxor:= bitand ("^" bitand)*
 bitand:= eq ("&" eq)*
@@ -402,7 +406,7 @@ shift := add (("<<" | ">>") add)*
 add   := mul (("+" | "-") mul)*
 mul   := power (("*" | "/" | "//" | "%") power)*
 power := unary ("**" power)?                     # right-associative (v0.51.0)
-unary := ("not" | "!" | "~" | "-" | "+") unary | primary
+unary := ("~" | "-" | "+") unary | primary       # NO `not` here (v0.52.0)
 primary := INT | FLOAT | STRING | True | False | FSTRING
          | IDENT ("(" args ")")? | "(" expr ")"
          | "[" expr ("," expr)* "]" | "[" "]"      # array literal / index
@@ -455,6 +459,25 @@ field is unchecked, C-style, and stays that way — but there the caller owns
 the bytes. Inside the compiler's own string helpers an unchecked read would be
 *our* out-of-bounds read of someone else's buffer, so an index past the end
 answers `""` instead of raising `IndexError` or walking off the allocation.
+
+**`not` is Python's, not C's (v0.52.0).** It is looser than every comparison
+and every bitwise operator, and tighter than `and`/`or`, so `not a == b` means
+`not (a == b)`. This is a **change**: through v0.51.2 `not` was the C prefix
+`!` and bound a thousand times tighter. `!` is the same token and moves with
+it, so the two spellings never disagree.
+
+Two consequences follow from the placement, both matching Python:
+
+- `not` is not a `factor`, so `a * not b` and `-not x` are **syntax errors**.
+  They used to parse as `a * (!b)`.
+- `not x in s` is now `not (x in s)`, so a type error in that position
+  **names the `in`** instead of complaining that `!` was handed a non-bool —
+  which used to send the reader after the wrong operator.
+
+Every value in `examples/notprec_demo.ax` was diffed line for line against
+CPython 3. The emitted C for a program that does not use the changed shape is
+byte-identical to v0.51.2, which is what makes the change invisible from the
+backend.
 
 **Integer literals (v0.42.0)** are decimal, hexadecimal (`0x`/`0X`) or binary(`0b`/`0B`). A malformed literal names the offending digit (`invalid digit 'Z'
 in hexadecimal literal`) instead of lexing `0` plus an identifier, and an

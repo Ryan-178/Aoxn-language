@@ -4464,34 +4464,107 @@ fn batch_two_syntax_is_absent_from_a_plain_programs_c() {
         assert!(!c.contains(helper), "{helper} leaked into a program that does not use it:\n{c}");
     }
 }
-/// A KNOWN DEVIATION, pinned so that changing it is a decision rather than an
-/// accident. Python parses `not a in b` as `not (a in b)`; Aoxn's `not` is the
-/// C prefix `!`, which binds TIGHTER than every comparison, so it parses as
-/// `(not a) in b` -- and `!` demands a bool, so the unparenthesised spelling is
-/// a type error rather than a silent wrong answer.
+
+/// v0.52.0: `not` moved from C's precedence (a prefix operator, tighter than
+/// everything) to PYTHON's (looser than every comparison, tighter than `and`).
 ///
-/// Moving `not` up to Python's level would change the meaning of every
-/// existing program that writes `not b == c` (today: `(!b) == c`), which is a
-/// semantic change to a shipped operator and not new syntax sugar, so it wants
-/// its own version. `not (a in b)` is the spelling that works today.
+/// The table below is a PARITY table, not a regression list: every value is
+/// what CPython 3 prints for the same expression, diffed line for line.
+///
+/// **Which line actually discriminates.** The first version of this test
+/// claimed `not a == b and a` was the tell. It is not, and that is worth
+/// recording: for BOOL operands the two readings are IDENTICAL in all four
+/// combinations, because `not (a == b)` and `(!a) == b` are both `a XOR b`. A
+/// discriminating line has to use a **non-bool** operand, where the old
+/// precedence could not even type-check it (`!` demands a bool, so `not n == 5`
+/// used to be "'!' requires bool, found int") and the new one evaluates it.
 #[test]
-fn not_binds_like_c_not_like_python_and_that_is_pinned() {
-    let err = expect_compile_error(
-        r#"
-        def main() -> int:
-            print(not "zz" in "abc")
-            return 0
-        "#,
-    );
-    assert!(err.contains("requires bool"), "{err}");
-    // the parenthesised spelling is the supported one, and it is not `not ("")`
+fn not_binds_like_python_not_like_c() {
     let out = build_and_run(
         r#"
         def main() -> int:
-            print(not ("zz" in "abc"))
-            print(not (1 in [1, 2]))
+            a = True
+            b = False
+            n = 5
+            s = "Aoxn"
+            print(not n == 5)          # False  <- discriminates: was a type error
+            print(not n == 6)          # True   <- discriminates
+            print(not "o" in s)         # False  <- discriminates
+            print(not (n & 1) == 0)     # True   <- `not` looser than `&`
+            print(not a == b and a)     # True   (equal under both readings)
+            print(not b and a)          # True   (not is tighter than and)
+            print(not a and b)          # False
+            print(not b or a)           # True
+            print(not (1 < 2 < 3 < 4))  # False
+            print(not not a)            # True
+            print(not b)                # True
             return 0
         "#,
     );
-    assert_eq!(out, "true\nfalse\n");
+    assert_eq!(
+        out,
+        "false\ntrue\nfalse\ntrue\ntrue\ntrue\nfalse\ntrue\nfalse\ntrue\ntrue\n"
+    );
+}
+/// `not` is not a `factor` in Python either, so `a * not b` is a syntax error
+/// in both -- and it USED to parse in Aoxn, as `a * (!b)`. The pin is that it
+/// now REFUSES instead of quietly meaning the C thing.
+#[test]
+fn not_is_not_an_operand_of_arithmetic_in_either_language() {
+    let msg = expect_compile_error(
+        r#"
+        def main() -> int:
+            print(2 * not True)
+            return 0
+        "#,
+    );
+    assert!(msg.contains("unexpected") || msg.contains("expected"), "{msg}");
+}
+
+/// The diagnostic changed with the parse, and that is the point: `not x in s`
+/// used to blame `!` for not getting a bool ("'!' requires bool, found
+/// string"), which sends the reader after the wrong operator. It is now
+/// `not (x in s)`, so the `in` is what gets reported.
+#[test]
+fn not_in_now_reports_the_in_rather_than_the_not() {
+    let err = expect_compile_error(
+        r#"
+        def main() -> int:
+            n = 5
+            print(not n in "Aoxn")
+            return 0
+        "#,
+    );
+    assert!(err.contains("'in' cannot test"), "{err}");
+    assert!(!err.contains("'!' requires"), "{err}");
+}
+
+/// The `not` in this repo's own programs sits in exactly two shapes -- a bare
+/// operand, and an operand inside an `and`/`or` chain -- and BOTH parse
+/// identically under C's precedence and Python's. That is why moving `not` is
+/// safe for the self-host sources, and this pins the shapes so a future
+/// refactor that introduces a third one has to look at this first.
+#[test]
+fn the_shapes_this_repo_actually_uses_are_unaffected() {
+    let out = build_and_run(
+        r#"
+        def flag(b: bool) -> int:
+            if not b:
+                return 1
+            return 0
+
+        def both(a: bool, b: bool) -> int:
+            if not a and b:
+                return 1
+            if a and not b:
+                return 2
+            return 0
+
+        def main() -> int:
+            print(flag(False), flag(True))
+            print(both(False, True), both(True, False), both(True, True))
+            return 0
+        "#,
+    );
+    assert_eq!(out, "1 0\n1 2 0\n");
 }
