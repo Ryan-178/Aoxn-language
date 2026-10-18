@@ -198,6 +198,61 @@ implicitly, conditions must be `bool`, array indexing is unchecked (C-style),
 and every function must return a value on all paths. Strictness is a feature:
 the guarantees are simple enough for a machine to reason about.
 
+### v0.51.2 on the surface — Python syntax sugar, part 2
+
+Strings and containers get real indexing, slicing and membership. Every value
+below is what CPython 3 prints for the same expression.
+
+```Aoxn
+def main() -> int:
+    s = "Aoxn"
+
+    print(s[0], s[-1])              # A n      one byte, negative counts back
+    print(s[1:3], s[:2], s[2:], s[:])   # ox Ao xn Aoxn
+    print(s[-2:], s[:-1], s[3:1])       # xn Aox  (empty)
+    print(s[99])                    # empty  -- clamped, never reads past the end
+
+    print("ox" in "Aoxn", "zz" in "Aoxn")     # true false   (substring)
+    print(1 in [3, 1, 4], 9 in [3, 1, 4])      # true false   (element)
+    print("a" in {"a": 1}, "b" in {"a": 1})   # true false   (key)
+
+    for byte in "abc":
+        print(byte)                 # a b c  -- strings are BYTE sequences
+    return 0
+```
+
+- **`s[i]`** yields a **one-byte string**. There is no `char` type and none is
+  coming: `len(s)` has always been `strlen`, so `len("中")` is 3 and a
+  character type would contradict that contract.
+- **`s[a:b]`** — either end may be open, negative bounds count from the end,
+  and both are clamped (`s[1:999]` is the rest of the string). **Arrays are not
+  sliceable**: an Aoxn array is `[T; N]` with the length in its type, and it
+  already copies on assignment, so `b = a` is its slice.
+- **`x in c` / `x not in c`** — the RIGHT operand is the container and picks
+  the question: substring, element, or key. The left must be comparable, so a
+  struct or array (which has no `==`) is a type error rather than a wrong
+  answer.
+- **`for c in s`** walks bytes. The length is read **once**, before the loop,
+  so a body that appends to the string cannot extend the iteration.
+
+**Two deliberate deviations, both pinned by tests:**
+
+- **An out-of-range index yields `""`.** Indexing an array is unchecked C-style
+  and stays that way, but there the caller owns the bytes; inside the
+  compiler's own string helpers an unchecked read would be *our* out-of-bounds
+  read of someone else's buffer.
+- **`not a in b` keeps C's precedence, not Python's.** Aoxn's `not` is the C
+  prefix `!`, which binds tighter than every comparison, so it parses as
+  `(not a) in b` — and `!` requires a bool, making the unparenthesised
+  spelling a **type error** rather than a silent wrong answer. Write
+  `not (a in b)`. Moving `not` to Python's level would silently change every
+  existing `not b == c`, which is a semantic change to a shipped operator
+  rather than new syntax sugar.
+
+Like part 1, none of this reaches a program that does not use it: the emitted
+C is byte-identical either way, so the self-host fixed point needs no
+`selfhost/` mirror.
+
 ### v0.51.0 on the surface — Python syntax sugar, part 1
 
 ```Aoxn
@@ -812,11 +867,44 @@ print(asset_path(styles_fingerprint()))   # 鈥assets\82b4fb25鈥?css
 
 Full reference, including limits: [`docs/css-assets.md`](docs/css-assets.md).
 
+
 ## Status
 
-**v0.50.10** 路 **`aoxn c` was not reproducible: the array-replication helper was named after a heap address** 路
-386 tests green (293 in the compiler workspace + 94 in `aoxn-pkg`; the IDE
-adds 36 Rust + 62 frontend tests of its own) 路
+**v0.51.2** — **Python syntax sugar, part 2: strings and containers get real
+indexing, slicing and membership** —
+427 tests green (327 in the compiler workspace + 100 in `aoxn-pkg`; the IDE
+adds 36 Rust + 62 frontend tests of its own) ·
+
+`s[i]` yields a **one-byte string**, `s[a:b]` slices with open and negative
+bounds (both clamped), `x in c` / `x not in c` answers **substring**, **element**
+or **key** depending on the right operand, and `for c in s` walks bytes. Every
+runtime value matches CPython 3.
+
+**Two deviations, both deliberate and both pinned by a test.** An
+out-of-range index yields `""` instead of reading past the terminator —
+unchecked C-style indexing is right where the caller owns the bytes, and wrong
+inside the compiler's own helpers, which would be reading *someone else's*
+buffer. And `not a in b` keeps C's precedence, so the unparenthesised spelling
+is a **type error** rather than a silent wrong answer: moving `not` to Python's
+level would silently change every existing `not b == c`, which is a semantic
+change to a shipped operator, not new syntax.
+
+**Nothing here reaches a program that does not use it.** The emitted C is
+byte-identical either way — checked against `main` on four existing examples —
+so the self-host fixed point needs no `selfhost/` mirror, the same status
+v0.51.0's sugar has. The `in` helpers are keyed in **sorted** order rather
+than hash order, and a test runs the compiler five times in five separate
+processes over one source with three different array element types, because
+inside a single process the allocator hides exactly this class of bug.
+
+**v0.51.1** — the four `crates/aoxn-pkg` findings and the three IDE findings
+from the audit are closed; see [SECURITY.md](SECURITY.md) ·
+
+**v0.51.0** — Python syntax sugar part 1 (default parameter values,
+conditional expressions, `**`, multi-argument `print`) plus **six standard
+library security fixes** ·
+
+**v0.50.10** — **`aoxn c` was not reproducible: the array-replication helper was named after a heap address** ·
 
 **six runs, six different files.** `[X] * N` emitted its `static` fill helper
 under a C identifier built from the `Expr`'s heap address, so the address went
@@ -1350,6 +1438,55 @@ def main() -> int:
 锛堣皟璇曚俊鎭€乣-fsanitize=undefined`锛夆€斺€擟 缂栬瘧澶辫触鐜板湪鏄?`cc` 闃舵锛?
 涓嶅啀鏄?`internal`銆?
 
+### v0.51.2 在语言面上加了什���——Python 语法糖第二批
+
+字符串和容器终于有了真正的索引、切片和成员判断。下面每个值都是
+CPython 3 对同一表达式的输出。
+
+```Aoxn
+def main() -> int:
+    s = "Aoxn"
+
+    print(s[0], s[-1])                   # A n     一个字节，负数从末尾数
+    print(s[1:3], s[:2], s[2:], s[:])    # ox Ao xn Aoxn
+    print(s[-2:], s[:-1], s[3:1])        # xn Aox  （空）
+    print(s[99])                         # 空——夹住了，绝不读过界
+
+    print("ox" in "Aoxn", "zz" in "Aoxn")        # true false   （子串）
+    print(1 in [3, 1, 4], 9 in [3, 1, 4])         # true false   （元素）
+    print("a" in {"a": 1}, "b" in {"a": 1})      # true false   （键）
+
+    for byte in "abc":
+        print(byte)                      # a b c   —— 字符串是字节序列
+    return 0
+```
+
+- **`s[i]`** 是**一个字节**的字符串。**不会有 `char` 类型，也不打算有**：
+  `len(s)` 从一开始就是 `strlen`，`len("中")` 等于 3，字符类型会和这条既有
+  契约直接冲突。
+- **`s[a:b]`** 两端都可以留空，负数从末尾数，两端都会**夹住**
+  （`s[1:999]` 就是剩下的部分）。**数组不能切片**：Aoxn 数组是 `[T; N]`，
+  长度在类型里，切出来没有类型可写；而且它本来就值语义复制，`b = a`
+  就是它的切片。
+- **`x in c` / `x not in c`** ——**右边**是容器，由它决定问的是什么：子串、
+  元素、还是键。左边必须可比较，所以结构体和数组（没有 `==`）是类型错误，
+  而不是给一个错答案。
+- **`for c in s`** 走的是字节。长度在进循环**之前**只读一次，所以循环体里
+  往字符串追加内容不会把迭代拉长。
+
+**两处有意为之的偏差，都有测试钉住：**
+
+- **越界返回 `""`。** 数组索引仍然是无检查的 C 风格——那里字节是调用方的；
+  但在编译器自己的字符串 helper 里越界读，就是**我们**去读别人的缓冲区。
+- **`not a in b` 按 C 的优先级，不是 Python 的。** Aoxn 的 `not` 就是 C 的
+  前缀 `!`，比所有比较运算符结合更紧，所以读作 `(not a) in b`；而 `!` 只
+  接受 `bool`，于是不加括号的写法是**类型错误**，而不是一个悄悄的错答案。
+  正确写法是 `not (a in b)`。把 `not` 提到 Python 的层级会**静默改变**每一个
+  已有的 `not b == c`（今天读作 `(!b) == c`），那是对已发布运算符的语义变更，
+  不是新增语法糖。
+
+和第一批一样，用不到的程序**完全不受影响**：生成的 C 逐字节相同，所以自举
+不动点不需要 `selfhost/` 镜像。
 ## 鏍囧噯搴撲笌 UI 宸ュ叿绠?
 
 `stdlib/stdlib.ax` 鐢?Aoxn 鑷繁鍐欐垚锛氭硾鍨?`sort` / `binary_search` / 鑱氬悎銆?
@@ -1698,10 +1835,33 @@ print(asset_path(styles_fingerprint()))   # 鈥assets\82b4fb25鈥?css
 
 瀹屾暣璇存槑涓庨檺鍒惰 [`docs/css-assets.md`](docs/css-assets.md)銆?
 
-## 鐜扮姸
+## 现状
 
-**v0.50.10** 路 **`aoxn c` 涓嶅彲澶嶇幇锛氭暟缁勫鍒惰緟鍔╁嚱鏁版嬁鍫嗗湴鍧€褰撳悕瀛?* 路
-386 娴嬭瘯鍏ㄧ豢锛堢紪璇戝櫒宸ヤ綔鍖?293 + `aoxn-pkg` 94锛汭DE 鍙︽湁 36 涓?Rust + 62 涓墠绔祴璇曪級路
+**v0.51.2** · **Python 语法糖第二批：字符串和容器有了真正的索引、切片和成员判断** ·
+427 测试全绿（编译器工作区 327 + `aoxn-pkg` 100；IDE 另有 36 个 Rust + 62 个前端测试）·
+
+`s[i]` 是**一个字节**的字符串，`s[a:b]` 支持留空和负数边界（两端都会夹住），
+`x in c` / `x not in c` 按**右边**的容器类型分别回答**子串**、**元素**或**键**，
+`for c in s` 走字节。每个运行时的值都与 CPython 3 一致。
+
+**两处有意为之的偏差，都有测试钉住。** 越界索引返回 `""` 而不是读过终止符——
+字节归调用方时无检查的 C 风格是对的，在编译器自己的 helper 里则是**我们**去读
+别人的缓冲区。`not a in b` 保持 C 的优先级，所以不加括号的写法是**类型错误**
+而不是悄悄的错答案：把 `not` 提到 Python 的层级会**静默改变**每一个已有的
+`not b == c`，那是对已发布运算符的语义变更，不是新增语法。
+
+**用不到的���式完全不影响不用它的程序。** 生成的 C 逐字节相同（已在四个现有示例上
+与 `main` 对比验证），所以自举不动点不需要 `selfhost/` 镜像，和 v0.51.0 的
+语法糖同等待遇。`in` 的辅助函数按**排序**而非哈希顺序建表，并且有一个测试让编译器
+在五个独立进程里对同一份源码跑五遍——因为在同一个进程里分配器恰好会掩盖这类 bug。
+
+**v0.51.1** · 审计提出的 `crates/aoxn-pkg` 四条与 IDE 三条全部关闭，见
+[SECURITY.md](SECURITY.md) ·
+
+**v0.51.0** · Python 语法糖第一批（默认参数值、条件表达式、`**`、多参数 `print`）
+外加**标准库六条安全修复** ·
+
+**v0.50.10** · **`aoxn c` 不可复现：数组复制辅助函数拿堆地址当名字** ·
 
 **璺戝叚娆★紝鍑哄叚涓笉涓€鏍风殑鏂囦欢銆?* `[X] * N` 鐢熸垚鐨?`static` 濉厖杈呭姪鍑芥暟锛屽叾 C
 鏍囪瘑绗︽槸鐢?`Expr` 鐨?*鍫嗗湴鍧€**鎷肩殑锛屼簬鏄湴鍧€鐩存帴杩涗簡鐢熸垚鐨?C銆傝緟鍔╁嚱鏁拌〃涔熺敤杩欎釜

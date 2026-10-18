@@ -5,6 +5,63 @@ minor bumps while pre-1.0: each minor version is a language milestone.
 
 ## [Unreleased]
 
+## [0.51.2] - 2026-10-18
+
+Python syntax sugar, batch 2: strings and containers get real indexing,
+slicing and membership. Everything here is new syntax — a program that uses
+none of it emits **byte-identical C**, so the self-host fixed point stays green
+with **no `selfhost/` mirror** (the same status v0.51.0's sugar has). Every
+runtime value is what CPython 3 prints for the same expression.
+
+### Added
+
+- **`s[i]` — string indexing**, yielding a **one-byte** string. Negative
+  indices count from the end (`s[-1]`).
+- **`s[a:b]` — string slicing.** Either end may be open (`s[:3]`, `s[2:]`,
+  `s[:]`), negative bounds count from the end, and both are **clamped**
+  (`s[1:999]`, `s[3:1] == ""`).
+- **`x in c` / `x not in c` — membership**, at the comparison level next to
+  `==`. The right operand is the container and picks the question: a string is
+  searched for the **substring**, an array for the **element**, a dict for the
+  **key**.
+- **`for c in s`** — iterating a string yields its **bytes**, one one-byte
+  string each.
+
+### Four decisions inside this batch
+
+- **No `char` type, and none is coming.** `len(s)` has been `strlen` since
+  v0.0, so `len("中")` is 3; a `char` type would contradict that existing
+  contract. Indexing and slicing are therefore **byte-wise**, and `s[i]` on a
+  multi-byte UTF-8 character returns that character. Non-ASCII **per-character**
+  work still needs a manual `utf8_width` count — that is the same decision as
+  `len()`, not a new gap.
+- **An out-of-range index yields `""` instead of reading past the end.**
+  Aoxn indexing is unchecked C-style everywhere else and stays that way, but
+  there the caller owns the bytes; inside the compiler's own string helpers an
+  unchecked read would be *our* out-of-bounds read of someone else's buffer.
+  Pinned by `s[1000000]`, which is an unmapped page without the guard.
+- **Arrays are not sliceable**, and the diagnostic says why: an Aoxn array is
+  `[T; N]` with the length in its type, so a slice has no type to return —
+  and it already copies on assignment, so `b = a` *is* its slice.
+- **`not a in b` keeps C's precedence, not Python's.** Python reads it as
+  `not (a in b)`; Aoxn's `not` is the C prefix `!`, which binds tighter than
+  every comparison, so it reads as `(not a) in b` — and `!` requires a bool,
+  making the unparenthesised spelling a **type error** rather than a silent
+  wrong answer. Write `not (a in b)`. Moving `not` to Python's level would
+  silently change the meaning of every existing `not b == c`, which is a
+  semantic change to a shipped operator and not new syntax sugar.
+
+### Notes
+
+- `x in <array>` takes the array **by value**, which is the language's array
+  contract anyway (an array is a C struct, and passing one to a function
+  copies). The `in` helpers are keyed in sorted order, not hash order, because
+  the emitted C must be byte-identical across processes.
+- `for c in s` reads the string's length **once**, before the loop, so a body
+  that appends to the string cannot extend the iteration.
+- `s[i] = x` is a **type error**: a string is immutable and has no length
+  field to write through. Naming that here is what keeps it from surfacing as
+  an `internal` error from codegen.
 
 ### Fixed
 

@@ -4135,3 +4135,363 @@ fn new_syntax_is_absent_from_a_plain_programs_c() {
     // the single-argument print is spelled exactly as it always was
     assert!(c.contains("__builtin_printf(\"%s\\n\", "), "{c}");
 }
+// ---------------------------------------------------------------- v0.51.2
+// Python syntax sugar, batch 2: strings and containers get real indexing,
+// slicing and membership. Every value below is what CPython 3 prints for the
+// same expression -- the deviations (out-of-range yields "", bytes not
+// codepoints) are pinned separately and on purpose.
+
+#[test]
+fn string_indexing_is_byte_wise_and_shaped_like_python() {
+    let out = build_and_run(
+        r#"
+        def main() -> int:
+            s = "Aoxn"
+            print(s[0], s[1], s[3])
+            print(s[-1], s[-4])
+            return 0
+        "#,
+    );
+    assert_eq!(out, "A o n\nn A\n");
+}
+
+/// The one hard deviation, and it is a SAFETY choice: Aoxn indexing is
+/// unchecked C-style everywhere else (`a[i]` on an array reads off the end and
+/// that is documented), but there the caller already owns the bytes. Inside
+/// the compiler's own string helpers an unchecked read would be *our*
+/// out-of-bounds read of someone else's buffer, so an out-of-range index
+/// answers "" instead.
+///
+/// The pin is a FAR index, not a planted sentinel byte. Writing a marker past
+/// a `malloc`ed string was the first attempt and it is UB -- it passed when run
+/// alone and faulted under the parallel suite, which is the worst possible
+/// property for a test. Reading far past the end is the opposite: `s[1000000]`
+/// on a two-byte buffer is an unmapped page, so an implementation WITHOUT the
+/// guard faults deterministically and this program exits 0. The failure mode
+/// is a hard crash rather than a byte that might happen to be zero.
+#[test]
+fn out_of_range_index_yields_empty_and_reads_nothing() {
+    let out = build_and_run(
+        r#"
+        def main() -> int:
+            s = "ab"
+            print(s[2])          # exactly the terminator
+            print(s[3])
+            print(s[-3])         # one before the start
+            print(s[1000000])    # an unmapped page without a guard
+            print(s[1:1000000])  # same clamping for the slice helper
+            return 0
+        "#,
+    );
+    assert_eq!(out, "\n\n\n\nb\n");
+    // s[1:1000000] clamps to "b", exactly as Python does
+}
+#[test]
+fn open_slice_ends_are_not_a_zeroth_or_length_bound() {
+    let out = build_and_run(
+        r#"
+        def main() -> int:
+            s = "abcd"
+            print("[" + s[:] + "]")
+            print("[" + s[0:0] + "]")
+            print("[" + s[:] + "]", "[" + s[4:] + "]")
+            return 0
+        "#,
+    );
+    assert_eq!(out, "[abcd]\n[]\n[abcd] []\n");
+}
+
+#[test]
+fn membership_answers_element_substring_and_key() {
+    let out = build_and_run(
+        r#"
+        def main() -> int:
+            print("ox" in "Aoxn", "zz" in "Aoxn", "" in "Aoxn")
+            print("Aoxn" not in "Aoxn", "zz" not in "Aoxn")
+            xs: [int; 4] = [3, 1, 4, 1]
+            print(1 in xs, 9 in xs, 9 not in xs)
+            words: [string; 2] = ["ab", "cd"]
+            print("cd" in words, "zz" in words)
+            fs: [float; 2] = [0.5, 2.5]
+            print(2.5 in fs, 0.5 in fs)
+            d: dict[int] = {}
+            d["a"] = 1
+            print("a" in d, "b" in d, "b" not in d)
+            return 0
+        "#,
+    );
+    assert_eq!(
+        out,
+        "true false true\nfalse true\ntrue false true\ntrue false\ntrue true\ntrue false true\n"
+    );
+}
+
+/// `x in c` is a comparison-level operator, so it binds the way Python's does
+/// and is usable inside the boolean operators without parentheses.
+#[test]
+fn membership_binds_like_a_comparison() {
+    let out = build_and_run(
+        r#"
+        def main() -> int:
+            s = "hello"
+            print("ell" in s and "h" in s)
+            print(not ("zz" in s))
+            if 1 < 2 and "a" in "abc":
+                print("both")
+            if "q" in "abc" or "b" in "abc":
+                print("either")
+            return 0
+        "#,
+    );
+    assert_eq!(out, "true\ntrue\nboth\neither\n");
+}
+
+/// The container and the needle are each emitted exactly once: both are
+/// spliced through the counter, so a refactor that re-emitted either would
+/// count two.
+#[test]
+fn membership_evaluates_each_operand_once() {
+    let out = build_and_run(
+        r#"
+        def track(h: dict[int], s: string) -> string:
+            h["n"] = h["n"] + 1
+            return s
+
+        def main() -> int:
+            h: dict[int] = {}
+            h["n"] = 0
+            print("b" in track(h, "abc"))
+            print(h["n"])
+            return 0
+        "#,
+    );
+    assert_eq!(out, "true\n1\n");
+}
+
+#[test]
+fn for_over_a_string_iterates_bytes() {
+    let out = build_and_run(
+        r#"
+        def main() -> int:
+            for c in "abc":
+                print(c)
+            n = 0
+            for c in "":
+                n = n + 1
+            print(n)
+            return 0
+        "#,
+    );
+    assert_eq!(out, "a\nb\nc\n0\n");
+}
+
+/// The loop length is read ONCE, before it starts. Appending from the body
+/// would otherwise walk a string that keeps growing, which is how a
+/// `for c in s` never terminates.
+#[test]
+fn for_over_a_string_reads_its_length_once() {
+    let out = build_and_run(
+        r#"
+        def main() -> int:
+            s = "ab"
+            for c in s:
+                if len(s) < 8:
+                    s = s + c
+                print(c)
+            print(len(s))
+            return 0
+        "#,
+    );
+    assert_eq!(out, "a\nb\n4\n");
+}
+
+#[test]
+fn slicing_an_array_is_refused_with_the_reason() {
+    let msg = expect_compile_error(
+        r#"
+        def main() -> int:
+            xs: [int; 3] = [1, 2, 3]
+            ys: [int; 2] = xs[0:2]
+            return 0
+        "#,
+    );
+    assert!(msg.contains("only a string is sliceable"), "{msg}");
+    // the message has to say WHY, or the reader reaches for `to_vec`
+    assert!(msg.contains("copies on assignment"), "{msg}");
+}
+
+/// An array of structs has no `==`, so "is this element in the array" has no
+/// honest answer. Saying so beats emitting a C comparison of two structs.
+#[test]
+fn membership_refuses_an_element_type_with_no_equality() {
+    let msg = expect_compile_error(
+        r#"
+        struct P:
+            x: int
+
+        def main() -> int:
+            ps: [P; 2] = [P(x=1), P(x=2)]
+            q = P(x=1)
+            print(q in ps)
+            return 0
+        "#,
+    );
+    assert!(msg.contains("no equality"), "{msg}");
+}
+
+#[test]
+fn the_needle_must_match_the_containers_element_type() {
+    let msg = expect_compile_error(
+        r#"
+        def main() -> int:
+            xs: [int; 2] = [1, 2]
+            print("1" in xs)
+            return 0
+        "#,
+    );
+    assert!(msg.contains("an array for the element"), "{msg}");
+}
+
+#[test]
+fn string_indices_and_slice_bounds_must_be_int() {
+    let a = expect_compile_error(
+        r#"
+        def main() -> int:
+            s = "abc"
+            print(s["k"])
+            return 0
+        "#,
+    );
+    assert!(a.contains("string index must be int"), "{a}");
+    let b = expect_compile_error(
+        r#"
+        def main() -> int:
+            s = "abc"
+            print(s[0.0:1])
+            return 0
+        "#,
+    );
+    assert!(b.contains("slice bound must be int"), "{b}");
+}
+
+/// `not in` arrives in the token stream as Bang + In (the lexer maps the `not`
+/// keyword to the same token `not` the prefix operator uses), the identical
+/// two-token shape as `is not`. The regression this pins is a parser change
+/// that makes `not` swallow the `in` of a `for`.
+#[test]
+fn not_in_does_not_disturb_the_prefix_not_or_the_for_in() {
+    let out = build_and_run(
+        r#"
+        def main() -> int:
+            print(not ("zz" in "abc"))
+            for i in range(3):
+                print(i)
+            return 0
+        "#,
+    );
+    assert_eq!(out, "true\n0\n1\n2\n");
+}
+
+/// The C text must stay a pure function of the source ACROSS processes, so the
+/// `in` helpers -- which are collected per element type -- are keyed in sorted
+/// order. Two different element types in one program is the case that would
+/// expose a hash-ordered table; a single helper would hide it.
+#[test]
+fn membership_helpers_are_ordered_deterministically_across_processes() {
+    let base = std::env::temp_dir().join(format!("aoxn-in-det-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&base);
+    std::fs::create_dir_all(&base).unwrap();
+    let prog = base.join("prog.ax");
+    std::fs::write(
+        &prog,
+        "def main() -> int:\n    \
+         xs: [string; 2] = [\"a\", \"b\"]\n    \
+         fs: [float; 2] = [1.0, 2.0]\n    \
+         ns: [int; 2] = [1, 2]\n    \
+         print(\"b\" in xs)\n    print(2.0 in fs)\n    print(1 in ns)\n    return 0\n",
+    )
+    .unwrap();
+
+    let emit = || -> String {
+        let out = Command::new(env!("CARGO_BIN_EXE_aoxn"))
+            .arg("c")
+            .arg(&prog)
+            .output()
+            .expect("failed to run aoxn c");
+        assert!(out.status.success(), "aoxn c failed: {}", String::from_utf8_lossy(&out.stderr));
+        String::from_utf8(out.stdout).expect("C text is not UTF-8")
+    };
+
+    let first = emit();
+    for i in 0..4 {
+        assert_eq!(emit(), first, "run {} produced different C", i + 2);
+    }
+    let order: Vec<usize> = ["ax_in_f_2", "ax_in_i_2", "ax_in_s_2"]
+        .iter()
+        .map(|n| {
+            first
+                .find(n)
+                .unwrap_or_else(|| panic!("no {n} helper in the emitted C:\n{first}"))
+        })
+        .collect();
+    assert!(order[0] < order[1] && order[1] < order[2], "helpers are not in sorted order: {order:?}");
+    let _ = std::fs::remove_dir_all(&base);
+}
+
+/// Nothing in this batch may reach a program that does not use it -- that is
+/// what keeps the self-host fixed point green with no `selfhost/` mirror, the
+/// same status v0.51.0's syntax sugar has.
+#[test]
+fn batch_two_syntax_is_absent_from_a_plain_programs_c() {
+    let c = aoxn::compile_to_c(
+        &dedent(
+            r#"
+        def plain(a: int, b: int) -> int:
+            return a + b
+
+        def main() -> int:
+            x = plain(1, 2)
+            s = "abc"
+            if x > 2:
+                print(s)
+            return 0
+        "#,
+        ),
+        true,
+    )
+    .expect("plain program should compile");
+    for helper in ["ax_str_at", "ax_str_slice", "ax_str_in", "ax_in_", "AX_NOLO", "AX_NOHI"] {
+        assert!(!c.contains(helper), "{helper} leaked into a program that does not use it:\n{c}");
+    }
+}
+/// A KNOWN DEVIATION, pinned so that changing it is a decision rather than an
+/// accident. Python parses `not a in b` as `not (a in b)`; Aoxn's `not` is the
+/// C prefix `!`, which binds TIGHTER than every comparison, so it parses as
+/// `(not a) in b` -- and `!` demands a bool, so the unparenthesised spelling is
+/// a type error rather than a silent wrong answer.
+///
+/// Moving `not` up to Python's level would change the meaning of every
+/// existing program that writes `not b == c` (today: `(!b) == c`), which is a
+/// semantic change to a shipped operator and not new syntax sugar, so it wants
+/// its own version. `not (a in b)` is the spelling that works today.
+#[test]
+fn not_binds_like_c_not_like_python_and_that_is_pinned() {
+    let err = expect_compile_error(
+        r#"
+        def main() -> int:
+            print(not "zz" in "abc")
+            return 0
+        "#,
+    );
+    assert!(err.contains("requires bool"), "{err}");
+    // the parenthesised spelling is the supported one, and it is not `not ("")`
+    let out = build_and_run(
+        r#"
+        def main() -> int:
+            print(not ("zz" in "abc"))
+            print(not (1 in [1, 2]))
+            return 0
+        "#,
+    );
+    assert_eq!(out, "true\nfalse\n");
+}

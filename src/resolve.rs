@@ -675,6 +675,15 @@ impl<'a> Ctx<'a> {
                 self.expr(arr);
                 self.expr(idx);
             }
+            Expr::Slice { base, from, to, .. } => {
+                self.expr(base);
+                if let Some(f) = from {
+                    self.expr(f);
+                }
+                if let Some(t) = to {
+                    self.expr(t);
+                }
+            }
             Expr::IfExp { then_expr, cond, else_expr, .. } => {
                 self.expr(cond);
                 self.expr(then_expr);

@@ -168,6 +168,15 @@ fn scan_fn_body(f: &FnDecl) -> (bool, Vec<String>) {
                 walk_expr(arr, raised, calls);
                 walk_expr(idx, raised, calls);
             }
+            Expr::Slice { base, from, to, .. } => {
+                walk_expr(base, raised, calls);
+                if let Some(f) = from {
+                    walk_expr(f, raised, calls);
+                }
+                if let Some(t) = to {
+                    walk_expr(t, raised, calls);
+                }
+            }
             Expr::IfExp { then_expr, cond, else_expr, .. } => {
                 walk_expr(cond, raised, calls);
                 walk_expr(then_expr, raised, calls);
@@ -350,6 +359,14 @@ struct GenC<'a> {
     /// arm is `__builtin_pow`, which needs no helper. Emitted only when a
     /// program actually raises an integer to an integer power.
     used_pow_i: bool,
+    /// `s[i]`, `s[a:b]`, `x in s` and `for c in s` (v0.51.2) all ride on the
+    /// same three byte-wise string helpers, so they share one flag.
+    used_str_seq: bool,
+    /// `x in <array>` (v0.51.2): one linear-scan helper per element type and
+    /// length. A `BTreeMap`, not a `HashSet`: the preamble must be byte-
+    /// identical across processes (see docs — `c_text_is_stable_across_
+    /// processes`), and hash iteration order is not.
+    in_helpers: BTreeMap<String, String>,
 }
 
 impl<'a> GenC<'a> {
@@ -384,6 +401,8 @@ impl<'a> GenC<'a> {
             used_exit: false,
             used_argv: false,
             used_pow_i: false,
+            used_str_seq: false,
+            in_helpers: BTreeMap::new(),
         };
         for s in &program.structs {
             g.struct_names.insert(s.name.clone());
@@ -700,6 +719,55 @@ impl<'a> GenC<'a> {
                  if (e > 0) b *= b;\n    }\n    \
                  return r;\n}\n\n",
             );
+        }
+        if self.used_str_seq {
+            // Byte-wise string sequence ops (v0.51.2): `s[i]`, `s[a:b]`,
+            // `x in s`, `for c in s`. Aoxn strings are byte sequences and
+            // `len(s)` is strlen, so ONE BYTE is what every one of these
+            // deals in -- `s[i]` yields a one-BYTE string, and a multi-byte
+            // UTF-8 character is several of them. Indices count from the end
+            // when negative, and an out-of-range index yields "" rather than
+            // reading past the terminator: Aoxn indexing is unchecked C-style
+            // everywhere else, but there the caller already owns the bytes,
+            // while here a bad index would be OUR out-of-bounds read.
+            //
+            // The two sentinels mark an OPEN slice end (`s[:3]`, `s[2:]`).
+            // They are the two most negative i64 values, which no real bound
+            // can be (a string longer than 2^63 bytes is not a string).
+            s.push_str(
+                "#define AX_NOLO (-9223372036854775807LL - 1)\n\
+                 #define AX_NOHI (-9223372036854775807LL)\n\
+                 static char* ax_str_at(const char* s, long long i) {\n    \
+                 long long n = (long long)__builtin_strlen(s);\n    \
+                 if (i < 0) i = i + n;\n    \
+                 if (i < 0 || i >= n) { char* e = (char*)__builtin_malloc(1); e[0] = 0; return e; }\n    \
+                 char* buf = (char*)__builtin_malloc(2);\n    \
+                 buf[0] = s[i];\n    buf[1] = 0;\n    return buf;\n}\n\
+                 static char* ax_str_slice(const char* s, long long lo, long long hi) {\n    \
+                 long long n = (long long)__builtin_strlen(s);\n    \
+                 if (lo == AX_NOLO) lo = 0;\n    if (hi == AX_NOHI) hi = n;\n    \
+                 if (lo < 0) lo = lo + n;\n    if (hi < 0) hi = hi + n;\n    \
+                 if (lo < 0) lo = 0;\n    if (hi > n) hi = n;\n    if (hi < lo) hi = lo;\n    \
+                 char* buf = (char*)__builtin_malloc((unsigned long long)(hi - lo + 1));\n    \
+                 __builtin_memcpy(buf, s + lo, (unsigned long long)(hi - lo));\n    \
+                 buf[hi - lo] = 0;\n    return buf;\n}\n\
+                 static long long ax_str_in(const char* h, const char* n) {\n    \
+                 long long lh = (long long)__builtin_strlen(h);\n    \
+                 long long ln = (long long)__builtin_strlen(n);\n    \
+                 if (ln == 0) return 1;\n    if (ln > lh) return 0;\n    \
+                 for (long long i = 0; i + ln <= lh; i++) {\n        \
+                 long long j = 0;\n        \
+                 while (j < ln && h[i + j] == n[j]) j++;\n        \
+                 if (j == ln) return 1;\n    }\n    return 0;\n}\n\n",
+            );
+        }
+        // `x in <array>` (v0.51.2). The array is taken BY VALUE, which is the
+        // language's array contract anyway (an array is `[T; N]`, a C struct,
+        // and passing one to a function copies) -- so this costs one extra
+        // copy on top of the scan and introduces no new aliasing rule.
+        for (name, body) in &self.in_helpers {
+            s.push_str(body);
+            let _ = name;
         }
         if self.used_raw {
             s.push_str(
@@ -1201,6 +1269,11 @@ fn block_returns_all(block: &Block) -> bool {
             Expr::Binary { lhs, rhs, .. } => self.expr_may_raise(lhs) || self.expr_may_raise(rhs),
             Expr::Unary { expr, .. } | Expr::Cast { expr, .. } => self.expr_may_raise(expr),
             Expr::Index { arr, idx, .. } => self.expr_may_raise(arr) || self.expr_may_raise(idx),
+            Expr::Slice { base, from, to, .. } => {
+                self.expr_may_raise(base)
+                    || from.as_deref().is_some_and(|e| self.expr_may_raise(e))
+                    || to.as_deref().is_some_and(|e| self.expr_may_raise(e))
+            }
             Expr::IfExp { then_expr, cond, else_expr, .. } => {
                 self.expr_may_raise(cond) || self.expr_may_raise(then_expr) || self.expr_may_raise(else_expr)
             }
@@ -1517,6 +1590,30 @@ fn block_returns_all(block: &Block) -> bool {
                     self.line(indent, "}");
                     return Ok(());
                 }
+                if ty == Type::Str {
+                    // `for c in s` walks the string's BYTES, handing the body
+                    // a one-byte string each (v0.51.2). The source is captured
+                    // BEFORE the loop and its length read once, so a body that
+                    // appends cannot change how far the loop runs -- growing
+                    // the string from inside the loop is otherwise how a
+                    // `for c in s` never terminates.
+                    self.used_str_seq = true;
+                    let tmp = self.fresh_tmp();
+                    let (val, _) = self.emit_expr(e)?;
+                    self.line(indent, &format!("char* {tmp} = {val};"));
+                    self.declare(var, &Type::Str);
+                    let len = self.fresh_tmp();
+                    let idx = self.fresh_tmp();
+                    let vi = self.c_ident(var);
+                    self.line(indent, "{");
+                    self.line(indent + 1, &format!("long long {len} = (long long)__builtin_strlen({tmp});"));
+                    self.line(indent + 1, &format!("for (long long {idx} = 0; {idx} < {len}; {idx}++) {{"));
+                    self.line(indent + 2, &format!("{vi} = ax_str_at({tmp}, {idx});"));
+                    self.emit_block(body, indent + 2)?;
+                    self.line(indent + 1, "}");
+                    self.line(indent, "}");
+                    return Ok(());
+                }
                 let (elem, len) = match &ty {
                     Type::Array { elem, len } => ((**elem).clone(), *len),
                     other => return Err(format!("internal error: iterating {other} at codegen")),
@@ -1765,8 +1862,49 @@ fn block_returns_all(block: &Block) -> bool {
                         self.out.push(']');
                         Ok(elem)
                     }
+                    // `s[i]` -> a ONE-BYTE string (v0.51.2). The base and the
+                    // index are both spliced in, so `f()[i()]` evaluates each
+                    // exactly once.
+                    Type::Str => {
+                        let kstart = self.out.len();
+                        self.emit_expr_inner(idx)?;
+                        let ktext = self.out.split_off(kstart);
+                        let btext = self.out.split_off(base_start);
+                        self.used_str_seq = true;
+                        self.out.push_str(&format!("ax_str_at({btext}, {ktext})"));
+                        Ok(Type::Str)
+                    }
                     other => return Err(format!("internal error: cannot index {other} at codegen")),
                 }
+            }
+            // `s[a:b]` (v0.51.2). An open end is passed as the AX_NO*
+            // sentinel rather than as 0 / len, because "no bound" and "a bound
+            // of 0" are different answers (`s[:0]` is "", `s[:]` is the whole
+            // string) and no length can be computed in expression position.
+            Expr::Slice { base, from, to, .. } => {
+                let bstart = self.out.len();
+                let bty = if base.is_lvalue() {
+                    self.emit_lvalue(base)?
+                } else {
+                    self.emit_expr_inner(base)?
+                };
+                let btext = self.out.split_off(bstart);
+                let bound_text = |b: &Option<Box<Expr>>, open: &str, g: &mut Self| -> Result<String, String> {
+                    match b {
+                        None => Ok(open.to_string()),
+                        Some(e) => {
+                            let s = g.out.len();
+                            g.emit_expr_inner(e)?;
+                            Ok(g.out.split_off(s))
+                        }
+                    }
+                };
+                let lo = bound_text(from, "AX_NOLO", self)?;
+                let hi = bound_text(to, "AX_NOHI", self)?;
+                self.used_str_seq = true;
+                self.out.push_str(&format!("ax_str_slice({btext}, {lo}, {hi})"));
+                let _ = bty;
+                Ok(Type::Str)
             }
             Expr::Field { obj, name, .. } => {
                 let base_ty = if obj.is_lvalue() {
@@ -2385,6 +2523,53 @@ if matches!(op, Is | IsNot) {
             let _ = rt;
             return Ok(Type::Bool);
         }
+        if matches!(op, In | NotIn) {
+            // Membership (v0.51.2). The CONTAINER is the right operand, so it
+            // is emitted first -- the same base-then-key order `ax_dict_get`
+            // uses. The container is captured rather than left inline because
+            // every shape wraps it in a call.
+            let rt = self.hint(rhs)?;
+            let lt = self.hint(lhs)?;
+            let _ = lt;
+            let cstart = self.out.len();
+            self.emit_expr_inner(rhs)?;
+            let ctext = self.out.split_off(cstart);
+            let nstart = self.out.len();
+            self.emit_expr_inner(lhs)?;
+            let ntext = self.out.split_off(nstart);
+            let neg = if op == NotIn { "!" } else { "" };
+            match &rt {
+                Type::Str => {
+                    self.used_str_seq = true;
+                    self.out.push_str(&format!("{neg}ax_str_in({ctext}, {ntext})"));
+                }
+                Type::Dict(val) => {
+                    let tok = Self::type_token(val);
+                    self.out.push_str(&format!("{neg}(ax_dict_find_{tok}({ctext}, {ntext}) >= 0)"));
+                }
+                Type::Array { elem, len } => {
+                    let tok = Self::type_token(elem);
+                    let ct = self.c_type(elem);
+                    let helper = format!("ax_in_{tok}_{len}");
+                    let eq = if tok == "s" {
+                        "!__builtin_strcmp(a.data[i], x)"
+                    } else {
+                        "a.data[i] == x"
+                    };
+                    self.in_helpers.entry(helper.clone()).or_insert_with(|| {
+                        format!(
+                            "static long long ax_in_{tok}_{len}({tn} a, {ct} x) {{\n    \
+                             for (long long i = 0; i < {len}LL; i++) {{ if ({eq}) return 1; }}\n    \
+                             return 0;\n}}\n\n",
+                            tn = Self::typedef_name(elem, *len)
+                        )
+                    });
+                    self.out.push_str(&format!("{neg}{helper}({ctext}, {ntext})"));
+                }
+                other => return Err(format!("internal error: 'in' against {other} at codegen")),
+            }
+            return Ok(Type::Bool);
+        }
         if matches!(op, And | Or) {
             self.out.push('(');
             let t = self.emit_expr_inner(lhs)?;
@@ -2478,6 +2663,7 @@ if matches!(op, Is | IsNot) {
             Ge => ">=",
             And | Or => return Err("internal error: boolean operator reached arithmetic codegen".into()),
             Is | IsNot => return Err("internal error: nullable identity reached arithmetic codegen".into()),
+            In | NotIn => return Err("internal error: membership reached arithmetic codegen".into()),
             Pow => return Err("internal error: '**' reached arithmetic codegen".into()),
         };
         self.out.push_str("((");
@@ -2486,7 +2672,7 @@ if matches!(op, Is | IsNot) {
         self.emit_expr_inner(rhs)?;
         self.out.push_str("))");
         Ok(match op {
-            Eq | Ne | Lt | Le | Gt | Ge => Type::Bool,
+            Eq | Ne | Lt | Le | Gt | Ge | In | NotIn => Type::Bool,
             _ => t,
         })
     }
@@ -2579,15 +2765,21 @@ if matches!(op, Is | IsNot) {
             }
             Expr::Unary { expr, .. } => self.hint(expr),
             Expr::Binary { op, lhs, rhs, .. } => match op {
-                BinOp::Eq | BinOp::Ne | BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge | BinOp::And | BinOp::Or | BinOp::Is | BinOp::IsNot => {
+                BinOp::Eq | BinOp::Ne | BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge | BinOp::And | BinOp::Or | BinOp::Is | BinOp::IsNot
+                | BinOp::In | BinOp::NotIn => {
                     Ok(Type::Bool)
                 }
                 _ => self.hint(lhs).or_else(|_| self.hint(rhs)),
             },
             Expr::Index { arr, .. } => match self.hint(arr)? {
                 Type::Array { elem, .. } => Ok(*elem),
+                Type::Str => Ok(Type::Str),
                 Type::Dict(val) => Ok(*val),
-                other => Err(format!("internal error: index on {other} in type hint")),
+                other => Err(format!("internal error: cannot index {other} at codegen")),
+            },
+            Expr::Slice { base, .. } => match self.hint(base)? {
+                Type::Str => Ok(Type::Str),
+                other => Err(format!("internal error: cannot slice {other} in type hint")),
             },
             // both branches have the same type (the checker proved it), so
             // either one answers the question

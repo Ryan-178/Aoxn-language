@@ -16,8 +16,8 @@ minors do not.
 
 | Version | Supported |
 |---|---|
-| `0.50.1` (current) | ✅ yes |
-| `0.50.0` and earlier | ❌ no — please reproduce on `main` or the latest release |
+| `0.51.x` (current) | — yes |
+| `0.50.x` and earlier | — no · please reproduce on `main` or the latest release |
 | `main` (development) | ✅ yes, fixes land here first |
 
 Fix versions are always noted in [`CHANGELOG.md`](CHANGELOG.md). If you need a
@@ -142,6 +142,21 @@ the information needed to protect users even if the reporter disagrees.
   `dup_expr`) must stay bounded — an operand whose copy cost is
   super-linear in the source length, or a recursive `dup_expr` that a crafted
   depth can turn into stack exhaustion, is a defect.
+- **The string-sequence helpers (v0.51.2: `s[i]`, `s[a:b]`, `x in s`,
+  `for c in s`)** — these are the first compiler-emitted C helpers that read a
+  **user string's bytes by index**, and Aoxn's own rule is that indexing is
+  unchecked C-style. That rule is correct for arrays and struct fields, where
+  the caller owns the storage. It is *not* correct here: an unchecked read is
+  the compiler reading past the end of a buffer it was handed, which is a
+  memory-safety defect in the compiler rather than in the program. So
+  `ax_str_at` and `ax_str_slice` clamp, and an out-of-range index or bound
+  yields `""`. `tests/pipeline.rs::out_of_range_index_yields_empty_and_reads_
+  nothing` pins it with `s[1000000]`, which is an unmapped page without the
+  guard — a deterministic crash rather than a byte that might happen to be
+  zero. **A future change that removes those clamps, or that adds another
+  indexing helper without them, is a vulnerability in the compiler.** The same
+  applies to `ax_str_in`: its needle and haystack are both user strings, and a
+  search that ran off the end of either would be the same defect.
 - **Install-layout discovery** (since v0.30.0: `src/paths.rs`) — the compiler
   now derives its install root, stdlib directory and bundled clang from
   `AOXN_HOME` / `AOXN_STDLIB` and its own executable location, and resolves

@@ -454,6 +454,38 @@ crates/aoxn-pkg       package manager crate (its own dependency set; see above)
     not a float — `to_float(3) ** -1` for that.
   - The TS front end lowers `c ? a : b` into the same node (it used to
     reject the ternary outright).
+
+- **Python syntax sugar part 2 (v0.51.2): `in` / `not in`, string indexing,
+  string slices, `for c in s`.** Four traps, all pinned in
+  `tests/pipeline.rs`:
+  - **BYTES, not characters.** `s[i]` is a **one-byte** string and `for c in
+    s` walks bytes, because `len(s)` is `strlen` and always has been. There is
+    **no `char` type and none is coming**: `len(s[0])` would have to be 1 or 3
+    and existing programs depend on both answers for `len`. Do not "improve"
+    this into a character type; it contradicts `len()`.
+  - **Out-of-range CLAMPS to `""`.** Aoxn indexing is unchecked C-style and
+    stays that way for arrays and fields -- but there the caller owns the
+    bytes. Inside `ax_str_at` / `ax_str_slice` an unchecked read is the
+    COMPILER reading past a buffer it was handed, so it clamps. `SECURITY.md`
+    names this as compiler-side memory safety; removing the clamps is a
+    vulnerability. Pinned by `s[1000000]` (an unmapped page without the guard).
+  - **Arrays are NOT sliceable**, and the diagnostic must keep saying why
+    (`slice_msg` in `typecheck.rs`, shared by the expression and the
+    lvalue path): an array is `[T; N]` with the length in its type, so a slice
+    has no type to return, and it already copies on assignment.
+  - **`not a in b` keeps C's precedence**, so it is `(not a) in b` and `!`
+    requires a bool -- the unparenthesised spelling is a **type error**, not a
+    silent wrong answer. Moving `not` to Python's level would silently change
+    every existing `not b == c`; that is a semantic change to a shipped
+    operator and wants its own version. `not (a in b)` is the spelling.
+  - The `in` helpers are collected in a **`BTreeMap`**, never a `HashSet`:
+    the emitted C must be byte-identical ACROSS PROCESSES (see the
+    reproducibility rules above), and hash iteration order is not. The
+    open-slice-end sentinels are the two most negative `i64` values, which no
+    real bound can be.
+  - Like part 1, nothing here reaches a program that does not use it, so the
+    self-host fixed point needs **no `selfhost/` mirror** (same status as the
+    v0.40.0 features).
 - Python-style surface, native semantics: `def`/`elif`/`pass`, `x = 5`
   infers, `x: int = 5` checks, re-assignment keeps the type, `and`/`or`/`not`
   + `True`/`False` are aliases of the symbolic operators.

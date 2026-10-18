@@ -1542,8 +1542,13 @@ impl Parser {
             },
             Expr::Index { arr, .. } => match self.infer_type(arr)? {
                 Type::Array { elem, .. } => Some(*elem),
+                Type::Str => Some(Type::Str),
                 _ => None,
             },
+            // TS has no slice syntax; the node only reaches here if an Aoxn
+            // source is routed through the TS front end, and a slice is
+            // always a string there.
+            Expr::Slice { .. } => Some(Type::Str),
             Expr::Field { obj, name, .. } => {
                 let ot = self.infer_type(obj)?;
                 match ot {
@@ -1777,6 +1782,15 @@ fn fill_expr(e: &mut Expr, opts: &HashMap<String, Vec<(usize, Expr)>>, totals: &
         Expr::Index { arr, idx, .. } => {
             fill_expr(arr, opts, totals);
             fill_expr(idx, opts, totals);
+        }
+        Expr::Slice { base, from, to, .. } => {
+            fill_expr(base, opts, totals);
+            if let Some(f) = from {
+                fill_expr(f, opts, totals);
+            }
+            if let Some(t) = to {
+                fill_expr(t, opts, totals);
+            }
         }
         Expr::IfExp { then_expr, cond, else_expr, .. } => {
             fill_expr(cond, opts, totals);

@@ -1,0 +1,64 @@
+# v0.51.2 syntax sugar: string indexing, slicing, membership, iteration
+def show(label: string, value: string) -> void:
+    print(label + " = [" + value + "]")
+    return
+
+def main() -> int:
+    s: string = "Aoxn"
+    print("len", len(s))
+
+    # 1. string indexing, byte-wise, negative, out of range
+    show("s[0]", s[0])
+    show("s[3]", s[3])
+    show("s[-1]", s[-1])
+    show("s[-4]", s[-4])
+    show("s[99]", s[99])
+    show("s[-99]", s[-99])
+
+    # 2. slices: both bounds, open left, open right, fully open
+    show("s[1:3]", s[1:3])
+    show("s[:2]", s[:2])
+    show("s[2:]", s[2:])
+    show("s[:]", s[:])
+    show("s[-2:]", s[-2:])
+    show("s[:-1]", s[:-1])
+    show("s[1:99]", s[1:99])
+    show("s[3:1]", s[3:1])
+    show("s[:0]", s[:0])
+    show("empty[:]", ""[:])
+
+    # 3. substring membership
+    print("'ox' in 'Aoxn' :", "ox" in "Aoxn")
+    print("'zz' in 'Aoxn' :", "zz" in "Aoxn")
+    print("'' in 'Aoxn'  :", "" in "Aoxn")
+    print("'Aoxn' not in 'Aoxn' :", "Aoxn" not in "Aoxn")
+
+    # 4. array membership
+    xs: [int; 4] = [3, 1, 4, 1]
+    print("1 in xs :", 1 in xs)
+    print("9 in xs :", 9 in xs)
+    print("9 not in xs :", 9 not in xs)
+    words: [string; 2] = ["ab", "cd"]
+    print("'cd' in words :", "cd" in words)
+    print("'zz' in words :", "zz" in words)
+    fs: [float; 2] = [0.5, 2.5]
+    print("2.5 in fs :", 2.5 in fs)
+
+    # 5. dict key membership
+    d: dict[int] = {}
+    d["a"] = 1
+    print("'a' in d :", "a" in d)
+    print("'b' in d :", "b" in d)
+    print("'b' not in d :", "b" not in d)
+
+    # 6. iterate the bytes of a string
+    for c in s:
+        show("byte", c)
+    n: int = 0
+    for c in "ab":
+        n = n + 1
+    print("iterated", n, "bytes")
+
+    # a slice of a call result, evaluated once
+    show("tail(s)", s[1:])
+    return 0

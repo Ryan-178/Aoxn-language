@@ -948,11 +948,15 @@ impl Parser {
                         BinOp::Is
                     }
                 }
+                Tok::In => BinOp::In,
+                // `not` lexes as Tok::Bang, so `x not in y` reaches here as
+                // Bang followed by In — the same two-token shape as `is not`
+                Tok::Bang if matches!(self.peek2(), Tok::In) => BinOp::NotIn,
                 _ => break,
             };
             let pos = self.pos();
-            self.bump(); // 'is' [+ 'not']
-            if matches!(op, BinOp::IsNot) {
+            self.bump(); // 'is' / 'in' / 'not'
+            if matches!(op, BinOp::IsNot | BinOp::NotIn) {
                 self.bump();
             }
             let rhs = self.rel_expr()?;
@@ -1154,10 +1158,27 @@ impl Parser {
                 }
                 Tok::LBracket => {
                     self.bump();
-                    let idx = self.expr()?;
-                    self.eat(&Tok::RBracket)?;
                     let pos = e.pos();
-                    e = Expr::Index { arr: Box::new(e), idx: Box::new(idx), pos };
+                    // `s[a:b]` — a slice (v0.51.2). The colon is what tells
+                    // it from an index, so it is looked for BEFORE the first
+                    // operand is parsed; `s[:3]` starts with the colon.
+                    if *self.peek() == Tok::Colon {
+                        self.bump();
+                        let to = if *self.peek() == Tok::RBracket { None } else { Some(Box::new(self.expr()?)) };
+                        self.eat(&Tok::RBracket)?;
+                        e = Expr::Slice { base: Box::new(e), from: None, to, pos };
+                    } else {
+                        let idx = self.expr()?;
+                        if *self.peek() == Tok::Colon {
+                            self.bump();
+                            let to = if *self.peek() == Tok::RBracket { None } else { Some(Box::new(self.expr()?)) };
+                            self.eat(&Tok::RBracket)?;
+                            e = Expr::Slice { base: Box::new(e), from: Some(Box::new(idx)), to, pos };
+                        } else {
+                            self.eat(&Tok::RBracket)?;
+                            e = Expr::Index { arr: Box::new(e), idx: Box::new(idx), pos };
+                        }
+                    }
                 }
                 Tok::Dot => {
                     self.bump();

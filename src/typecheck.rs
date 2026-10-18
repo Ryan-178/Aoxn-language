@@ -573,8 +573,12 @@ impl<'a> Tc<'a> {
                             // iterating a dict walks its KEYS, in insertion
                             // order (v0.40.0)
                             Type::Dict(_) => Type::Str,
+                            // iterating a string walks its BYTES, one one-byte
+                            // string each (v0.51.2) — the same byte-wise
+                            // contract `len(s)` and `s[i]` already have.
+                            Type::Str => Type::Str,
                             other => {
-                                return Err(self.err(pos.line, pos.col, format!("'for' can only iterate over arrays or dicts, found {other}")))
+                                return Err(self.err(pos.line, pos.col, format!("'for' can only iterate over arrays, dicts or strings, found {other}")))
                             }
                         }
                     }
@@ -677,8 +681,31 @@ impl<'a> Tc<'a> {
                         }
                         Ok(*val)
                     }
+                    // `s[i]` on a string READS one byte (v0.51.2). A string is
+                    // immutable -- `len(s)` is strlen and there is no length
+                    // field to write through -- so an index is not an
+                    // assignment target, and saying so here is what keeps
+                    // codegen from turning it into an `internal` error.
+                    Type::Str => Err(self.err(pos.line, pos.col, "cannot assign into a string: it is immutable, so s[i] is a read")),
                     other => Err(self.err(pos.line, pos.col, format!("cannot index a value of type {other}"))),
                 }
+            }
+            Expr::Slice { base, from, to, pos } => {
+                let bt = self.check_expr(base, scopes)?;
+                if bt != Type::Str {
+                    return Err(self.err(pos.line, pos.col, format!(
+                            "cannot slice a value of type {bt}: only a string is sliceable — an array is [T; N] and \
+                             copies on assignment (`b = a`), so it needs no slice"
+                        )));
+                }
+                for bound in [from, to].into_iter().flatten() {
+                    let t = self.check_expr(bound, scopes)?;
+                    if t != Type::Int {
+                        return Err(self.err(bound.pos().line, bound.pos().col, format!("slice bound must be int, found {t}")));
+                    }
+                }
+                let _ = pos;
+                Ok(Type::Str)
             }
             Expr::Field { obj, name, pos } => {
                 let ot = self.check_expr(obj, scopes)?;
@@ -762,8 +789,29 @@ impl<'a> Tc<'a> {
                         }
                         Ok(*val)
                     }
-                    other => Err(self.err(pos.line, pos.col, format!("cannot index a value of type {other} (only [T; N] arrays and dicts are indexable)"))),
+                    // `s[i]` on a string is ONE BYTE as a string (v0.51.2),
+                    // the same byte-wise contract `len(s)` already has.
+                    Type::Str => {
+                        if it != Type::Int {
+                            return Err(self.err(pos.line, pos.col, format!("string index must be int, found {it}")));
+                        }
+                        Ok(Type::Str)
+                    }
+                    other => Err(self.err(pos.line, pos.col, format!("cannot index a value of type {other} (only [T; N] arrays, dicts and strings are indexable)"))),
                 }
+            }
+            Expr::Slice { base, from, to, pos } => {
+                let bt = self.check_expr(base, scopes)?;
+                if bt != Type::Str {
+                    return Err(self.err(pos.line, pos.col, slice_msg(&bt)));
+                }
+                for bound in [from, to].into_iter().flatten() {
+                    let t = self.check_expr(bound, scopes)?;
+                    if t != Type::Int {
+                        return Err(self.err(bound.pos().line, bound.pos().col, format!("slice bound must be int, found {t}")));
+                    }
+                }
+                Ok(Type::Str)
             }
             Expr::Field { obj, name, pos } => {
                 let ot = self.check_expr(obj, scopes)?;
@@ -1187,6 +1235,31 @@ impl<'a> Tc<'a> {
                         }
                         Ok(Type::Bool)
                     }
+                    In | NotIn => {
+                        // Membership (v0.51.2). The RIGHT side is the container
+                        // and says which question is being asked: an array is
+                        // scanned for the element, a string for the
+                        // substring, a dict for the key. The left side is the
+                        // needle, and it must be comparable — a struct or an
+                        // array has no equality, so the answer would be a lie.
+                        let comparable = |t: &Type| matches!(t, Type::Int | Type::Float | Type::Bool | Type::Str);
+                        if !comparable(&lt) {
+                            return Err(self.err(pos.line, pos.col, format!(
+                                    "'{}' needs a comparable left operand, found {lt} (structs and arrays have no equality)",
+                                    op_str(*op)
+                                )));
+                        }
+                        match &rt {
+                            Type::Str if lt == Type::Str => Ok(Type::Bool),
+                            Type::Array { elem, .. } if comparable(elem) && lt == **elem => Ok(Type::Bool),
+                            Type::Dict(_) if lt == Type::Str => Ok(Type::Bool),
+                            other => Err(self.err(pos.line, pos.col, format!(
+                                    "'{}' cannot test a {lt} against {other}: a string is searched for the substring, \
+                                     an array for the element, a dict for the key",
+                                    op_str(*op)
+                                ))),
+                        }
+                    }
                     And | Or => {
                         if lt == Type::Bool && rt == Type::Bool {
                             Ok(Type::Bool)
@@ -1546,6 +1619,9 @@ fn first_var_naming(e: &Expr, is_forbidden: &dyn Fn(&str) -> bool) -> Option<Str
         Expr::Unary { expr, .. } | Expr::Cast { expr, .. } => first_var_naming(expr, is_forbidden),
         Expr::Binary { lhs, rhs, .. } => first_var_naming(lhs, is_forbidden).or_else(|| first_var_naming(rhs, is_forbidden)),
         Expr::Index { arr, idx, .. } => first_var_naming(arr, is_forbidden).or_else(|| first_var_naming(idx, is_forbidden)),
+        Expr::Slice { base, from, to, .. } => first_var_naming(base, is_forbidden)
+            .or_else(|| from.as_deref().and_then(|b| first_var_naming(b, is_forbidden)))
+            .or_else(|| to.as_deref().and_then(|b| first_var_naming(b, is_forbidden))),
         Expr::IfExp { then_expr, cond, else_expr, .. } => first_var_naming(cond, is_forbidden)
             .or_else(|| first_var_naming(then_expr, is_forbidden))
             .or_else(|| first_var_naming(else_expr, is_forbidden)),
@@ -1637,6 +1713,15 @@ fn subst_expr(e: &mut Expr, n: Option<usize>, len_param: Option<&str>) {
         Expr::Index { arr, idx, .. } => {
             subst_expr(arr, n, len_param);
             subst_expr(idx, n, len_param);
+        }
+        Expr::Slice { base, from, to, .. } => {
+            subst_expr(base, n, len_param);
+            if let Some(f) = from {
+                subst_expr(f, n, len_param);
+            }
+            if let Some(t) = to {
+                subst_expr(t, n, len_param);
+            }
         }
         Expr::Field { obj, .. } => subst_expr(obj, n, len_param),
         Expr::ArrayLit { elems, .. } => {
@@ -1856,6 +1941,16 @@ fn field_type<'t>(t: &'t Type, name: &str, structs: &'t StructTable) -> Option<&
     None
 }
 
+/// The "you cannot slice that" diagnostic. ONE sentence, shared by both the
+/// expression and the assignment-target path: a message that changes depending
+/// on which arm happened to fire reads as two different rules.
+pub fn slice_msg(bt: &Type) -> String {
+    format!(
+        "cannot slice a value of type {bt}: only a string is sliceable \
+         (an array is [T; N] and already copies on assignment, so `b = a` is its slice)"
+    )
+}
+
 fn op_str(op: BinOp) -> &'static str {
     use BinOp::*;
     match op {
@@ -1874,6 +1969,8 @@ fn op_str(op: BinOp) -> &'static str {
         Ne => "!=",
         Is => "is",
         IsNot => "is not",
+        In => "in",
+        NotIn => "not in",
         Lt => "<",
         Le => "<=",
         Gt => ">",

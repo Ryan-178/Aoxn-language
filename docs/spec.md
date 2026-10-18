@@ -396,7 +396,7 @@ and   := bitor ("and" | "&&") bitor)*
 bitor := bitxor ("|" bitxor)*
 bitxor:= bitand ("^" bitand)*
 bitand:= eq ("&" eq)*
-eq    := rel (("==" | "!=") rel)*
+eq    := rel (("==" | "!=" | "in" | "not" "in") rel)*
 rel   := shift (("<" | "<=" | ">" | ">=") shift)*
 shift := add (("<<" | ">>") add)*
 add   := mul (("+" | "-") mul)*
@@ -406,7 +406,7 @@ unary := ("not" | "!" | "~" | "-" | "+") unary | primary
 primary := INT | FLOAT | STRING | True | False | FSTRING
          | IDENT ("(" args ")")? | "(" expr ")"
          | "[" expr ("," expr)* "]" | "[" "]"      # array literal / index
-postfix := primary ("(" args ")" | "[" expr "]" | "." IDENT)*
+postfix := primary ("(" args ")" | "[" expr "]" | "[" expr? ":" expr? "]" | "." IDENT)*
 ```
 
 **Conditional expression (v0.51.0)** 闁?`a if c else b` is Python's form at
@@ -426,6 +426,35 @@ promotion, exactly like `%` and the bitwise operators, so write
 `to_float(2) ** 0.5`. **Deviation from Python:** a negative `int` exponent
 yields `0` (Python returns a float); a negative `float` exponent is ordinary
 and returns `0.333333`.
+
+**String indexing, slicing and membership (v0.51.2).** All three are
+**byte-wise**, because `len(s)` is `strlen` and the language has no `char`
+type. A UTF-8 character is several bytes and is several of these.
+
+- `s[i]` yields a **one-byte string** (`s[3]` of `"Aoxn"` is `"n"`). A
+  negative index counts from the end (`s[-1]`). An index outside the string
+  yields `""` — see the deviation note below.
+- `s[a:b]` yields the bytes in `[a, b)`. Either end may be left open
+  (`s[:3]`, `s[2:]`, `s[:]`); negative bounds count from the end, and both are
+  **clamped** (`s[1:999]` on a 4-byte string is the last three bytes, and
+  `s[3:1]` is `""`). Arrays are **not** sliceable: an Aoxn array is `[T; N]`
+  with the length in its type, and it already copies on assignment, so `b = a`
+  is the array's slice. Slicing one is a type error that says so.
+- `x in c` / `x not in c` is membership, at the **comparison level** — inside
+  the grammar above, next to `==`. The **right** operand is the container and
+  selects the question: a string is searched for the *substring*, an array for
+  the *element*, a dict for the *key*. The left operand must have the
+  container's element type and must be comparable: a struct or an array has no
+  equality, so there is no honest answer and it is a type error.
+- `for c in s` walks the string's **bytes**, handing the body a one-byte
+  string each. The length is read **once**, before the loop starts, so a body
+  that appends to the string cannot extend the iteration.
+
+**Deviation: out-of-range does not fault.** Indexing an array or a struct
+field is unchecked, C-style, and stays that way — but there the caller owns
+the bytes. Inside the compiler's own string helpers an unchecked read would be
+*our* out-of-bounds read of someone else's buffer, so an index past the end
+answers `""` instead of raising `IndexError` or walking off the allocation.
 
 **Integer literals (v0.42.0)** are decimal, hexadecimal (`0x`/`0X`) or binary(`0b`/`0B`). A malformed literal names the offending digit (`invalid digit 'Z'
 in hexadecimal literal`) instead of lexing `0` plus an identifier, and an
@@ -845,19 +874,23 @@ the program: math (`abs/min/max/clamp/pow_i/gcd/lcm/isqrt/is_prime/hypot`
 ## Roadmap
 
 Ordered by how much they cost the language's Python parity.
-1. ~~Remaining Python operators and forms~~ 閳?**`**` shipped in v0.51.0**
-   (right-associative power; `-2 ** 2` is `-4`). Still open: `in` / `not in`
-   as operators (array membership, string substring).
-2. ~~Conditional expressions~~ 閳?**`a if c else b` shipped in v0.51.0** (both
+1. ~~Remaining Python operators and forms~~ — **`**` shipped in v0.51.0**
+   (right-associative power; `-2 ** 2` is `-4`); **`in` / `not in` shipped in
+   v0.51.2** (array element, string substring, dict key).
+2. ~~Conditional expressions~~ — **`a if c else b` shipped in v0.51.0** (both
    branches must have the same type). Still open: multiple assignment /
    unpacking (`a, b = f()`), which needs tuple or multi-target support in the
    AST.
-3. Default parameter values (`def f(x: int = 3)`).
+3. ~~Default parameter values~~ — **`def f(x: int = 3)` shipped in v0.51.0**
+   (materialized at the call site).
 4. Package layout (`aoxn.json` `exports` conventions are already honoured;
    publishing conventions are not). Module qualification and selective
    imports **shipped in v0.43.0**.
-5. String indexing / iteration (needs a `char` type or substring slices);
-   f-string format specifiers (`{x:.2f}`) and multi-line f-strings.
+5. ~~String indexing / iteration~~ — **shipped in v0.51.2**: `s[i]` yields a
+   **one-byte** string and `for c in s` walks bytes. There is no `char` type
+   and none is coming — `len(s)` is `strlen`, so the language is byte-wise
+   end to end. Still open: f-string format specifiers (`{x:.2f}`) and
+   multi-line f-strings.
 6. Memory: string interning or arena freeing (currently concatenation leaks);
    dict values are never freed either (a dict lives as long as the program,
    like every other heap block in the language).

@@ -1,4 +1,4 @@
-﻿//! Aoxn abstract syntax tree.
+//! Aoxn abstract syntax tree.
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Type {
@@ -274,6 +274,10 @@ pub enum BinOp {
     /// the nullable narrowing. Outside `None` comparisons they mean `==`/`!=`.
     Is,
     IsNot,
+    /// `in` / `not in` (v0.51.2) — membership: an element of an array, a
+    /// substring, or a dict key. Spelled `x in c` / `x not in c`.
+    In,
+    NotIn,
     Lt,
     Le,
     Gt,
@@ -308,6 +312,13 @@ pub enum Expr {
     Unary { op: UnOp, expr: Box<Expr>, pos: Pos },
     Binary { op: BinOp, lhs: Box<Expr>, rhs: Box<Expr>, pos: Pos },
     Index { arr: Box<Expr>, idx: Box<Expr>, pos: Pos },
+    /// `s[a:b]` — a slice of a STRING (v0.51.2). Only strings are sliceable:
+    /// an Aoxn array is `[T; N]` with the length in its TYPE, so a slice of
+    /// one would have no type to return (and needs none — `b = a` already
+    /// copies, which is why this is not the list-slicing people expect).
+    /// `from`/`to` are `None` where the end is left open (`s[:3]`, `s[2:]`,
+    /// `s[:]`). Byte indices, negative counting from the end, clamped.
+    Slice { base: Box<Expr>, from: Option<Box<Expr>>, to: Option<Box<Expr>>, pos: Pos },
     /// `then if cond else other` (v0.51.0) — Python's conditional
     /// expression. Lowest precedence of any operator form; the `else` branch
     /// is a full expression, so it nests to the right.
@@ -335,6 +346,7 @@ impl Expr {
             | Expr::Unary { pos, .. }
             | Expr::Binary { pos, .. }
             | Expr::Index { pos, .. }
+            | Expr::Slice { pos, .. }
             | Expr::IfExp { pos, .. }
             | Expr::Field { pos, .. }
             | Expr::ArrayLit { pos, .. }
