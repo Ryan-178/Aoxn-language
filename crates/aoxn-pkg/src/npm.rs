@@ -332,7 +332,7 @@ fn base64_decode_sha(s: &str) -> Option<Vec<u8>> {
 /// as `name@range` entries the normal import path can resolve.
 fn package_json_specs(file: &Path) -> Result<Vec<String>, PkgError> {
     let text = std::fs::read_to_string(file)
-        .map_err(|e| PkgError::Manifest(format!("cannot read {}: {}", file.display(), crate::errors::io_reason(&e))))?;
+        .map_err(|e| PkgError::Manifest(format!("cannot read {}: {}", file.display(), crate::errors::io_reason_for(&e, &file, crate::errors::IoTarget::File))))?;
     let doc: serde_json::Value = serde_json::from_str(&text)
         .map_err(|e| PkgError::Manifest(format!("{} is not valid JSON: {e}", file.display())))?;
     let mut out = Vec::new();

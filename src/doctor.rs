@@ -246,7 +246,7 @@ fn run_smoke() -> (bool, String) {
                 (false, format!("exit {:?}, output {:?}", o.status.code(), text))
             }
         }
-        Err(e) => (false, format!("cannot run the built program: {}", aoxn::io_reason(&e))),
+        Err(e) => (false, format!("cannot run the built program: {}", aoxn::io_reason_for(&e, &exe, aoxn::IoTarget::File))),
     }
 }
 

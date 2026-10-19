@@ -47,6 +47,54 @@ pub fn io_reason(e: &std::io::Error) -> String {
     }
 }
 
+/// What the caller was trying to open, where `io_reason` cannot know.
+///
+/// A miss reads differently for a file and for a directory, and the raw code
+/// separates them only on WINDOWS (2 = the final component, 3 = an ancestor).
+/// Linux reports BOTH as ENOENT (2), so on Linux `io_reason` alone says "the
+/// file does not exist" even when it was the directory that is missing. The
+/// caller knows what shape it was opening, which is the portable source of
+/// truth; package-manager diagnostics go through this variant.
+///
+/// Also a deliberate DUPLICATE of `aoxn::io_reason_for` (see the header above).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum IoTarget {
+    /// the path names a file the package manager reads or writes
+    File,
+    /// the path names a directory the package manager creates, walks, or lists
+    Dir,
+}
+
+fn io_reason_with_code(phrase: &str, e: &std::io::Error) -> String {
+    match e.raw_os_error() {
+        Some(code) => format!("{phrase} (os error {code})"),
+        None => phrase.to_string(),
+    }
+}
+
+/// [`io_reason`], made path-aware: a missing ANCESTOR component means a
+/// directory is missing no matter what the raw code says (Windows: 3; Linux:
+/// ENOENT, same code as a missing file), so the parent probe is the
+/// structural, portable answer. A directory target says "directory" either
+/// way: whether the ancestor or the final component is missing, some
+/// directory in the chain is what the user has to create.
+pub fn io_reason_for(
+    e: &std::io::Error,
+    path: &std::path::Path,
+    target: IoTarget,
+) -> String {
+    if e.kind() == std::io::ErrorKind::NotFound {
+        let parent_missing = path
+            .parent()
+            .is_some_and(|p| !p.as_os_str().is_empty() && !p.exists());
+        if target == IoTarget::Dir || parent_missing {
+            return io_reason_with_code("the directory does not exist", e);
+        }
+        return io_reason_with_code("the file does not exist", e);
+    }
+    io_reason(e)
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum PkgError {
     #[error("manifest error: {0}")]

@@ -7,7 +7,7 @@
 //! A unit test on `symbols::collect` would pass while the command printed
 //! something the IDE cannot parse.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::Command;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -24,10 +24,6 @@ impl Scratch {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("create scratch dir");
         Scratch(dir)
-    }
-
-    fn path(&self) -> &Path {
-        &self.0
     }
 
     fn write(&self, name: &str, text: &str) -> PathBuf {

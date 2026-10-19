@@ -5,6 +5,35 @@ minor bumps while pre-1.0: each minor version is a language milestone.
 
 ## [Unreleased]
 
+## [0.54.1] - 2026-10-19
+
+The Linux CI run of v0.53.0's io-diagnostics suite failed — and the failure
+was the finding: it exposed that the missing-file / missing-directory
+distinction was a WINDOWS-only concession surviving on Linux.
+
+### Fixed
+
+- **On Linux, a missing directory in an import path said "the file does not
+  exist".** Windows tells a missing file (os error 2) from a missing path
+  component (os error 3) by raw code, so v0.53.0 separated them inside the
+  `NotFound` arm; Linux reports BOTH as ENOENT (2), so `io_reason` alone
+  cannot tell them apart there and answered "the file does not exist" for a
+  missing directory — the same wrong-pointer wording v0.53.0 fixed, one
+  platform over. The portable source of truth is the CALLER's own knowledge
+  of what it was opening: `io_reason_for(e, path, target)` — the
+  `IoTarget::File` / `IoTarget::Dir` spelling, plus a parent probe that
+  answers "directory" whenever the ancestor is missing — now serves every
+  compiler diagnostic (14 sites) and every filesystem-facing `aoxn-pkg`
+  diagnostic. Errors with no filesystem path at all (TCP resolve/connect in
+  the HTTP registry) stay on plain `io_reason`: there is no path to
+  distinguish. Same message on both platforms, two mechanisms: the pin is
+  the end-to-end driver (`./ghost` vs `./ghost_dir/ghost`) and it runs on
+  every platform now, with the Windows raw-code mapping under
+  `#[cfg(windows)]` — where the numbers it hardcodes are actually defined.
+- Dead code from the last two releases swept: a redundant `tree_state`
+  snapshot in the shim-heal test and `Scratch::path` (an outline-test helper
+  whose last caller left). Both suites are warning-free again.
+
 ## [0.54.0] - 2026-10-18
 
 Package-manager measurement round two, on a synthetic registry built through

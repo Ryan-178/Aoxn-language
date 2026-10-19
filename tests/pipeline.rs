@@ -4727,16 +4727,57 @@ fn io_diagnostics_are_english_and_stable() {
     assert!(msg.contains("does not exist"), "{msg}");
 }
 
-/// A missing DIRECTORY component and a missing FILE are different mistakes, and
-/// Windows reports both as `ErrorKind::NotFound` -- only the raw code tells them
-/// apart. Saying "no such file" when the directory is missing sends the reader
-/// to the wrong place, so the two codes are separated INSIDE the NotFound arm
-/// (an arm below it is unreachable on Windows, which is where it matters).
+/// A missing DIRECTORY component and a missing FILE are different mistakes,
+/// but the raw code only separates them on WINDOWS (2 = the final component,
+/// 3 = an ancestor; Linux reports BOTH as ENOENT, so `io_reason` alone cannot
+/// tell them apart there and used to say "the file does not exist" for a
+/// missing directory -- the wrong-pointer wording the Windows side had fixed,
+/// surviving one platform over). The distinction that travels is the caller's
+/// own knowledge of what it was opening, spelled in `io_reason_for(path,
+/// target)`, plus the parent probe for a missing ancestor -- both exercised
+/// here end to end through the real loader, in both shapes, on every
+/// platform.
 #[test]
 fn a_missing_directory_and_a_missing_file_are_told_apart() {
-    let missing_file = aoxn::io_reason(&std::io::Error::from_raw_os_error(2));
-    let missing_dir = aoxn::io_reason(&std::io::Error::from_raw_os_error(3));
-    assert_ne!(missing_file, missing_dir);
-    assert!(missing_dir.contains("directory"), "{missing_dir}");
-    assert!(missing_file.contains("file"), "{missing_file}");
+    let dir = opt_dir("iomas");
+    let case = |src: &str, tag: &str| {
+        let m = dir.join(format!("{tag}.ax"));
+        std::fs::write(&m, src).unwrap();
+        let exe = dir.join(format!("out_{tag}.exe"));
+        let diags = aoxn::build_paths_exe(&[m.display().to_string()], &exe, true)
+            .err()
+            .expect("a missing import must fail");
+        diags[0].message.clone()
+    };
+    // Missing FILE: the parent of ghost.ax exists, so the wording is "file"
+    // on BOTH platforms -- Windows read it off the raw code, Linux off the
+    // parent probe inside io_reason_for. Same message, two mechanisms: this
+    // is the shape of a pin that travels.
+    let file_msg = case(
+        "import * from \"./ghost\"\n\ndef main() -> int:\n    return 0\n",
+        "case_file",
+    );
+    assert!(file_msg.contains("the file does not exist"), "{file_msg}");
+    // Missing DIRECTORY: ghost_dir does not exist, so the wording is
+    // "directory" -- Windows through raw code 3, Linux through the same
+    // parent probe (both paths' ancestor is missing).
+    let dir_msg = case(
+        "import * from \"./ghost_dir/ghost\"\n\ndef main() -> int:\n    return 0\n",
+        "case_dir",
+    );
+    assert!(
+        dir_msg.contains("the directory does not exist"),
+        "{dir_msg}"
+    );
+    assert!(!dir_msg.contains("the file does not exist"), "{dir_msg}");
+    // Where the platform reports the distinction by code, pin the code
+    // mapping too -- on the platform whose codes they are.
+    #[cfg(windows)]
+    {
+        let missing_file = aoxn::io_reason(&std::io::Error::from_raw_os_error(2));
+        let missing_dir = aoxn::io_reason(&std::io::Error::from_raw_os_error(3));
+        assert_ne!(missing_file, missing_dir);
+        assert!(missing_dir.contains("directory"), "{missing_dir}");
+        assert!(missing_file.contains("file"), "{missing_file}");
+    }
 }

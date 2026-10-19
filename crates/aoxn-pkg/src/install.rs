@@ -1293,7 +1293,6 @@ mod tests {
         std::thread::sleep(std::time::Duration::from_millis(120));
         install_registry_dep(&cache, &modules, "util", "1.0.0", &ck).unwrap();
 
-        let after = tree_state(&modules);
         assert!(shim.exists(), "a deleted shim must be regenerated");
         let body = std::fs::read_to_string(&shim).unwrap();
         assert!(body.contains("util.ax"), "the shim re-derives the entry: {body}");

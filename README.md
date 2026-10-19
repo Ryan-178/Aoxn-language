@@ -897,6 +897,24 @@ Full reference, including limits: [`docs/css-assets.md`](docs/css-assets.md).
 
 ## Status
 
+**v0.54.1** — **The missing-directory wording now travels** — 440 tests green
+(336 in the compiler workspace + 104 in `aoxn-pkg`; the IDE adds 36 Rust + 62
+frontend tests of its own) ·
+
+The Linux CI run caught a platform knot in v0.53.0's io-diagnostics: Windows
+tells a missing file (os error 2) from a missing path component (os error 3)
+by raw code, but Linux reports BOTH as ENOENT, so the file/directory wording
+fell back to "the file does not exist" for a missing directory — the
+wrong-pointer wording the Windows fix was about, one platform over.
+`io_reason_for(e, path, target)` now carries the distinction portably: the
+caller states what it was opening (`IoTarget::File` / `IoTarget::Dir`), and a
+parent probe answers "directory" whenever the ancestor is missing. Every
+compiler and filesystem-facing `aoxn-pkg` diagnostic goes through it; errors
+with no filesystem path at all (TCP resolve/connect) stay on plain
+`io_reason`. The pin is the end-to-end driver (`./ghost` vs
+`./ghost_dir/ghost`) on every platform, with the Windows raw-code mapping
+kept under `#[cfg(windows)]` — where the numbers it hardcodes are defined.
+
 **v0.54.0** — **A warm install no longer destroys a tree to learn that it is
 correct** — 440 tests green (336 in the compiler workspace + 104 in
 `aoxn-pkg`; the IDE adds 36 Rust + 62 frontend tests of its own) ·
@@ -1973,6 +1991,21 @@ print(asset_path(styles_fingerprint()))   # 鈥assets\82b4fb25鈥?css
 瀹屾暣璇存槑涓庨檺鍒惰 [`docs/css-assets.md`](docs/css-assets.md)銆?
 
 ## 现状
+
+**v0.54.1** · **"缺目录"的措辞现在跨平台成立** ·
+440 测试全绿（编译器工作区 336 + `aoxn-pkg` 104；IDE 另有 36 个 Rust + 62 个前端测试）·
+
+Linux CI 抓住了 v0.53.0 I/O 诊断里的一个平台结：Windows 用原始错误码区分
+"缺文件"（os error 2）与"缺路径分量"（os error 3），但 Linux 把**两者都**报成
+ENOENT，于是 file/directory 措辞在 Linux 上把缺目录也说成"the file does not
+exist"——正是那笔 Windows 修复要消灭的指错方向的措辞，在这一个平台上活着。
+现在的 `io_reason_for(e, path, target)` 把区分**可移植地**背起来：调用方声明
+自己要打开的是什么（`IoTarget::File` / `IoTarget::Dir`），祖先缺失时由 parent
+探测回答"directory"。编译器的每一条 I/O 诊断和 `aoxn-pkg` 面向文件系统的那部分
+都走它；完全没有文件系统路径的错误（TCP resolve/connect）留在纯 `io_reason` 上。
+钉子是端到端驱动（`./ghost` 对 `./ghost_dir/ghost`），在**每个**平台上跑；
+Windows 原始错误码的映射收进 `#[cfg(windows)]`——它硬编码的数字只在那个平台
+有意义。
 
 **v0.54.0** · **warm install 不再靠"删掉重装"来确认一棵树是好的** ·
 440 测试全绿（编译器工作区 336 + `aoxn-pkg` 104；IDE 另有 36 个 Rust + 62 个前端测试）·

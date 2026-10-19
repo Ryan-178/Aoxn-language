@@ -147,7 +147,7 @@ impl AssetSet {
     /// would leak forever.
     pub fn emit(&self, dir: &Path) -> Result<Vec<PathBuf>, crate::Diag> {
         std::fs::create_dir_all(dir).map_err(|e| {
-            err(u32::MAX, 0, 0, format!("cannot create asset directory '{}': {}", dir.display(), crate::io_reason(&e)))
+            err(u32::MAX, 0, 0, format!("cannot create asset directory '{}': {}", dir.display(), crate::io_reason_for(&e, &dir, crate::IoTarget::Dir)))
         })?;
         let mut written = Vec::new();
         for (name, bytes) in self.emitted_files() {
@@ -164,7 +164,7 @@ impl AssetSet {
             }
             let path = dir.join(&name);
             std::fs::write(&path, &bytes).map_err(|e| {
-                err(u32::MAX, 0, 0, format!("cannot write '{}': {}", path.display(), crate::io_reason(&e)))
+                err(u32::MAX, 0, 0, format!("cannot write '{}': {}", path.display(), crate::io_reason_for(&e, &path, crate::IoTarget::File)))
             })?;
             written.push(path);
         }
@@ -335,7 +335,7 @@ fn rewrite_one_url(
         return Ok(format!("{q}{spec}{q}"));
     }
     let bytes = std::fs::read(&target).map_err(|e| {
-        err(file, 0, 0, format!("cannot read '{}': {}", target.display(), crate::io_reason(&e)))
+        err(file, 0, 0, format!("cannot read '{}': {}", target.display(), crate::io_reason_for(&e, &target, crate::IoTarget::File)))
     })?;
     let name = referenced_name(&target, &bytes);
 
@@ -492,7 +492,7 @@ pub struct ImportState {
 /// used so diagnostics name the offending stylesheet.
 pub fn load(path: &Path, file: u32, assets: &mut AssetSet, imports: &mut ImportState) -> Result<(), crate::Diag> {
     let canonical = std::fs::canonicalize(path)
-        .map_err(|e| err(file, 0, 0, format!("cannot open '{}': {}", path.display(), crate::io_reason(&e))))?;
+        .map_err(|e| err(file, 0, 0, format!("cannot open '{}': {}", path.display(), crate::io_reason_for(&e, &path, crate::IoTarget::File))))?;
     // A stylesheet already pulled in by an earlier import contributes once;
     // its own text is inlined at that first position, which keeps cascade
     // order equal to a browser's first-seen order.
@@ -512,7 +512,7 @@ pub fn load(path: &Path, file: u32, assets: &mut AssetSet, imports: &mut ImportS
     imports.stack.push(canonical.clone());
 
     let src = std::fs::read_to_string(&canonical)
-        .map_err(|e| err(file, 0, 0, format!("cannot read '{}': {}", canonical.display(), crate::io_reason(&e))))?;
+        .map_err(|e| err(file, 0, 0, format!("cannot read '{}': {}", canonical.display(), crate::io_reason_for(&e, &canonical, crate::IoTarget::File))))?;
 
     let dir = canonical.parent().map(|p| p.to_path_buf()).unwrap_or_default();
     let kind = if canonical
@@ -634,7 +634,7 @@ fn inline_imports(
 /// Read + recursively inline one imported stylesheet.
 fn inline_file(path: &Path, file: u32, state: &mut ImportState) -> Result<String, crate::Diag> {
     let canonical = std::fs::canonicalize(path)
-        .map_err(|e| err(file, 0, 0, format!("cannot open '{}': {}", path.display(), crate::io_reason(&e))))?;
+        .map_err(|e| err(file, 0, 0, format!("cannot open '{}': {}", path.display(), crate::io_reason_for(&e, &path, crate::IoTarget::File))))?;
     if state.stack.contains(&canonical) {
         return Err(err(
             file,
@@ -645,7 +645,7 @@ fn inline_file(path: &Path, file: u32, state: &mut ImportState) -> Result<String
     }
     let already = state.visited.contains(&canonical);
     let src = std::fs::read_to_string(&canonical)
-        .map_err(|e| err(file, 0, 0, format!("cannot read '{}': {}", canonical.display(), crate::io_reason(&e))))?;
+        .map_err(|e| err(file, 0, 0, format!("cannot read '{}': {}", canonical.display(), crate::io_reason_for(&e, &canonical, crate::IoTarget::File))))?;
     if already {
         // Included once already; a repeat import contributes no text, which
         // keeps the cascade identical to include-once module loading.

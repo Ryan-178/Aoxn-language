@@ -590,7 +590,7 @@ fn temp_exe(input: &str) -> PathBuf {
 /// Run a compiled program, inheriting stdio, and return its exit code.
 fn run_exe(exe: &Path, args: &[String]) -> i32 {
     let status = Command::new(exe).args(args).status().unwrap_or_else(|e| {
-        eprintln!("error: failed to run compiled program {}: {}", exe.display(), aoxn::io_reason(&e));
+        eprintln!("error: failed to run compiled program {}: {}", exe.display(), aoxn::io_reason_for(&e, &exe, aoxn::IoTarget::File));
         std::process::exit(1);
     });
     status.code().unwrap_or(1)

@@ -469,7 +469,7 @@ fn entry_key(path: &Path) -> String {
 /// a stylesheet is bundled, never resolved, so it is not a module.
 fn load_file(path: &Path, key: &str, state: &mut LoadState) -> Result<Option<usize>, Vec<Diag>> {
     let canonical = std::fs::canonicalize(path)
-        .map_err(|e| vec![Diag::at("io", u32::MAX, 0, 0, format!("cannot open '{}': {}", path.display(), io_reason(&e)))])?;
+        .map_err(|e| vec![Diag::at("io", u32::MAX, 0, 0, format!("cannot open '{}': {}", path.display(), io_reason_for(&e, path, IoTarget::File)))])?;
     if state.stack.contains(&canonical) {
         let cycle: Vec<String> = state
             .stack
@@ -491,7 +491,7 @@ fn load_file(path: &Path, key: &str, state: &mut LoadState) -> Result<Option<usi
     state.stack.push(canonical.clone());
 
     let src = std::fs::read_to_string(path)
-        .map_err(|e| vec![Diag::at("io", u32::MAX, 0, 0, format!("cannot read '{}': {}", path.display(), io_reason(&e)))])?;
+        .map_err(|e| vec![Diag::at("io", u32::MAX, 0, 0, format!("cannot read '{}': {}", path.display(), io_reason_for(&e, path, IoTarget::File)))])?;
     // Register the CANONICAL path, not the one we were called with: import
     // resolution canonicalizes, so a name registered from `path` would be
     // spelled `stdlib\ui.ax` when the entry was spelled as an absolute path
@@ -588,6 +588,11 @@ fn load_file(path: &Path, key: &str, state: &mut LoadState) -> Result<Option<usi
 /// The numeric `os error` code is kept deliberately: it is locale-independent
 /// and is what a bug report needs. The localized string is not recoverable
 /// from it, and nothing downstream was parsing it.
+///
+/// This function alone answers "file or directory" only on WINDOWS, where the
+/// raw codes separate them (2 vs 3). Call sites that open a known-shaped path
+/// use [`io_reason_for`], which derives the distinction structurally and is
+/// therefore right on Linux too.
 pub fn io_reason(e: &std::io::Error) -> String {
     use std::io::ErrorKind::*;
     let phrase = match e.kind() {
@@ -611,10 +616,58 @@ pub fn io_reason(e: &std::io::Error) -> String {
         WriteZero => "the file could not be written",
         _ => "i/o error",
     };
+    io_reason_with_code(phrase, e)
+}
+
+/// What the caller was trying to open, where `io_reason` cannot know.
+///
+/// A miss reads differently for a file and for a directory, and the raw code
+/// separates them only on WINDOWS (2 = the final component, 3 = an ancestor).
+/// Linux reports BOTH as ENOENT (2), so on Linux `io_reason` alone says "the
+/// file does not exist" even when it was the directory that is missing -- the
+/// same wrong-pointer wording v0.53.0 fixed on Windows, surviving one
+/// platform over. The caller knows what shape it was opening, which is the
+/// portable source of truth; every diagnostic in the compiler goes through
+/// this variant now.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum IoTarget {
+    /// the path names a file the compiler reads, writes, or spawns
+    File,
+    /// the path names a directory the compiler creates, walks, or lists
+    Dir,
+}
+
+/// Append the locale-independent raw code to a phrase. The code is what a
+/// bug report needs (and what separates Windows' two NotFound shapes there);
+/// the localized string next to it is not ours to control, and never was.
+fn io_reason_with_code(phrase: &str, e: &std::io::Error) -> String {
     match e.raw_os_error() {
         Some(code) => format!("{phrase} (os error {code})"),
         None => phrase.to_string(),
     }
+}
+
+/// [`io_reason`], made path-aware: a missing ANCESTOR component means a
+/// directory is missing no matter what the raw code says (Windows: 3; Linux:
+/// ENOENT, same code as a missing file), so the parent probe is the
+/// structural, portable answer. A directory target says "directory" either
+/// way: whether the ancestor or the final component is missing, some
+/// directory in the chain is what the reader has to create.
+pub fn io_reason_for(
+    e: &std::io::Error,
+    path: &std::path::Path,
+    target: IoTarget,
+) -> String {
+    if e.kind() == std::io::ErrorKind::NotFound {
+        let parent_missing = path
+            .parent()
+            .is_some_and(|p| !p.as_os_str().is_empty() && !p.exists());
+        if target == IoTarget::Dir || parent_missing {
+            return io_reason_with_code("the directory does not exist", e);
+        }
+        return io_reason_with_code("the file does not exist", e);
+    }
+    io_reason(e)
 }
 
 fn pretty(p: PathBuf) -> PathBuf {
@@ -1088,7 +1141,7 @@ pub fn link_opts(obj_path: &Path, exe_path: &Path, libs: &[String], lib_paths: &
     loop {
         let out = timed("link", || {
             cmd.output().map_err(|e| {
-                vec![Diag::at("link", u32::MAX, 0, 0, format!("failed to spawn {}: {}", clang.display(), io_reason(&e)))]
+                vec![Diag::at("link", u32::MAX, 0, 0, format!("failed to spawn {}: {}", clang.display(), io_reason_for(&e, &clang, IoTarget::File)))]
             })
         })?;
 
