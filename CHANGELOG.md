@@ -22,6 +22,38 @@ minor bumps while pre-1.0: each minor version is a language milestone.
   correcting stale version/test totals, installer download behavior and the
   scope of what the self-host fixed point proves.
 
+## [0.55.0] - 2026-10-24
+
+**`-2 ** 2` is `-4` — now actually true.** The parser had computed
+`(-2) ** 2` = 4 ever since `**` shipped in v0.51.0: `pow_expr` parsed its
+LEFT operand through `unary_expr`, so the unary minus landed INSIDE the
+power. Every document said otherwise — the spec prose, AGENTS.md, the
+README, and the test's own comment ("Python: 1024, 512, -4, ...") — but the
+test's assert had been written to match the parser instead of the
+documented semantics, so the bug sat pinned in green. `~2 ** 2` was the
+same bug (9, not ~4 = -5), and `2 ** -3 ** 2` computed 512 where Python
+computes `2 ** -(3 ** 2)`.
+
+The grammar is Python's now, for real: `unary := ("~"|"-"|"+") unary |
+power` and `power := postfix ["**" unary]` — the prefix operators wrap the
+power on their right, and `mul`'s operands are `unary` (so `2 * -3` still
+parses). The self-host needed NO mirror: stage-2's parser has no `**` at
+all (programs it compiles do not use it), so the two stages cannot disagree
+about this form.
+
+**How it was found**: this version also adds the AGENTS.md **language
+card**, a condensed surface+stdlib reference so an agent can write `.ax`
+directly without probe files. Its verification program — written from the
+card alone — asserted the documented `-4` and the compiler disagreed. The
+card's whole premise is that docs and compiler agree; a probe written FROM
+the docs failing means the docs were the test, and the parser was wrong.
+The blast radius was measured before fixing: no `.ax` source in the
+repository uses a unary operator directly before `**` (the only hits are
+comments), so the change touches exactly one test's expectations, plus the
+new `~2 ** 2` pin.
+
+## [0.54.1] - 2026-10-19
+
 ## [0.54.1] - 2026-10-19
 
 The Linux CI run of v0.53.0's io-diagnostics suite failed — and the failure

@@ -34,3 +34,8 @@ tmp/
 # construction — the script rewrites it on every run and restores nothing, so
 # committing it would only put a stale timestamp in history.
 crates/aoxn-pkg/src/.testbuild.rs
+
+# driver tests write these into the package root and clean up on success;
+# a failed run leaves them behind, and they are never source
+AOXN_stdlib_test.txt
+AOXN_card_verify.txt

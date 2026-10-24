@@ -4,7 +4,7 @@
 
 ### Supported versions and reporting
 
-The current compiler is **0.54.1**, in the supported **0.54.x** line; fixes
+The current compiler is **0.55.0**, in the supported **0.55.x** line; fixes
 land on `main` first. Earlier minor lines are not maintained. The independent
 package-manager crate is **0.42.0**. Version history is in
 [CHANGELOG.md](CHANGELOG.md). Windows and Linux are supported; macOS is not.
@@ -148,7 +148,7 @@ validation remain separate from the local Windows compiler checks.
 
 ### 支持版本与报告渠道
 
-当前编译器 **0.54.1** 属于受支持的 **0.54.x** 系列，修复先落在 `main`；
+当前编译器 **0.55.0** 属于受支持的 **0.55.x** 系列，修复先落在 `main`；
 更早的小版本不维护。独立包管理器 crate 版本为 **0.42.0**，历史见
 [CHANGELOG.md](CHANGELOG.md)。支持 Windows 和 Linux，不支持 macOS。
 

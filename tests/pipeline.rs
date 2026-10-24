@@ -4001,13 +4001,143 @@ fn power_operator() {
             print(to_float(2) ** 0.5)
             print(3 ** -1)
             print(1 ** 1000)
+            print(~2 ** 2)
             return 0
         "#,
     );
-    // Python: 1024, 512, -4, 18, 1.414214, 0.5, 1.
+    // Python: 1024, 512, -4, 18, 1.414214, 0.5, 1, -5.
     // Aoxn differs on exactly one: a NEGATIVE int exponent yields 0, because
     // int cannot hold Python's 1/3 — write `to_float(3) ** -1` for that.
-    assert_eq!(out, "1024\n512\n4\n18\n1.414214\n0\n1\n");
+    // (v0.55.0 fixed the LEFT operand: through v0.54.1 `-2 ** 2` computed
+    // `(-2) ** 2` = 4, contradicting this comment, the spec prose, AGENTS.md
+    // and README — the assert had been written to match the parser instead of
+    // the documented semantics. `~2 ** 2` was the same bug: 9, not ~4 = -5.)
+    assert_eq!(out, "1024\n512\n-4\n18\n1.414214\n0\n1\n-5\n");
+}
+
+/// The AGENTS.md language card promises that an agent can write a correct
+/// `.ax` program FIRST-SHOT, from the card alone. This is that program: it
+/// was written for v0.55.0 using nothing but the card, and by asserting the
+/// documented `-2 ** 2 == -4` it caught the parser computing `(-2) ** 2`.
+/// It now runs on every `cargo test`, so the card and the compiler cannot
+/// drift apart silently. (The card's original also exercises `stdlib/json`;
+/// the string-based `build_exe` API rejects imports, so the JSON section
+/// lives in the json_fileio suite and the stdlib here is inlined.)
+#[test]
+fn language_card_verification_program() {
+    let out = build_and_run_with_stdlib(
+        r#"
+        def add(a: int, b: int = 3) -> int:
+            return a + b
+
+        def twice(x: int) -> int:
+            return x * 2
+
+        def risky(n: int) -> int:
+            if n < 0:
+                raise "negative: " + str(n)
+            return n
+
+        struct Point:
+            x: int
+            y: int
+
+        def main() -> int:
+            # types, literals, operators
+            assert(0x1F == 31 and 0b101 == 5)
+            assert(-2 ** 2 == -4 and 2 ** 10 == 1024)
+            assert(-7 // 2 == -3 and 7 % 3 == 1)
+            assert((5 & 3) == 1 and not (5 & 3) == 3)
+            assert(1 < 2 <= 2 and "a" < "b")
+            print(1, 2.5, True, "three")
+
+            # strings are bytes
+            s = "Aoxn"
+            assert(s[0] == "A" and s[-1] == "n" and s[1:3] == "ox")
+            assert("ox" in s and "zz" not in s)
+            assert(len(s) == 4)
+            n = argc()
+            print(f"n={n} s={s}")
+
+            # arrays + struct
+            arr = [10, 20, 30]
+            arr[1] = 99
+            assert(len(arr) == 3 and arr[1] == 99 and 99 in arr)
+            p = Point(x=1, y=2)
+            p.x += 5
+            assert(p.x == 6)
+
+            # dict
+            d: dict[int] = {}
+            d["a"] = 1
+            if dict_has(d, "a"):
+                assert(d["a"] == 1)
+            assert(not dict_has(d, "zzz"))
+            for k in d:
+                print(k)
+
+            # Vec write-back
+            v = vec_new()
+            v = vec_push(v, 42)
+            assert(vec_get(v, 0) == 42 and vec_len(v) == 1)
+
+            # None + fn pointer
+            m: int | None = None
+            if m is None:
+                m = 7
+            if m is not None:
+                assert(m == 7)
+            cb: fn(int) -> int = twice
+            assert(cb(21) == 42)
+
+            # defaults + conditional expression + raise/try
+            assert(add(1) == 4 and add(1, 2) == 3)
+            lab = "pos" if n >= 0 else "neg"
+            try:
+                risky(-5)
+            except as e:
+                assert(len(e) > 0)
+
+            # StrBuf for loop-built strings
+            w = sb_new(64)
+            w = sb_str(w, "line")
+            w = sb_byte(w, 10)
+            built = sb_text(w)
+            assert(built[0] == "l" and len(built) == 5)
+
+            # files (stdlib)
+            ok = write_file("AOXN_card_verify.txt", "hello")
+            if ok:
+                assert(read_file("AOXN_card_verify.txt") == "hello")
+
+            # platform branch (constant-folded by the backend)
+            if target_os() == "windows":
+                print("win")
+            elif target_os() == "linux":
+                print("linux")
+
+            # stdlib generics
+            sorted_arr = sort([3, 1, 2])
+            assert(sorted_arr[0] == 1 and sorted_arr[2] == 3)
+
+            print(lab)
+            print("card-verify-ok")
+            return 0
+        "#,
+    );
+    let plat_line = if cfg!(windows) {
+        "win\n"
+    } else if cfg!(target_os = "linux") {
+        "linux\n"
+    } else {
+        ""
+    };
+    let expected = format!(
+        "1 2.500000 true three\nn=0 s=Aoxn\na\n{plat_line}pos\ncard-verify-ok\n"
+    );
+    assert_eq!(out, expected, "{out}");
+    // the program wrote into the test process's cwd; leave nothing behind
+    let _ = std::fs::remove_file("AOXN_card_verify.txt");
 }
 
 #[test]

@@ -1,4 +1,4 @@
-# Aoxn Language Specification (v0.42.0)
+# Aoxn Language Specification (v0.55.0)
 
 Aoxn is an AI-native, statically typed, ahead-of-time compiled language with a
 Python-style syntax. Design goals: minimal syntax, explicit semantics, native
@@ -404,9 +404,14 @@ eq    := rel (("==" | "!=" | "in" | "not" "in") rel)*
 rel   := shift (("<" | "<=" | ">" | ">=") shift)*
 shift := add (("<<" | ">>") add)*
 add   := mul (("+" | "-") mul)*
-mul   := power (("*" | "/" | "//" | "%") power)*
-power := unary ("**" power)?                     # right-associative (v0.51.0)
-unary := ("~" | "-" | "+") unary | primary       # NO `not` here (v0.52.0)
+mul   := unary (("*" | "/" | "//" | "%") unary)*
+# `**` (v0.55.0): the LEFT operand carries NO unary prefix -- Python's
+# `power: primary ["**" factor]` -- while the RIGHT one may (`2 ** -1`).
+# `unary` wraps `power` (Python's `factor`), which is what puts `~`/`-`/`+`
+# ABOVE `**` in precedence, so `-2 ** 2` is `-(2 ** 2)`. The first spelling
+# had `unary` inside the left side and computed `(-2) ** 2` = 4.
+unary := ("~" | "-" | "+") unary | power          # NO `not` here (v0.52.0)
+power := postfix ("**" unary)?                    # right-associative (v0.51.0)
 primary := INT | FLOAT | STRING | True | False | FSTRING
          | IDENT ("(" args ")")? | "(" expr ")"
          | "[" expr ("," expr)* "]" | "[" "]"      # array literal / index
@@ -422,9 +427,12 @@ have the same type** 闁?Aoxn has no implicit conversion, and a pair that only
 emitted as the C conditional operator, so structs and arrays keep their value
 semantics for free.
 
-**`**` (v0.51.0)** sits between unary and `*`, matching Python's grammar, so
+**`**` (v0.51.0)** sits between postfix and unary, matching Python's grammar
+(the prefix `~`/`-`/`+` bind LOOSER than a `**` on their right), so
 `-2 ** 2` is `-(2 ** 2)`; it is **right-associative** (`2 ** 3 ** 2` is
-`2 ** 9`). Two `int`s give an exact `int` (exponentiation by squaring), two
+`2 ** 9`). v0.55.0 fixed the left side: the first spelling put `unary`
+inside it and computed `(-2) ** 2` = 4. Two `int`s give an exact `int`
+(exponentiation by squaring), two
 `float`s give a `float`, and mixed operands are a type error 闁?there is no
 promotion, exactly like `%` and the bitwise operators, so write
 `to_float(2) ** 0.5`. **Deviation from Python:** a negative `int` exponent

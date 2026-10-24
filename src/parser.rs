@@ -1071,7 +1071,7 @@ impl Parser {
     }
 
     fn mul_expr(&mut self) -> Result<Expr, Diag> {
-        let mut lhs = self.pow_expr()?;
+        let mut lhs = self.unary_expr()?;
         loop {
             // `//` is Python's integer division; Aoxn's `/` already truncates
             // on two ints, so the two spellings share one operator
@@ -1083,7 +1083,7 @@ impl Parser {
             };
             let pos = self.pos();
             self.bump();
-            let rhs = self.pow_expr()?;
+            let rhs = self.unary_expr()?;
             // Python-style array replication: [e] * N  (or N * [e])
             let rep: Option<(Expr, usize)> = if allow_rep {
                 match (&lhs, &rhs) {
@@ -1108,20 +1108,28 @@ impl Parser {
         Ok(lhs)
     }
 
-    /// `**` sits between unary and `*`, exactly as in Python's grammar
-    /// (`factor: ("+"|"-"|"~") factor | power`), so `-2 ** 2` is `-(2 ** 2)`
-    /// and NOT `(-2) ** 2`. Right-associative: `2 ** 3 ** 2` is 2 ** 9.
+    /// `**` sits between postfix and unary, exactly as in Python's grammar:
+    /// the LEFT operand of `**` carries no unary prefix (`power: primary
+    /// ["**" factor]`), so `-2 ** 2` is `-(2 ** 2)` and NOT `(-2) ** 2`,
+    /// while the RIGHT operand may (`2 ** -1`). `unary_expr` wraps THIS
+    /// function (`factor: ("+"|"-"|"~") factor | power`), which is what
+    /// puts the prefix operators above `**` in precedence. Right-assoc:
+    /// `2 ** 3 ** 2` is 2 ** 9. v0.55.0 fixed the LHS: the first spelling
+    /// had `unary_expr` inside the left side, which computed `(-2) ** 2`.
     fn pow_expr(&mut self) -> Result<Expr, Diag> {
-        let lhs = self.unary_expr()?;
+        let lhs = self.postfix()?;
         if *self.peek() != Tok::PowStar {
             return Ok(lhs);
         }
         let pos = self.pos();
         self.bump();
-        let rhs = self.pow_expr()?;
+        let rhs = self.unary_expr()?;
         Ok(Expr::Binary { op: BinOp::Pow, lhs: Box::new(lhs), rhs: Box::new(rhs), pos })
     }
 
+    /// Python's `factor`: a prefix `~`/`-`/`+` over another factor, or a
+    /// `power`. Wrapping `pow_expr` here is what makes a prefix operator
+    /// bind LOOSER than `**` on its right (`-2 ** 2` is `-(2 ** 2)`).
     fn unary_expr(&mut self) -> Result<Expr, Diag> {
         let pos = self.pos();
         match self.peek() {
@@ -1145,7 +1153,7 @@ impl Parser {
                 self.bump();
                 self.unary_expr()
             }
-            _ => self.postfix(),
+            _ => self.pow_expr(),
         }
     }
 

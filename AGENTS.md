@@ -14,7 +14,10 @@ repo IS the
 compiler (Rust workspace: root `aoxn` crate + `crates/aoxn-pkg`).
 Language sources use the `.ax` extension. Language rules live in
 `docs/spec.md` (Windows-only: `docs/platform-support.md`) 鈥?keep it in sync with `src/parser.rs` + `src/typecheck.rs`
-when the grammar changes. Update `CHANGELOG.md` on every version bump.
+when the grammar changes. **Writing or editing `.ax` code: start from the
+language card below** (`## Aoxn language card`) -- the whole surface,
+condensed from `docs/spec.md` + the stdlib sources, so a correct program can
+be written first-shot WITHOUT probe files. Update `CHANGELOG.md` on every version bump.
 **The wiki (`wiki/`) is FROZEN since v0.29.3 (user instruction)** 鈥?do not
 update wiki pages anymore; `docs/` is the living documentation and stays in
 sync. AGENTS.md is a published repo file (tracked since v0.29.3) 鈥?update it
@@ -191,6 +194,270 @@ form of `--cc-warnings` (drops the hard-coded `-w`). NOTE: `AOXN_DUMP_IR`,
 
 Single test: `cargo test --test pipeline recursion_fib`.
 
+## Aoxn language card -- write `.ax` directly, no probe files
+
+Everything needed to write a correct Aoxn program FIRST-SHOT. This card is
+the whole surface, condensed from `docs/spec.md` (normative) and the stdlib
+sources; the deep traps keep living in the language-semantics section below.
+Verify a program WITHOUT probing: `cargo run -- check file.ax` (type-check
+only, no clang, what the IDE drives), then `cargo run -- run file.ax`.
+Write `.ax` files with the Write tool, never a shell heredoc (BOM trap
+below).
+
+### Skeleton, imports, functions
+
+```Aoxn
+import * from "stdlib"        # core stdlib (Vec, read_file, sort, Err, ...)
+
+def main() -> int:            # FIXED shape: no parameters, -> int or -> void
+    print("hello", 42)        # scalars, space-separated, newline
+    return 0
+```
+
+- Command line: `argc()` (count, NOT counting the program path) and
+  `arg(i)` (0-based, out of range answers `""`); `aoxn run app.ax -- a b`
+  passes 2 args. `def main(argc: int)` is a compile error.
+- Comments `#`; blocks are indentation; no semicolons; `if x < 2: return x`
+  (ONE simple statement) may share the line with `:`.
+- Imports (all spellings interchangeable; a bare specifier also probes the
+  importing file's own directory, then `aox_modules/`, then the stdlib):
+  ```Aoxn
+  import * from "stdlib"          # merge every top-level name
+  import * from "stdlib/json"     # a stdlib module, by dotted path
+  import time                     # namespace binding: time.time_now_ns()
+  import * from "./util.ax"       # relative file (quoted = no sibling probe)
+  from util import helper         # selective import (named only)
+  ```
+- Functions: parameters annotated, return annotation optional (void):
+  `def fib(n: int) -> int:`. Default values are TRAILING only
+  (`def f(a: int, b: int = 3)`); none on `extern def`/generics. Generics:
+  `def sort[T, N](arr: [T; N]) -> [T; N]` -- at most ONE length param `N`
+  (compile-time `int` inside), monomorphized per call site. `extern def
+  sqrt(x: float) -> float` is C FFI: scalar types only, no body. Recursion
+  and mutual recursion are fine; definition order does not matter.
+
+### Types
+
+| spelling | meaning |
+|---|---|
+| `int` | signed 64-bit; literals `42`, `0x1F`, `0b1010` |
+| `float` | 64-bit double; NEVER mixes with `int` implicitly (`to_int`/`to_float` only) |
+| `bool` | `True`/`False` (`true`/`false` synonyms); conditions must be `bool` |
+| `string` | immutable BYTES; `len()` is `strlen`; escapes `\n \t \r \0 \\ \"` |
+| `void` | function return only |
+| `[T; N]` | fixed array; COPIES on assignment/param/return; literals non-empty, one element type; `[0] * n` replication |
+| `Name` | struct: every field, by name, exactly once: `Point(x=1, y=2)`; no self-reference |
+| `dict[V]` | string-keyed map of one value type; heap handle |
+| `T \| None` | nullable T; the ONLY union form |
+| `fn(A, ...) -> R` | function pointer |
+| `Vec` (stdlib) | growable array of 8-byte slots (int/bool/string-ptr, f64 via views); heap handle |
+
+### Statements
+
+- Bindings: `x = 5` infers and FIXES the type; `x: int = 5` checks the
+  annotation; re-assignment keeps the type; no shadowing inside a function.
+- Augmented assignment: `+= -= *= /= %=` (also on `arr[i]`, `p.f`, strings).
+  **No bitwise augmented forms** -- write `x = x & y`. `//=` does not exist
+  (`//` is a division operator).
+- Control flow: `if cond:` / `elif cond:` / `else:`; `while cond:`;
+  `for i in range(n)` / `range(a, b)` / `range(a, b, step)`;
+  `for x in arr`; `for c in s` (walks BYTES); `for k in d` (dict keys,
+  insertion order); `break` / `continue`; `return` / `return expr`; `pass`.
+- `raise "message"` (string payload) unwinds to the nearest `try`:
+  ```Aoxn
+  try:
+      risky(-1)
+  except as e:
+      print("caught: " + e)
+  ```
+  `except:` alone discards the message. Uncaught = one report + exit 1.
+  `raise` counts as an exit for the all-paths-return rule.
+- `assert(cond)` / `assert(cond, msg)`: prints + exit 1, not catchable.
+- `exit(code)`: terminate now.
+- Enforced strictness: all-paths-return, no unreachable statements, one
+  definition per name, conditions must be `bool`.
+
+### Expressions -- the precedence traps
+
+- `-2 ** 2` is `-4` (`**` binds looser than unary minus, tighter than `*`,
+  right-associative); `2 ** -1` on two ints is `0` (negative int exponent) --
+  use `to_float(2) ** -1`.
+- **`==` binds TIGHTER than `&`** (C rule kept): `a & b == c` is
+  `a & (b == c)`; write `(a & b) == c`.
+- `not` is PYTHON's (v0.52.0): `not a == b` is `not (a == b)` -- looser than
+  comparisons and bitwise, tighter than `and`/`or`. `!` is the same token.
+- Bitwise `& ^ | ~ << >>` and `%`/`//` are int-only. `//` and `/` on two
+  ints both TRUNCATE toward zero (`-7 // 2` is `-3`, not Python's floor).
+- `in` / `not in`: `x in s` substring, `x in arr` element, `x in d` key.
+- Chained comparisons work: `a < b <= c` (the middle operand is evaluated
+  twice -- hoist a call into a variable first).
+- Conditional expression: `x = a if cond else b` -- both branches must have
+  the SAME type (no conversion invents one).
+- f-strings: `f"n={n}"` embeds int/float/bool/string; `{{`/`}}` are literal
+  braces; NO format specifiers (`{x:.2f}` does not exist).
+- Call sites are positional; struct construction is the by-name form.
+
+### Builtins (no import needed)
+
+`print(...)` (any number of scalars; floats as `%f`, 6 decimals) |
+`len(x)` (array: static length; string: bytes; dict: entries) | `str(x)` |
+`to_int(x)` / `to_float(x)` (the only scalar conversions) |
+`dict_has(d, k)` / `dict_del(d, k)` | `assert` | `exit` | `argc()`/`arg(i)`
+| `target_os()` -> `"windows"` / `"linux"` / `"other"`, folded at COMPILE
+time (platform branches constant-fold away before codegen) | `range` (a
+`for` form). Raw memory (the stdlib's escape hatch, no checks):
+`load_i64(addr)` / `store_i64(addr, v)`, `load_f64` / `store_f64`,
+`load_u8(base, off)` / `store_u8(base, off, v)` (`base` may be a string),
+`as_string(p)` / `as_ptr(s)` (strings only). No `sizeof`, no
+address-of-struct.
+
+### Strings are BYTES
+
+`s[i]` is a ONE-BYTE string (`s[-1]` counts from the end); `s[a:b]` slices
+bytes (open ends OK, bounds CLAMP, `s[3:1]` is `""`); **arrays are NOT
+sliceable** (the diagnostic says why: length is in the type); `x in s` is a
+substring test; `for c in s` yields one-byte strings. There is **no `char`
+type and none is coming** (`len(s)` is `strlen`). A string index past the
+end answers `""` (compiler-side clamp, a SECURITY.md property); array
+indexing is unchecked C-style by design. `\0` inside a string truncates
+every string builtin -- byte buffers go through `as_ptr`/`store_u8`.
+Building a string in a loop with `out = out + x` is O(n^2) (every `+`
+mallocs a fresh buffer and leaks the old one): use `StrBuf` (`sb_new` /
+`sb_byte` / `sb_str` / `sb_text`, threaded by value).
+
+### dict, Vec, None, fn pointers
+
+```Aoxn
+d: dict[int] = {}             # {} needs the annotation (nothing to infer)
+d["a"] = 1                    # insert / overwrite
+if dict_has(d, "a"):          # guard: reading a MISSING key RAISES
+    print(d["a"])
+for k in d:                   # keys, insertion order
+    print(k)
+```
+A dict is a HEAP HANDLE: copies share it, so a callee's inserts/`dict_del`
+are visible to the caller. Keys are strings only; values share one type.
+
+`Vec` (stdlib) obeys the WRITE-BACK rule -- growth reallocs, so every call
+that may grow RETURNS the live handle:
+```Aoxn
+v = vec_new()
+v = vec_push(v, 42)           # NOT vec_push(v, 42)
+x = vec_get(v, 0)             # unchecked, C-style
+```
+A helper that pushes MUST return the `Vec` (or carry it in a state struct
+and use `c = f(c)`); a function that pushes and then recurses cannot return
+a bare `int`. Strings ride slots via `vec_push_str`/`vec_get_str`; f64 via
+`store_f64`/`load_f64` views; `VecVec` nests vectors.
+
+`None` / `T | None`: widening `T -> T | None` is implicit; narrow with
+`x is None` / `x is not None` (checker AND codegen see the narrowed type
+inside the branch -- the narrowing is BRANCH-SCOPED: after the branch the
+variable is nullable again, unless the branch always returns); `x == None`
+is a type error; `print` and every operator reject a nullable until
+narrowed. `[1, None, 3]` infers `[int | None; 3]`.
+
+Function pointers: a bare function name in value position IS its address
+(`cb: fn(int) -> int = twice`, then `cb(21)`); `p = to_int(cb)` is the raw
+address for FFI and `f = p as fn(int) -> int` converts back. `extern def`
+rejects fn-pointer parameters (threads go through
+`CreateThread(0, 0, to_int(f), 0, 0, 0)`).
+
+### Errors: two channels
+
+- `raise` / `try` / `except` for a flow the program cannot continue
+  (payload is a string; uncaught = report + exit 1).
+- The `Err` VALUE channel (stdlib) for failures a caller INSPECTS:
+  `e = err_new(ERR_PARSE(), "bad port")`, `err_is_ok(e)`, `err_code_name`.
+  A payload rides an out-slot the caller owns: `p = out_new()`,
+  `out_set_i(p, v)` / `out_get_i(p)` (+ `_f` / `_s`), `out_free(p)` -- the
+  only shape that survives value semantics (mutating a struct parameter
+  inside a callee is discarded).
+
+### stdlib.ax core (`import * from "stdlib"`)
+
+- Math: `abs_i min_i max_i clamp_i pow_i gcd lcm isqrt is_prime`,
+  `abs_f min_f max_f clamp_f hypot`, `sqrt floor ceil` (CRT FFI).
+- Generic over `[T; N]`: `sort linear_search binary_search max_of min_of
+  reverse sum_int sum_float` (`sort` needs `<` on T: int/float/string).
+- I/O: `read_file(path) -> string` (`""` on failure -- indistinguishable
+  from an empty file), `write_file(path, content) -> bool`.
+- Process: `exe_path() exe_dir() asset_path(name) system(cmd)
+  system_exit_code(cmd)`.
+- Strings: `str_sub str_insert str_remove buf_str(p, n) is_digit is_alpha
+  is_space` and `StrBuf` (`sb_new sb_reserve sb_byte sb_str sb_text`).
+- Containers: the `vec_*` family, `vecvec_*`, `buf_new fill_zero`,
+  `malloc realloc free memcpy`.
+- Errors: `err_*`, `out_*`, and the codes
+  `ERR_IO() ERR_PARSE() ERR_RANGE() ERR_NOT_FOUND() ERR_INVALID()
+  ERR_UNSUPPORTED() ERR_NOMEM() ERR_AGAIN()`.
+
+### Module map (import by path; what each one gives)
+
+| import | gives you |
+|---|---|
+| `"stdlib/math"` | CRT `sin cos tan asin acos atan atan2 exp log log2 log10 pow fmod trunc`, `degrees radians lerp remap copysign_f`, `fdiv` (THE float division: IEEE for zero denominators, where `/` is UB), `NaN() Inf() NInf() is_nan is_inf is_fin`, `pi() e() tau()` -- the CAPITALIZED spellings are load-bearing (UCRT symbol collision) |
+| `"stdlib/time"` | `time_now_ns/_us` (monotonic), `time_unix/_ms/_ft` (wall clock, 1970 origin), `time_mono_ms`, `time_sleep/_ms` |
+| `"stdlib/datetime"` | `DateTime{year..second}`, `datetime_now` (local) / `datetime_utcnow`, `datetime_from_unix/_to_unix`, `datetime_format(dt, "%Y-%m-%d %H:%M:%S")`, `datetime_iso` |
+| `"stdlib/calendar"` | `cal_monthrange cal_weekday cal_is_leap cal_monthcalendar cal_month` |
+| `"stdlib/pathlib"` | `path_join path_name path_parent path_stem path_suffix path_norm path_split path_with_suffix`, `path_sep()` -- BUILD with `path_sep()`, READ either separator |
+| `"stdlib/os"` | `os_exists os_isdir os_isfile os_islink os_mkdir os_rmdir os_remove os_copy os_rename os_getenv os_setenv os_cwd os_chdir os_listdir(-> Vec)` |
+| `"stdlib/glob"` | `glob(pattern) -> Vec` (sorted; dotfile rule; NO `**`) , `glob_match` |
+| `"stdlib/json"` | `p = j_parse(src)` (`p.err == 0` ok; root = `p.dom.last`), `j_get_str/int/float/bool(dom, i, "key", dflt)`, `j_obj_get j_arr_get j_kind j_len j_dumps j_quote`, builders `jb_obj jb_arr jb_set jb_push jb_set_str/int/num/bool/null/raw`, `j_read_file` (err: 0 ok / 1 parse / 2 I-O) / `j_write_file` |
+| `"stdlib/base64"` | `b64_encode_str b64_encode_url_str`, `b64_decode -> B64{p, n}` (`n == -1` invalid; bytes may contain NUL), `b64_decode_str` |
+| `"stdlib/hashlib"` | `sha256(data, len) -> hex`, `sha256_str`, the sha1/md5 twins, incremental `sha256_new/_update/_final` |
+| `"stdlib/hmac"` | `hmac_sha256/_sha1/_md5(key, msg) -> hex` |
+| `"stdlib/bisect"` / `"stdlib/heapq"` | `bisect_left/right`, `insort_left/right` (handles come back), `bisect_find`; `heap_push/_pop/_peek` (pop's value lands in `.res`) |
+| `"stdlib/ui_win"` (Windows: `-l user32 -l gdi32`) or `"stdlib/ui_x11"` (Linux) -- ONE import pulls the whole toolkit (`ui.ax` core + `ui_draw.ax` widget layer + the backend) | immediate-mode widget toolkit -- `docs/ui.md`, `examples/ui_gallery.ax` |
+| `"stdlib/net/http"` (Windows: `-l winhttp`) / `"stdlib/net/codec"` / `"stdlib/net/sse"` | HTTP transport, UTF-16/base64/url-encode helpers, SSE frames |
+| `"stdlib/openai/client"` / `"stdlib/anthropic/client"` (+ `blocks`, `tools`) | the two API SDKs (`oa_*` / `an_*`) -- `docs/openai-sdk.md`, `docs/anthropic-sdk.md` |
+
+### Recipes
+
+```Aoxn
+# CLI args
+n = argc()
+if n > 0:
+    name = arg(0)
+
+# files (stdlib): "" on failure; write returns bool
+s = read_file("in.txt")
+if s != "":
+    write_file("out.txt", s)
+
+# JSON round trip
+p = j_parse(src)                    # p.err: 0 ok / 1 parse error
+if p.err == 0:
+    root = p.dom.last
+    uid = j_get_int(p.dom, root, "id", 0)
+
+# growable list -- write-back, the handle comes back
+v = vec_new()
+v = vec_push(v, 42)
+
+# build a string in a loop -- StrBuf, never out = out + x
+w = sb_new(256)
+w = sb_str(w, "line")
+w = sb_byte(w, 10)                  # newline byte
+s2 = sb_text(w)
+
+# platform branch (constant-folded away by the backend)
+if target_os() == "windows":
+    print("win")
+```
+
+### Does NOT exist (do not try it, do not probe for it)
+
+Closures/lambdas; classes/methods/inheritance; enums, tagged unions, `Any`
+(the only union is `T | None`); tuples, multiple assignment, unpacking
+(`a, b = f()`); set literals; comprehensions; generators/`yield`; `with`;
+decorators; a `char` type; implicit numeric conversions; truthiness
+(conditions must be `bool`); `??`; f-string format specifiers; augmented
+bitwise assignment; unsigned ints; `sizeof` / address-of a struct; keyword
+arguments at call sites; top-level statements (everything lives in `def`);
+stdin (no `input()`); `inf`/`nan` literals (`math.NaN()` / `math.Inf()`);
+`**=` and friends; array slicing.
+
 ## Environment facts (non-obvious, verified)
 
 - **clang is the only external toolchain** (needed to compile the generated C
@@ -254,6 +521,14 @@ Single test: `cargo test --test pipeline recursion_fib`.
 
 ## Windows tooling gotchas (learned the hard way)
 
+- **Git Bash does not have `cargo` on PATH on this machine** 鈥?it lives at
+  `$HOME/.cargo/bin` and Git Bash needs the POSIX spelling:
+  `PATH="$HOME/.cargo/bin:$PATH" bash run_pkg_tests.sh`. The Windows-form
+  `$USERPROFILE` prepend silently does nothing (a backslash path in a
+  colon-separated PATH). Related trap seen the same session: **a pipe
+  through `tail`/`grep` masks the real exit code** 鈥?`cargo ... | tail -1`
+  exits 0 even when cargo failed; check the log text, not the pipeline's
+  status, or run the command bare.
 - **A `git push` that SUCCEEDS can still print an error and exit 1 under
   PowerShell.** GitHub writes `remote: This repository moved. Please use the
   new location: ...` to **stderr** (the notice names `Ryan-178/Aoxn-language`
@@ -462,7 +737,10 @@ crates/aoxn-pkg       package manager crate (its own dependency set; see above)
     invent one in the least-looked-at place.
   - **`-2 ** 2` is `-4`** (`**` binds looser than unary minus, tighter than
     `*`, right-associative), and a **negative `int` exponent yields 0**,
-    not a float — `to_float(3) ** -1` for that.
+    not a float — `to_float(3) ** -1` for that. (v0.55.0: the parser had
+    computed `(-2) ** 2` = 4 from day one — the test's assert matched the
+    parser while its own comment and every doc said -4; the language
+    card's verification program, written from the card alone, caught it.)
   - The TS front end lowers `c ? a : b` into the same node (it used to
     reject the ternary outright).
 

@@ -12,9 +12,14 @@ to ISO C and invokes clang; it does not link LLVM libraries. The compiler
 library in `src/` has no external Rust dependencies. The separate package
 manager uses dependencies pinned in `Cargo.lock`.
 
-**Current version: 0.54.1** (`Cargo.toml`, latest released entry in
-[CHANGELOG.md](CHANGELOG.md)); package manager crate: **0.42.0**. Development
-changes after that release preserve language semantics: exception reachability
+**Current version: 0.55.0** (`Cargo.toml`, latest released entry in
+[CHANGELOG.md](CHANGELOG.md)); package manager crate: **0.42.0**. v0.55.0
+fixes `**` precedence to Python's rule — `-2 ** 2` is `-4` (the parser had
+computed `(-2) ** 2` ever since v0.51.0) — and adds the **language card** in
+AGENTS.md, a condensed surface+stdlib reference that lets an AI agent write
+correct `.ax` directly, without probe files (pinned by
+`language_card_verification_program`). Development changes after that
+release preserve language semantics: exception reachability
 uses a reverse-call-edge worklist instead of repeated whole-graph scans, and
 module rewriting borrows its immutable member tables rather than cloning the
 whole table for every module. These are compiler-time changes, not changes to
@@ -81,7 +86,9 @@ disables it; `AOXN_CACHE_DIR` relocates it. `AOXN_TIME=1` reports lex, parse,
 ### Language and boundaries
 
 - Indentation blocks, `def`, `elif`, `pass`, `#` comments, type inference,
-  defaults, conditional expressions, `**`, multi-value `print`, and generics.
+  defaults, conditional expressions, `**` (right-associative; the prefix
+  `~`/`-`/`+` bind looser than a `**` on their right, so `-2 ** 2` is `-4`),
+  multi-value `print`, and generics.
 - Strict types: no implicit int/float conversion, bool-only conditions,
   no retyping bound variables, and checked return/control-flow rules.
 - Fixed-size arrays and structs copy by value. Strings are immutable,
@@ -102,7 +109,10 @@ disables it; `AOXN_CACHE_DIR` relocates it. `AOXN_TIME=1` reports lex, parse,
   closures and GC remain gaps. See [TS plan](docs/ts-m1-spec.md).
 
 The [language specification](docs/spec.md) is authoritative. Known limitations
-and their consequences are in [language gaps](docs/language-gaps.md).
+and their consequences are in [language gaps](docs/language-gaps.md). The
+[AGENTS.md language card](AGENTS.md) condenses the whole `.ax` surface, the
+builtin list and the stdlib module map for AI agents: a program written from
+the card alone compiles and runs, and that program is a permanent pipeline test.
 
 ### Libraries, packages and tools
 
@@ -162,8 +172,8 @@ cargo test --manifest-path ide/src-tauri/Cargo.toml
 
 The package test script refreshes a marker to work around Windows Smart App
 Control blocking reused unsigned test binaries. IDE checks are separate from
-the root workspace. Local Windows validation passed **338 root tests and 104
-package-manager tests (442 total, zero failed/ignored)**. The individual suite
+the root workspace. Local Windows validation passed **339 root tests and 104
+package-manager tests (443 total, zero failed/ignored)**. The individual suite
 results and measurement conditions are recorded in the
 [compiler performance report](docs/p2-compiler-performance.md), not inferred
 from old README counts. Tests cover diagnostics, generated-code behavior,
@@ -184,7 +194,8 @@ Windows validation does not replace the Linux CI run or test the IDE.
 | `docs/` | maintained specifications, guides and measurements |
 | `wiki/` | frozen historical documentation; do not use as current authority |
 
-Contributions follow [AGENTS.md](AGENTS.md); report vulnerabilities privately
+Contributions follow [AGENTS.md](AGENTS.md) -- its language card is the
+one-stop `.ax` reference; report vulnerabilities privately
 as described in [SECURITY.md](SECURITY.md). Licensed under [Apache-2.0](LICENSE).
 
 ---
@@ -198,9 +209,13 @@ Rust 编译器把 `.ax` 降低为 ISO C，再调用 clang 生成原生程序；�
 不链接 LLVM 库。`src/` 编译器库不依赖外部 Rust crate，独立包管理器的依赖
 由 `Cargo.lock` 固定。
 
-**当前版本为 0.54.1**，来源是 `Cargo.toml` 与
+**当前版本为 0.55.0**，来源是 `Cargo.toml` 与
 [CHANGELOG.md](CHANGELOG.md) 最新已发布条目；包管理器 crate 为 **0.42.0**。
-本次开发中的优化不改变语言语义：异常可达性改为反向调用边工作队列，避免
+v0.55.0 把 `**` 的优先级修正为 Python 规则——`-2 ** 2` 是 `-4`（自 v0.51.0 起
+解析器一直在算 `(-2) ** 2`）——并在 AGENTS.md 加入**语言卡**：浓缩的全部语法面
+与标准库模块地图，让 AI 代理免探针文件直接写对 `.ax`（由
+`language_card_verification_program` 永久钉住）。本次开发中的优化不改变语言语义：
+异常可达性改为反向调用边工作队列，避免
 反复扫描全图；模块重写直接借用只读成员表，不再为每个模块克隆整张表。
 优化针对编译器耗时，不是生成程序的运行速度。测量方法、结果和限制见
 [编译器性能报告](docs/p2-compiler-performance.md)。
@@ -244,7 +259,8 @@ typecheck、codegen、link 阶段耗时；测 Rust 编译器自身应使用 `aox
 ### 语言与边界
 
 - 支持缩进块、`def`、`elif`、`pass`、`#` 注释、推断、泛型、默认参数、
-  条件表达式、`**` 和多参数 `print`。
+  条件表达式、`**`（右结合；前缀 `~`/`-`/`+` 比右侧的 `**` 结合更松，
+  `-2 ** 2` 是 `-4`）和多参数 `print`。
 - 类型严格：int/float 不隐式转换，条件必须 bool，已绑定变量不改变类型，
   返回路径与控制流受检查。
 - 定长数组与结构体按值复制。字符串不可变、以 NUL 结束，长度、索引、切片
@@ -260,6 +276,8 @@ typecheck、codegen、link 阶段耗时；测 Rust 编译器自身应使用 `aox
   运行时对象、闭包和 GC 等仍有缺口，见 [TS 计划](docs/ts-m1-spec.md)。
 
 规则以[语言规范](docs/spec.md)为准，限制和影响见[语言缺口](docs/language-gaps.md)。
+[AGENTS.md 的语言卡](AGENTS.md)浓缩了全部 `.ax` 语法面、内置函数与标准库模块地图：
+只凭卡片写出的程序能编译并正确运行，该程序已是常驻测试。
 
 ### 标准库、包管理与工具
 
@@ -303,8 +321,8 @@ cargo test --manifest-path ide/src-tauri/Cargo.toml
 ```
 
 包测试脚本通过刷新标记绕过 Windows Smart App Control 对复用未签名测试程序的
-阻止。IDE 测试独立于根工作区。本地 Windows 实测 **338 项根测试 + 104 项包测试，
-共 442 项通过，无失败/忽略**。分套件结果记录在
+阻止。IDE 测试独立于根工作区。本地 Windows 实测 **339 项根测试 + 104 项包测试，
+共 443 项通过，无失败/忽略**。分套件结果记录在
 [编译器性能报告](docs/p2-compiler-performance.md)，不引用历史 README 中漂移的数字。
 测试涵盖诊断、运行结果、C 确定性、导入、资源、SDK 回环 mock、标准库和自举。
 Windows/Linux 均有 CI，Linux UI probe 使用 Xvfb；本地 Windows 验证不替代 Linux CI，
@@ -315,5 +333,6 @@ Windows/Linux 均有 CI，Linux UI probe 使用 Xvfb；本地 Windows 验证不�
 `web/` Windows HTTP 服务与对比基准，`dist/package.ps1` 打包安装器，`docs/`
 维护中的文档。`wiki/` 已冻结，只能作为历史资料。
 
-贡献遵守 [AGENTS.md](AGENTS.md)，安全问题按 [SECURITY.md](SECURITY.md) 私下报告。
+贡献遵守 [AGENTS.md](AGENTS.md)（语言卡是 `.ax` 的一站式参考），
+安全问题按 [SECURITY.md](SECURITY.md) 私下报告。
 许可证：[Apache-2.0](LICENSE)。
