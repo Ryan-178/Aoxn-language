@@ -1,771 +1,237 @@
-# Security Policy
+# Security policy
 
-Aoxn is a compiler: it consumes untrusted text (`.ax` sources, import paths) and
-produces native machine code that people then execute. Defects that turn that
-pipeline into memory corruption or code execution are security issues, and we
-want to hear about them privately before they are public.
+## English
 
----
+### Supported versions and reporting
 
-# English
+The current compiler is **0.54.1**, in the supported **0.54.x** line; fixes
+land on `main` first. Earlier minor lines are not maintained. The independent
+package-manager crate is **0.42.0**. Version history is in
+[CHANGELOG.md](CHANGELOG.md). Windows and Linux are supported; macOS is not.
 
-## Supported versions
+Report vulnerabilities privately to **zmjsjsg3@163.com**, not in a public
+issue, chat or discussion before a fix is available. Include the compiler
+version/commit, OS/architecture, clang version (`aoxn doctor`), smallest
+reproducer, exact commands, expected/observed results and impact. For
+miscompilation include `aoxn c file.ax` and whether `--O0` reproduces it.
+Remove credentials and private paths before attaching logs or dumps. State
+whether and how you wish to be credited; encryption can be arranged by an
+initial email without sensitive details.
 
-Aoxn is pre-1.0. Only the latest release line receives security fixes; older
-minors do not.
+Targets: acknowledge within **3 business days**, initial assessment within
+**10 business days**, and coordinated disclosure within **90 days of
+acknowledgement or when a fix ships, whichever comes first**. Confirmed critical
+issues target the next release or an urgent point release. We explain rejected
+reports, keep reporters informed and request permission before naming them.
+There is no bug bounty. Active exploitation may require earlier public guidance.
 
-| Version | Supported |
-|---|---|
-| `0.54.x` (current) | — yes |
-| `0.53.x` and earlier | — no · please reproduce on `main` or the latest release |
-| `main` (development) | ✅ yes, fixes land here first |
+### Trust boundaries
 
-Fix versions are always noted in [`CHANGELOG.md`](CHANGELOG.md). If you need a
-fix backported to an older tag, say so in your report and we will discuss it.
+Aoxn compiles source into native code; **neither compilation nor execution is
+a sandbox**. The Rust compiler invokes clang using argument vectors; the
+self-hosted driver also has a shell-based clang path. Compile and run untrusted
+projects only within a suitable OS/container boundary with limited filesystem,
+network and credential access. Imports read files and packages; compilation
+with `--emit-assets` writes assets. Do not run untrusted native output merely
+because the compiler accepted it.
 
-## Reporting a vulnerability
+The compiler library in `src/` has **zero external Rust dependencies**. The
+separate `crates/aoxn-pkg/` dependency set is pinned by `Cargo.lock`; package
+manager code does not depend on the compiler library. IDE and benchmark-app
+JavaScript/Tauri dependencies are separate supply-chain surfaces, not covered
+by the compiler library's zero-dependency claim.
 
-**Email `zmjsjsg3@163.com`.** Please do not open a public issue, and do not post
-the details in a discussion, chat, or social media before a fix is available.
+### In scope and invariants
 
-A useful report contains:
+- **Compiler memory safety and defined-program miscompilation.** Crafted source,
+  manifests, CSS, import paths or diagnostics must not corrupt memory, execute
+  unintended commands or emit unsafe behavior for otherwise defined programs.
+  Panics and wrong diagnostics are ordinary bugs unless they cross this boundary;
+  small inputs causing catastrophic memory/time growth also merit private reports.
+- **Compiler-time resource amplification.** Exception reachability now visits
+  reverse call edges with a worklist instead of repeatedly scanning the entire
+  graph; module rewriting borrows immutable member tables rather than copying
+  the whole graph per module. No unsafe code, dependency or language changes
+  were introduced. These remove particular repeated-work paths, **not every
+  possible denial of service**. No general source-size/depth/time limit is
+  claimed. Regression tests cover long chains, cycles and exception boundaries;
+  performance results are not proof of complete adversarial robustness.
+- **Reproducible emission and caches.** Generated identifiers must derive from
+  source identities/counters/names, never heap addresses. Hash-map iteration must
+  not change emitted C. `run`/`build` cache keys include source dependencies,
+  compiler identity and options. Stale or attacker-substituted executable reuse
+  is in scope; do not share writable cache directories with untrusted users.
+- **Import and install discovery.** Project packages precede installed stdlib.
+  Bare imports probe siblings first; quoted imports use sibling fallback only
+  after package probes fail. `AOXN_HOME`, `AOXN_STDLIB`, `AOXN_CLANG`, PATH and
+  explicit library flags are user-controlled configuration, not safe boundaries
+  against another process already controlling that environment.
+- **CSS asset writes.** Emitted names are compiler-generated and checked to reject
+  separators, `..` and absolute paths. Stylesheet content may influence emitted
+  bytes, never escape the requested output directory. URL assets are read, not
+  executed. `--tailwind` is a built-in subset, not an automatic Node download.
+- **Package integrity has two distinct digests.** `checksum` pins unpacked tree
+  content in `aoxn.lock`; `tarball_sha256` pins served tarball bytes, checked by
+  the HTTP backend when supplied. Missing legacy transport digests do **not**
+  waive extracted content verification. Warm-install reuse re-hashes the actual
+  existing tree before any keep decision, excluding **only `index.ax`**, the
+  installer-owned loader shim. Mismatches rebuild and re-verify; a broader hash
+  exclusion or unverified keep path is a vulnerability.
+- **Archive/path confinement.** Dependency keys and cache checksum components
+  are validated before filesystem use. Extraction rejects escape components,
+  absolute paths and archive links; a tarball must not write outside its root.
+  npm imports verify npm integrity and require Aoxn package metadata. HTTP
+  registries are read-only **plain HTTP**, not HTTPS: there is no transport
+  authentication/confidentiality, and an untrusted index can replace both bytes
+  and advertised checksums. Use a trusted source/index and appropriate transport.
+- **Package trust and filtering.** `trust.json` is a registry's claim, not an
+  independent audit. Missing/unreviewed/reviewed tiers stay distinct; unknown
+  schemas fail. Production-reachable packages must survive `--prod` pruning.
+  Parallel registry workers own independent `Registry::fork()` state.
+- **Installer.** The Windows installer unpacks only within its chosen root,
+  installs the packaged payload, updates PATH and rechecks that the compiler
+  remains present after self-test. It downloads **nothing by default**;
+  `-InstallClang` explicitly opts in. Unsigned artifacts can be quarantined by
+  Windows policy; that policy is not a compiler vulnerability, but reporting a
+  successful install while leaving an unusable executable is a defect.
+- **IDE filesystem/command boundary.** Rust canonicalizes paths and enforces
+  containment within the opened workspace; creation refuses clobbering, folder
+  selection uses a native dialog, and explorer links cannot escape the boundary.
+  Build destinations are recreated rather than overwriting through hard links.
+  The package command allowlist is enforced in Rust, including validation of
+  names; a compromised webview must not invent arbitrary shell/global commands.
+- **Runtime library parsers over hostile input.** JSON slabs/builders, UTF-8 and
+  UTF-16 conversion, SSE framing, URL/header parsing, filesystem conversion,
+  glob/base64 and UI message parsing must not overrun buffers or stop advancing.
+  Slab indices including `-1` are guarded, reallocating callees must return the
+  live handle, builder growth must not shrink below live child count, empty
+  sinks must remain valid and nonfinite/deep JSON must terminate. WinHTTP does
+  not silently follow credential-bearing redirects or accept truncated bodies
+  as clean success. String indexing/slicing helpers clamp out-of-range accesses;
+  removing those guards is a vulnerability, not an unchecked-array feature.
+- **Credential exposure.** SDK keys are ordinary heap strings and are not
+  scrubbed; process dumps and printing client structs can disclose them. Prefer
+  environment configuration, avoid dumping clients, and redact reports. The
+  SDK transport is Windows WinHTTP; SDKs do not run inside the compiler process.
+- **Dependency advisories.** IDE and benchmark dependencies are in scope. An
+  accepted advisory must remain recorded with a reason and exit condition;
+  `ide/src-tauri/audit.toml` records the glib upstream-version constraint.
+  Do not remove an exception without resolving its underlying dependency pin.
 
-1. **Version** — `aoxn version` (or the `version` field in `Cargo.toml`), the
-   commit/tag if you build from source, and `aoxn doctor` if the issue is
-   install-specific (it prints the resolved install root, stdlib and clang).
-2. **Platform** — Windows or Linux version and architecture (macOS is not a
-   supported target), plus the clang version from `aoxn doctor`; see
-   [`docs/platform-support.md`](docs/platform-support.md).
-3. **Reproduction** — the smallest `.ax` source you can manage, the exact
-   command you ran, and observed versus expected behavior. If the problem is in
-   generated code, include the generated C (`aoxn c file.ax`, or
-   `AOXN_DUMP_C=1`) and say whether it still reproduces with `--O0`.
-4. **Impact** — what an attacker gains and what they must already control
-   (e.g. "compiling this source executes a shell command" or "the emitted
-   function writes past a stack buffer").
-5. **Credit** — the name or handle you want used, or a request to stay anonymous.
+### Deliberate limitations and validation
 
-If you want to encrypt the report, say so in a first email with no details and
-we will arrange a channel.
+Unchecked array indexing, signed-integer overflow and invalid raw-memory/FFI
+use are undefined behavior in the **user program**. `as_string` aliases its
+buffer rather than copying it; callers must not free that storage. Strings
+are NUL-terminated bytes, concatenation results intentionally leak, and there
+is no GC or general runtime memory-safety promise. User-authored unsafe code
+is distinct from compiler/library corruption while processing hostile data.
 
-### What to expect
+The X11/Win32 window server is not a sandbox boundary; defects in parsing its
+messages remain in scope. UI clipping/cache rendering differences alone are
+ordinary correctness bugs. Registry tier claims do not certify safe code.
+The self-hosted compiler supports a subset of the Rust implementation; its
+fixed point does not prove equivalence of every Rust/Aoxn emitter feature.
 
-| Stage | Target |
-|---|---|
-| Acknowledgement of your report | within 3 business days |
-| Initial assessment (accepted / not a vulnerability / need more info) | within 10 business days |
-| Fix for a confirmed critical issue | next release, or a point release if the line is otherwise closed |
-| Coordinated disclosure | 90 days after acknowledgement, or as soon as a fix ships — whichever comes first |
-
-We will keep you updated at each stage and ask before publishing anything that
-credits you. If we conclude something is not a vulnerability, we will explain
-why, and we are happy to be corrected.
-
-There is no bug bounty. We will credit reporters in the advisory and the
-changelog unless you prefer otherwise. One thing we will not do is trade a fix
-for silence: if an issue is being exploited in the wild, we will publish with
-the information needed to protect users even if the reporter disagrees.
-
-## In scope
-
-- **Memory corruption or code execution in generated code** that the Aoxn source
-  did not opt into — wrong `memcpy` sizes, aggregate copy/ABI mistakes,
-  out-of-bounds pointer arithmetic in the emitter, string/buffer length
-  mishandling, miscompilation that turns a defined program into an unsafe one.
-- **Code execution or command injection in the toolchain** — the final link step
-  shells out to `clang`, the C backend (the only backend since v0.29.0) compiles
-  the generated `.c` file with `clang -c`, and the self-hosted driver calls
-  `system("clang ...")`. Crafted file names, `-l`/`-L`
-  values, or paths that escape into a shell are in scope.
-- **Memory-safety defects inside the compiler itself** — unsafe Rust, use of
-  freed or recycled AST nodes, raw-pointer misuse in the C emitter
-  (`src/codegen_c.rs`) or the FFI helpers.
-- **Build and supply-chain integrity** — the CI workflow, the
-  published artifacts, or anything that lets a source file or config influence
-  the compiler's own binaries. (The compiler library `src/` has zero external
-  dependencies by design, which is also a security property; the separate
-  `aoxn-pkg` crate uses pinned, widely used crates from `Cargo.lock`. A PR that
-  adds a dependency to `src/` needs a very good reason.)
-- **Build-cache poisoning** — `aoxn run`/`aoxn build` execute or copy
-  executables from `target/cache` based on a content hash; a way to run
-  attacker-controlled code through that path is a vulnerability.
-- **The package-manifest reader** (`src/pkg_manifest.rs`, since v0.29.1) — a
-  hand-rolled, zero-dependency JSON parser that reads untrusted
-  `aox_modules/<pkg>/aoxn.json` files to resolve bare package imports. Like
-  the lexer/parser, it consumes untrusted text, so a malformed manifest that
-  causes memory corruption or an unbounded hang in the compiler process is in
-  scope. (It is deliberately lenient — a bad manifest falls back to the
-  directory probe rather than aborting — but a panic or memory-unsafe read is
-  still a defect.)
-- **The CSS asset pipeline** (`src/assets.rs`, since v0.34.0; `url()` rewriting
-  and `--emit-assets` in v0.36.0) — reads stylesheets named by source `import`
-  directives, inlines `@import` chains, rewrites class names in `*.module.css`,
-  and (v0.36.0) rewrites and emits `url()` targets. Like the lexer and the
-  manifest reader it is hand-rolled, zero-dependency, consumes untrusted text,
-  and runs inside the compiler process — so a malformed or hostile stylesheet
-  causing memory corruption, an out-of-bounds slice, or an unbounded hang is in
-  scope. Its scanners walk byte strings with explicit index arithmetic (skipping
-  strings, comments and balanced braces by hand), so out-of-bounds reads and
-  non-advancing loops are the defects to look for.
-  **v0.36.0 changed this surface**: `--emit-assets <dir>` writes files, and a
-  stylesheet now influences their *contents* through `url()` rewriting. The
-  invariants that must hold are: emitted names are compiler-generated
-  (`<stem>.<16 hex>.<ext>`) and re-checked against a plain-name predicate that
-  rejects separators, `..`, and absolute paths before any write; a `url()`
-  target is **read**, never executed; and a stylesheet can never steer a write
-  outside the directory the user named. A defect that lets an attacker-chosen
-  stylesheet write or overwrite a file elsewhere on disk is a vulnerability.
-- **The npm bridge** (`crates/aoxn-pkg/src/npm.rs`, since v0.29.5) — imports
-  untrusted npm tarballs: extraction rejects `..` traversal, the sha512
-  (`dist.integrity`) is verified before unpacking, and only packages with
-  an `aoxn.json` root are accepted. A traversal entry that lands outside
-  `vendor/`, an integrity bypass, or a path-dep recording that escapes the
-  project directory is a vulnerability.
-- **Denial of service that is not just "a bad program"** — a small, well-formed
-  input that hangs the compiler indefinitely or exhausts memory catastrophically
-  is worth reporting; see the note below on where the line is. Quadratic
-  behavior on attacker-chosen length counts as this class too, and since
-  v0.50.0 the stdlib is audited for it: loops that re-scan or re-copy per
-  input character (the len()-is-strlen family) and loops that grow strings
-  by concatenation were swept out of the stdlib modules, including the
-  os/WinHTTP path encoder, the URL and header scanners, the JSON number
-  path, the SSE framer and both SDK request builders. A re-introduction
-  against hostile input (a long path, a long response, a long
-  conversation) is a DoS defect, not a slow program.
-- **Parse-time expansion of the Python-parity forms** (since v0.29.7:
-  augmented assignment, `//`, unary `+`, chained comparison) — these desugar
-  into nodes the checker and the emitter already understood, so they inherit
-  its rules. A chain or an augmented assignment duplicates the operand it
-  uses twice (`a < b < c` evaluates `b` twice); the expansion is linear in the
-  size of the written expression, and both the Rust parser
-  (`src/parser.rs`) and the self-hosted one (`selfhost/parser.ax`,
-  `dup_expr`) must stay bounded — an operand whose copy cost is
-  super-linear in the source length, or a recursive `dup_expr` that a crafted
-  depth can turn into stack exhaustion, is a defect.
-- **The string-sequence helpers (v0.51.2: `s[i]`, `s[a:b]`, `x in s`,
-  `for c in s`)** — these are the first compiler-emitted C helpers that read a
-  **user string's bytes by index**, and Aoxn's own rule is that indexing is
-  unchecked C-style. That rule is correct for arrays and struct fields, where
-  the caller owns the storage. It is *not* correct here: an unchecked read is
-  the compiler reading past the end of a buffer it was handed, which is a
-  memory-safety defect in the compiler rather than in the program. So
-  `ax_str_at` and `ax_str_slice` clamp, and an out-of-range index or bound
-  yields `""`. `tests/pipeline.rs::out_of_range_index_yields_empty_and_reads_
-  nothing` pins it with `s[1000000]`, which is an unmapped page without the
-  guard — a deterministic crash rather than a byte that might happen to be
-  zero. **A future change that removes those clamps, or that adds another
-  indexing helper without them, is a vulnerability in the compiler.** The same
-  applies to `ax_str_in`: its needle and haystack are both user strings, and a
-  search that ran off the end of either would be the same defect.
-- **Install-layout discovery** (since v0.30.0: `src/paths.rs`) — the compiler
-  now derives its install root, stdlib directory and bundled clang from
-  `AOXN_HOME` / `AOXN_STDLIB` and its own executable location, and resolves
-  `import * from "stdlib"` by name. The precedence must stay explicit
-  (`AOXN_CLANG` > `PATH` > bundled > system) and a project-local
-  `aox_modules/<name>` package must keep winning over the installed stdlib.
-  Anything that inverts that order, or that lets an attacker-controlled
-  directory take over as the stdlib or as clang via `AOXN_HOME` or a directory
-  beside the executable, is a vulnerability.
-- **The single-file installer** (since v0.30.0: `src/setup/`, `dist/package.ps1`)
-  — it writes to PATH, unpacks its appended payload and invokes winget. The
-  payload must keep coming from the packager that produced the exe, unpacking
-  must never write outside the install root (entry paths are checked), and
-  the unpacked `bin\aoxn.exe` must be the one that actually runs. Anything
-  that corrupts a user's PATH, writes outside the install root, escapes the
-  payload sandbox, or leaves a different binary on PATH than the one
-  installed is a vulnerability.
-- **The IDE's workspace boundary** (since v0.31.0: `ide/src-tauri/src/fsops.rs`,
-  extended in v0.31.1) — the IDE's webview reaches the filesystem only
-  through the Rust command layer, and every path goes through
-  `Workspace::resolve` first: canonicalised, refused if it resolves outside
-  the opened folder (compared component-wise), creation commands refuse to
-  clobber. A webview compromise is assumed; anything that lets it read,
-  write, create, or execute outside the opened folder — a traversal the
-  resolver misses, a sibling-directory prefix confusion, a command that
-  skips the gate, or an invented path reaching the shell — is a
-  vulnerability. (There is deliberately no read-any-path command and no
-  shell plugin; adding either is a design change, not a bug fix.)
-- **The IDE's package-manager gate** (since v0.33.0:
-  `ide/src-tauri/src/pkg.rs`) — the packages panel runs `aoxn pkg` from the
-  opened folder, and `ALLOWED_SUBCOMMANDS` is the entire surface the webview
-  can name: inspection plus local project mutations. Outward-facing or
-  global commands (publish, yank, cache, trust bootstrap, npm-import) are
-  refused in Rust, and package names typed into the panel are validated
-  before they reach clap. A way to run a non-whitelisted subcommand, to
-  smuggle a flag through the name field, or to make a command run outside
-  the opened folder is a vulnerability.
-- **The registry download path** (since v0.32.0: `Registry::fetch_tarball` in
-  `crates/aoxn-pkg/src/registry/`) — three backends fetch untrusted tarballs,
-  and the integrity contract has two distinct digests that must not be
-  confused again. `checksum` is the **manifest hash** over the unpacked file
-  tree; `tarball_sha256` is the digest of the **tarball bytes as served**, and
-  only the HTTP backend may compare against it. (Until v0.32.0 the HTTP
-  backend compared the download against `checksum` and therefore rejected
-  every real download — a failure, not a bypass, but the same confusion in
-  reverse would be a silent integrity hole.) What is in scope: any path where
-  a fetched or extracted tree is materialized without the post-extraction
-  manifest-hash check against the value pinned in `aoxn.lock`; any change
-  making the transport digest optional *bypass* the content check rather than
-  merely skip the wire check; any traversal in `tarball::unpack`; any registry
-  handle shared across the download threads added in v0.32.0 (each worker must
-  keep its own `Registry::fork()` — backends carry mutable state).
-  **Since v0.54.0 the keep path is part of the same contract**: a warm install
-  may reuse an existing `aox_modules/<name>/` tree ONLY when `manifest_hash`
-  of that tree — measured before anything is destroyed, excluding exactly ONE
-  file, the `index.ax` shim install itself writes after the verify — matches
-  the lockfile checksum, and a mismatched tree is removed and re-extracted. A
-  keep verdict that did not re-measure, or an exclusion list wider than that
-  one shim of our own making, is a vulnerability.
-- **Trust-tier handling** (since v0.32.0: `crates/aoxn-pkg/src/trust.rs`) —
-  `trust.json` is a curated registry's *claims about itself*, parsed from
-  untrusted text like any other registry file. `None` (no trust index) and
-  `unreviewed` must stay distinguishable from each other and from a reviewed
-  tier; an unknown `schema` must be refused rather than guessed at; and
-  nothing in this path may weaken or substitute for the lockfile's manifest
-  hash. A tier that silently promotes to `audited`, or a `--tier` gate that
-  passes for an unlisted package, is a vulnerability.
-- **`--prod` materialization** (since v0.32.0: `install::materialize`) — the
-  dev/prod split decides what lands in `aox_modules/`. A package reachable
-  from a production root must never be pruned, and a package named in both
-  `dependencies` and `devDependencies` counts as production. A build that
-  loses a dependency it declared is a denial of service on that project.
-- **stdlib runtime parsers over hostile input** (since v0.40.1, and two
-  consumers wide since v0.41.0: `stdlib/net/json.ax`, `sse.ax`, `http.ax`,
-  used by both `stdlib/openai/` and `stdlib/anthropic/`) — the JSON DOM and
-  its builder, the SSE framer, the URL/header splitting and the raw
-  response-header scan parse bytes a remote server controls, inside the
-  user's process. They are hand-written index arithmetic over malloc'd
-  buffers, so a malformed response that overruns a buffer, walks off the
-  DOM slab, or loops without advancing is a stdlib defect (same standing
-  as the UI backend's message parsing below), not merely "the program's
-  bug". Three specifics worth naming because each was found the hard way:
-  the DOM accessors answer `-1` for an absent key and callers pipe that
-  straight into another accessor (unguarded, it read before the slab);
-  `jb_set_raw` / `jb_push_raw` splice a parsed fragment into an existing
-  slab, so the stale pre-`realloc` pointer must never be used again; and
-  the response-header lookup scans a block whose length comes from the
-  server. The SDK test suites feed hostile fixtures offline precisely so
-  these paths stay provable; the SDKs never run inside the compiler
-  process and add no compiler-side surface. Two v0.50.0 additions to
-  that standing: quadratic scaling on hostile length is the DoS class
-  above (the os/WinHTTP path encoder, the URL and header scanners, the
-  JSON number path, the SSE framer and both SDK request builders all
-  re-scanned or re-copied per input character before the sweep), and a
-  byte sink whose result may stay EMPTY must answer the empty string
-  rather than write its final NUL through a buffer that was never
-  allocated -- an_msgs_json's joiners wrote through NULL on a response
-  with no text block (a pure tool call, a normal answer). New stdlib
-  string builders use buf_str(p, n) for known spans and a geometric
-  sink (JOut / StrBuf) for joins, and both must keep the empty case
-  answered.
-- **The stdlib parsers over hostile files and directories**
-  (`stdlib/os.ax` — v0.44.0 on Windows, dual-platform since v0.46.0, where
-  the same hand-written converters and directory walk serve the libc path
-  with `opendir`/`readdir` — plus `stdlib/glob.ax`, `stdlib/base64.ax`,
-  `stdlib/json.ax` file I/O) — the same standing as the SDK parsers, one
-  ring out: they consume bytes the *filesystem and directory entries*
-  control (file contents, names returned by `FindFirstFileW`/`readdir`),
-  still inside the user's process. `os`'s UTF-8 ↔ UTF-16 converters are
-  hand-written index arithmetic over malloc'd buffers; `glob`'s matcher is
-  a backtracking
-  recursion over pattern/name lengths and its walk joins attacker-named
-  directory entries into paths; `b64_decode` sizes its output buffer from
-  the input length and stores at `n`-derived offsets. A malformed filename,
-  a hostile path, or base64 input that overruns a buffer, indexes
-  out of bounds, or loops without advancing is a stdlib defect. (Unchecked
-  index arithmetic on buffers the *program* built itself remains the
-  documented out-of-scope behavior below; the boundary here is data the
-  program did not choose.)
-- **Third-party advisories in the benchmark app and the IDE** — the two
-  Next.js projects and the Tauri crate tree are this project's dependency
-  surface, so an advisory against them is this repository's business even
-  though the code is not Aoxn's: web/next-app (the Next.js comparison
-  target — cache poisoning in SSG/ISR, sharp, source-map-js) and ide/
-  (DOMPurify as Monaco pins it, the Tauri webview chain). The standard is
-  the same as anywhere else here: a fix that needs a version this project
-  cannot reach — a transitive pin at an exact version, or an upstream
-  advisory with no patched release yet — must be recorded **in-tree** with
-  its reason and its exit condition, not left as knowledge in someone's
-  head. ide/src-tauri/audit.toml is the worked example: RUSTSEC-2024-0429
-  (glib) is accepted there because the fix needs glib >= 0.20 while wry
-  0.57.0 and tao 0.37.1, both at their latest releases, require gtk ^0.18.
-  Deleting that entry without moving glib is the failure mode to report.
-- **Credential handling in the SDK clients** (v0.41.0) — `AnClient` /
-  `OaClient` hold the API key as an ordinary Aoxn string, so it lives in
-  the heap for the process's lifetime and is passed by pointer. Nothing
-  scrubs it, and a core dump or a crash report will contain it. The
-  reference Python SDK has the same property. Prefer the environment
-  (`an_client_env()` / `oa_client_env()`) over a literal in source, and do
-  not print an `AnClient` / `OaClient` struct: `print` on a struct renders
-  its fields, key included.
-
-## Audit findings and where they stand (2026-10-17 audit)
-
-An audit of the shipped code on 2026-10-17 produced thirteen findings. The
-six in the standard library were fixed in v0.51.0; the four in the package
-manager and the three in the IDE were fixed in v0.51.1. **All thirteen are
-closed.** They are listed here because the reasoning is the useful part, not
-because any of them is still open.
-
-- **Fixed v0.51.0 — cross-origin redirect leaked a credential**
-  (`stdlib/net/http.ax`). WinHTTP followed redirects itself and carried the
-  request headers, including Anthropic's `x-api-key`. Redirects are no longer
-  followed automatically; `r.location` carries the target so only the code
-  holding the credential decides to follow it.
-- **Fixed v0.51.0 — heap out-of-bounds read in the UTF-8 → UTF-16 encoder**
-  (`stdlib/net/codec.ax`). A truncated multi-byte sequence read past the end of
-  the buffer. Sequence length, continuation bytes and overlong/surrogate forms
-  are validated; malformed input becomes U+FFFD and consumes only the lead
-  byte, so a rejected sequence can never become an infinite loop.
-- **Fixed v0.51.0 — non-terminating `j_dumps` on an infinite float**
-  (`stdlib/json.ax`). `j_parse("1e400")` is five bytes of valid JSON and
-  `j_dumps` divided it by ten until it was under ten. A value that does not
-  move IS the non-terminating case. A deeply nested document could instead
-  overflow the stack; `J_MAX_DEPTH()` is now checked before the recursion.
-- **Fixed v0.51.0 — a truncated HTTP response was reported as a clean 200**
-  (`stdlib/net/http.ax`), so a partial body could be accepted as complete.
-- **Fixed v0.51.0 — quadratic SSE frame accumulation** (`stdlib/net/sse.ax`).
-- **Fixed v0.51.1 — an archive could write outside the extraction directory**
-  (`crates/aoxn-pkg/src/tarball.rs`). The guard was a substring `..` test on a
-  relative path, which says nothing about an absolute one, and `Path::join`
-  with an absolute path discards the destination. Components are walked now.
-  This also removed the old false positive: `a..b` is a legal file name.
-- **Fixed v0.51.1 — archive links are refused outright** (`tarball.rs`).
-  `tar::Entry::unpack` honours the archive's own link targets, so a hard link
-  to an outside file passed the CONTENT check — the manifest hash covers
-  content, not link identity — and the generated shim then truncated that file.
-  Refusing links removes the whole interpretation, symlink parents included.
-- **Fixed v0.51.1 — dependency keys are validated**
-  (`manifest.rs`, `install.rs`). A key becomes `aox_modules/<key>`, removed
-  RECURSIVELY before extraction and before any integrity check, so `../victim`
-  deleted a sibling directory. The project's own name was already checked
-  against a strict allowlist; the keys — the ones that reach a filesystem —
-  were not.
-- **Fixed v0.51.1 — a checksum can no longer become a path** (`cache.rs`).
-  `checksum` is interpolated into cache paths and the write precedes the
-  content check, so `../escaped` wrote outside the `tarballs/` namespace.
-  `tar_path` is now a validating choke point.
-- **Fixed v0.51.1 — the webview could replace the workspace boundary**
-  (`ide/src-tauri/src/lib.rs`). `ide_open_folder` trusted a frontend-supplied
-  path. It now opens the native dialog itself and takes no path.
-- **Fixed v0.51.1 — a build could overwrite a file through a hard link**
-  (`ide/src-tauri/src/toolchain.rs`). The artifact destination is removed
-  first, so the compiler creates a fresh file. This was chosen over asking
-  whether the destination is a link, because that needs an unstable Windows
-  API — and it closes the class on every platform.
-- **Fixed v0.51.1 — the explorer followed directory links out of the workspace**
-  (`ide/src-tauri/src/fsops.rs`). The test is containment, so a link that stays
-  inside is still shown.
-
-Two things the audit could not settle are now also closed as a side effect:
-the symlink-parent extraction escape (links are refused at all) and the
-question of whether a hard link can be detected portably (it cannot be asked
-about cheaply, but it does not have to be).
-## Out of scope (documented behavior)
-
-These are deliberate design decisions, documented in
-[`docs/spec.md`](docs/spec.md). Please do not report them as vulnerabilities —
-though a bug report about the *documentation* is welcome.
-
-- **Unchecked array indexing and signed integer overflow.** Like C, these are
-  undefined behavior in the language contract. Indexing out of bounds or
-  overflowing an `int` in Aoxn source is the program's bug, not the compiler's.
-- **Raw memory builtins** (`load_i64`, `store_i64`, `load_f64`, `store_f64`,
-  `load_u8`, `store_u8`, `as_ptr`, `as_string`). These exist as the
-  self-hosting escape hatch and are unsafe by design; unchecked pointer
-  arithmetic on their arguments is intentional.
-- **Memory growth from string concatenation.** Concat results are never freed
-  (immutable strings, no GC yet). It is stated behavior, not a leak bug.
-  (Since v0.50.0 the stdlib itself no longer builds strings this way in
-  loops; see docs/stdlib.md. User-level concatenation behaves as documented.)
-- **Where an unquoted import specifier resolves (v0.43.0).** `import util`
-  looks in the *importing file's own directory* first, then `aox_modules/`,
-  then the installed stdlib. The quoted spelling (`import * from "util"`)
-  skips the sibling probe and resolves exactly as it always has. This is
-  compile-time resolution over the author's own source tree — it decides
-  which file the compiler reads, nothing more — but it does mean a specifier
-  that used to reach only a package can now pick up a local file. Quote the
-  specifier if the package is what you meant. Where two modules contend for
-  one name, the compiler disambiguates by prefixing the emitted C identifier
-  with the module's path — and that prefix is filtered down to ASCII
-  alphanumerics and `_` before it reaches the generated text, so no path
-  character can escape the identifier.
-- **Antivirus quarantining the freshly installed compiler.** Aoxn ships one
-  unsigned `Setup.exe` that unpacks an unsigned `aoxn.exe`, and Windows Smart
-  App Control / Defender routinely quarantine a new, unsigned executable
-  *after* its first run. The installer does not pretend this cannot happen:
-  it re-checks the binary after its self-test, waits out a short antivirus
-  hold, and if the file is genuinely gone it fails the install naming the
-  cause and the remedy (exclude `%LOCALAPPDATA%\aoxn` from real-time
-  scanning) rather than leaving a PATH entry pointing at nothing. An
-  environment whose policy forbids unsigned binaries should be given a
-  signed release; that is a deployment decision, not an Aoxn vulnerability.
-  What *is* in scope is a defect in the detection itself — for instance the
-  installer reporting Done while the compiler has become unusable.
-- **Compiler crashes, hangs, or wrong error messages on malformed input.** These
-  are bugs — file them with the
-  [bug report template](https://github.com/AlonechatWorkspace/Aoxn-language/issues/new?template=bug_report.yml).
-  Escalate to a security report only if the failure involves memory corruption
-  in the compiler process, code execution, or a wrong-code emission that
-  silently makes a valid program unsafe.
-- **Vulnerabilities in programs people compile with Aoxn.** Aoxn provides no
-  sandbox and no runtime safety net; the compiled program's behavior is the
-  program author's responsibility. (The UI toolkit's raw FFI and raw-memory
-  helpers are unsafe by design, like everything above.) Since v0.47.0 the
-  widget layer also keeps its own shadow of the clip stack and uses it to
-  skip draws the platform would clip away, so calling `plat_clip_push` /
-  `plat_clip_pop` directly instead of the `ui_clip_*` wrappers
-  desynchronizes that shadow and silently drops draws; its text-measure
-  cache keys on a bounded 30-bit content hash, so a collision mis-centers one
-  label. Both are rendering outcomes, not memory-safety holes — but a
-  backend that lets a crafted message move either state out of range IS in
-  scope and should be reported. Since v0.49.0 two more invariants hold: the
-  X11 backend's clip depth (slot 821) always advances on push even when the
-  30-rect storage saturates, so a depth that disagrees with the stored rect
-  count means a corrupted shared block; and the layout stack's overflow
-  counter (slot 559) balances every refused `lay_push`, so a depth of 0 with
-  a nonzero counter means the 8 live levels were popped out of order.
-- **The window server as an untrusted input source.** The Win32/GDI backend
-  (`ui_win.ax`) speaks to whatever window owns the process, and the X11
-  backend (`ui_x11.ax`, back since v0.46.0) speaks to whatever server
-  `DISPLAY` names — so a hostile (or merely compromised) window manager or
-  X server is in the same position as a hostile terminal: it can feed the
-  toolkit crafted messages. This is inherent to speaking a windowing
-  protocol and is not a sandbox boundary the toolkit claims. Defects in
-  *how* either backend parses that input (buffer overruns from a crafted
-  message, out-of-bounds writes into the scratch blocks, the X11 event
-  offsets) ARE in scope and should be reported.
-- **A curated registry's trust index making unchecked claims.** The trust
-  index says *who reviewed a package's source*, not what the source does. A
-  registry listing a malicious package as `audited`, or a reviewer vouching
-  for code they did not read, is a curation failure, not a vulnerability in
-  Aoxn. Installing an `unreviewed` package warns and proceeds by design;
-  refusing it in CI is `aoxn trust check <pkg> --tier audited` as a
-  deliberate, visible step. What *is* in scope is a bug in the tier logic
-  itself (see the in-scope entry above).
-- **The TLS-free HTTP registry backend.** Aoxn's package manager HTTP client
-  is hand-rolled on `std::net::TcpStream` and rejects `https://` outright, so
-  a mirror fetched over plain HTTP has no transport authentication — neither
-  party is authenticated and the response is not confidential. This is a
-  documented design constraint, not an oversight: it keeps the crate's
-  dependency set free of build scripts. Deploy such a mirror only on a
-  network you trust. Defects *in* the client (request smuggling, a redirect
-  that escapes the configured base, a body-length check that can be fooled)
-  remain in scope.
-- **Upstream clang / MSVC defects.** Report those upstream — but do tell
-  us if the compiler depends on the broken behavior.
-- **Anything requiring an attacker who already controls the machine** or the
-  terminal the compiler runs in. The documented `AOXN_*` knobs are
-  configuration, not an attack surface — but a crafted value that escapes into
-  the link command or poisons the build cache is in scope (see above).
-
-## Safe harbor
-
-We will not pursue or support legal action against researchers who:
-
-- act in good faith and follow this policy,
-- test only against their own builds and data,
-- avoid privacy violations, data destruction, and disruption of services they do
-  not own,
-- give us reasonable time to fix the issue before public disclosure, and
-- do not use social engineering, physical attacks, or denial-of-service against
-  infrastructure (the compiler is a local tool; there is no service to test).
-
-If you are unsure whether something is in scope, ask first — email
-`zmjsjsg3@163.com` with just enough detail to describe the area, and we will tell
-you how we want it handled.
+The 2026-10-17 audit's thirteen findings were fixed in 0.51.0/0.51.1 (SDK
+redirect/encoding/JSON/framing, archive/path/cache integrity and IDE workspace
+issues). This is historical scope, not a guarantee that no other issues exist.
+For this performance change, root and package test results, byte-for-byte output
+comparisons and measurement limitations are recorded in
+[docs/p2-compiler-performance.md](docs/p2-compiler-performance.md). Those checks
+are correctness evidence, **not a new security audit**. Linux CI and IDE
+validation remain separate from the local Windows compiler checks.
 
 ---
----
 
-# 中文
+## 中文
 
-Aoxn 是一个编译器：它消费不可信的文本（`.ax` 源码、导入路径），产出人们随
-后执行的原生机器码。把这条管线变成内存破坏或代码执行的缺陷就是安全问题——
-我们希望在公开之前私下收到报告。
+### 支持版本与报告渠道
 
-## 支持的版本
+当前编译器 **0.54.1** 属于受支持的 **0.54.x** 系列，修复先落在 `main`；
+更早的小版本不维护。独立包管理器 crate 版本为 **0.42.0**，历史见
+[CHANGELOG.md](CHANGELOG.md)。支持 Windows 和 Linux，不支持 macOS。
 
-Aoxn 处于 pre-1.0 阶段：只有最新的版本线接收安全修复，旧的次版本不再修。
+请通过 **zmjsjsg3@163.com** 私下报告漏洞，修复前不要公开到 issue、聊天或讨论。
+提供版本/提交、系统与架构、`aoxn doctor` 中的 clang 版本、最小复现、完整命令、
+预期/实际结果与影响。误编译请附 `aoxn c file.ax`，说明 `--O0` 是否复现。
+附件先去掉密钥和私有路径，并注明署名意愿；需要加密可先发不含细节的邮件协商。
 
-| 版本 | 支持情况 |
-|---|---|
-| `0.54.x`（当前） | ✅ 支持 |
-| `0.53.x` 及更早 | ❌ 不支持——请在 `main` 或最新发布上复现 |
-| `main`（开发线） | ✅ 支持，修复最先落在这里 |
+目标为 **3 个工作日确认、10 个工作日初步评估**；协调披露期限为
+**确认后 90 天或修复发布，以较早者为准**。严重问题目标为下一版本或紧急补丁。
+我们会解释不接受的报告、同步进度并在署名前征求同意；没有漏洞赏金。
+存在主动利用时，可能需要更早发布保护用户的说明。
 
-修复版本永远记在 [`CHANGELOG.md`](CHANGELOG.md)。如需把修复反向移植到旧
-tag，请在报告里说明，我们再商量。
+### 信任边界
 
-## 报告漏洞
+Aoxn 将源码编译为原生代码，**编译与执行都不是沙箱**。Rust 路径使用参数向量
+启动 clang，自举驱动还有 shell 调用路径。处理不可信项目应使用合适的系统/容器
+隔离，限制文件、网络和凭据权限；导入会读取文件，`--emit-assets` 会写文件。
+编译成功不意味着可以安全执行输出程序。
 
-**发邮件到 `zmjsjsg3@163.com`。** 请不要开公开 issue，修复可用之前也不要把
-细节发到讨论区、聊天或社交媒体。
+`src/` 编译器库**不依赖外部 Rust crate**；独立 `crates/aoxn-pkg/` 依赖由
+`Cargo.lock` 固定，包管理器不依赖编译器库。IDE 和 Web 对比应用的 JS/Tauri
+依赖是另一供应链表面，不属于“编译器库零依赖”的承诺。
 
-一份有用的报告包含：
+### 范围与必须保留的不变量
 
-1. **版本** —— `aoxn version`（或 `Cargo.toml` 的 `version` 字段），从源码
-   构建的请附 commit/tag；若问题与安装有关，请一并附上 `aoxn doctor` 的输出
-   （它会打印解析到的安装根目录、stdlib 与 clang）。
-2. **平台** —— Windows 或 Linux 版本与架构（macOS 不是受支持的目标平台），
-   外加 `aoxn doctor` 打印的 clang 版本；见
-   [`docs/platform-support.md`](docs/platform-support.md)。
-3. **复现** —— 尽可能小的 `.ax` 源码、确切命令、实测行为与预期行为。若问题
-   出在生成代码里，请附生成的 C（`aoxn c file.ax` 或 `AOXN_DUMP_C=1`），并说明
-   `--O0` 下是否仍复现。
-4. **影响** —— 攻击者得到什么、已须控制什么（例如"编译该源码会执行 shell
-   命令"或"生成的函数越过栈缓冲写入"）。
-5. **署名** —— 你希望使用的姓名/昵称，或要求匿名。
+- **编译器内存安全、合法程序误编译**：源码、清单、CSS、导入路径或诊断不得
+  引起内存损坏、非预期命令执行，或把本来定义良好的程序变成不安全代码。
+  一般 panic/错误文案属于普通 bug；小输入造成灾难性耗时/内存增长也值得私报。
+- **编译耗时放大**：异常可达性改为反向边队列，模块重写借用只读成员表，去除
+  特定反复全图工作。没有添加 unsafe、外部依赖或语言变化；这**不代表全部 DoS
+  已消除**，没有承诺通用输入大小/递归深度/时间限制。长链、环和异常边界回归
+  证明特定行为，性能数字不是完整对抗性安全证明。
+- **确定性与缓存**：生成名称只能来自源码标识、计数器或名称，不得来自堆地址；
+  HashMap 顺序不得改变 C。缓存键包含依赖内容、编译器与选项；陈旧或被替换的
+  可执行文件复用在漏洞范围内，不应与不可信用户共享可写缓存。
+- **导入与工具链**：本地包优先于安装标准库；裸导入先同目录，引号导入只有包
+  探测失败后才回退同目录。`AOXN_HOME`、`AOXN_STDLIB`、`AOXN_CLANG`、PATH 与链接
+  选项属于用户配置，不是对能控制当前环境的其他进程的安全边界。
+- **CSS 输出**：输出名由编译器生成，并拒绝分隔符、`..`、绝对路径。样式表可
+  改内容，不能逃出目标目录；URL 资源只读不执行，`--tailwind` 不自动下载 Node。
+- **两个摘要不可混淆**：`checksum` 固定锁文件中的解包内容树，`tarball_sha256`
+  固定传输字节，仅 HTTP 后端在提供时检查。旧索引缺传输摘要不能跳过内容校验。
+  热安装保留前必须重新计算已安装目录哈希，**仅排除安装器生成的 `index.ax`**；
+  不匹配应重建并验证，扩宽排除项或未经校验直接复用都是漏洞。
+- **解包与路径**：依赖键、缓存 checksum 路径片段在文件操作前验证。归档拒绝
+  逃逸分量、绝对路径和链接，不得写出根目录；npm 导入检查完整性且要求 Aoxn
+  元数据。HTTP 镜像是只读**明文 HTTP**，不是 HTTPS，没有传输认证/保密性；
+  不可信索引可以同时替换数据与声称的摘要，必须信任来源并选合适的传输。
+- **信任等级与过滤**：`trust.json` 是注册表自述，不是独立审计。缺失、未审阅、
+  已审阅必须区分，未知 schema 拒绝；生产可达依赖不能被 `--prod` 裁掉。
+  并行下载 worker 分别持有 `Registry::fork()` 状态。
+- **安装器**：仅在选定根目录内解包打包时的负载，更新 PATH，自检后再次确认
+  编译器仍可用。**默认不下载**，`-InstallClang` 才显式启用。Windows 隔离未签名
+  文件是部署策略，不是语言漏洞；安装器假报成功却留下不可用编译器则是缺陷。
+- **IDE 边界**：Rust 规范化路径并检查是否在打开的工作区内，创建拒绝覆盖，
+  文件夹由原生对话框选择，浏览器树不能通过链接逃出工作区，构建目标先重新创建
+  防止硬链接覆盖。包命令白名单和名称验证在 Rust 中执行，不能由受攻击 webview
+  发明全局命令或任意 shell。
+- **库解析器**：JSON slab/builder、UTF 编码、SSE、URL/头、目录、glob/base64、
+  UI 消息解析不得越界或不前进。缺失索引 `-1` 要防护；realloc 后用返回的新句柄；
+  builder 容量不能缩到存活元素以下；空 sink、非有限浮点与深层 JSON 必须正确终止。
+  WinHTTP 不自动携带凭据重定向，不把截断响应当成功；字符串索引/切片必须保留越界
+  空串防护，不能以“数组不检查”为由删除。SDK 不运行在编译器进程中。
+- **凭据**：SDK 密钥是普通堆字符串，不清零；转储或打印 client 结构会泄露。
+  优先环境配置，不打印 client，报告先脱敏；其传输是 Windows WinHTTP。
+- **依赖公告**：IDE/Web 应用依赖漏洞属于本仓库范围；接受的风险必须记录原因与
+  退出条件。`ide/src-tauri/audit.toml` 记录 glib 的上游版本约束，未解决依赖前
+  不得直接删掉例外。
 
-如需加密报告，请先发一封不含细节的邮件说明，我们再安排通道。
+### 有意限制与验证
 
-### 你会得到什么
+数组越界、带符号溢出、无效原始内存/FFI 操作为**用户程序**的未定义行为。
+`as_string` 别名引用缓冲区而非复制，调用方不可释放对应存储。字符串为 NUL
+结束的字节，拼接结果故意不释放，没有 GC，也不承诺普遍的运行时内存安全。
+用户主动写的不安全代码与编译器/库处理外部数据时损坏内存是两回事。
 
-| 阶段 | 目标时限 |
-|---|---|
-| 确认收到你的报告 | 3 个工作日内 |
-| 初步评估（接受 / 不是漏洞 / 需要更多信息） | 10 个工作日内 |
-| 确认的关键问题的修复 | 下个发布；若该线已关闭则发补丁版本 |
-| 协同披露 | 收到报告起 90 天内，或修复发出即披露——以先到者为准 |
+X11/Win32 窗口服务不是沙箱边界，但消息解析缺陷仍在范围内；纯裁剪/缓存显示
+差异是普通正确性问题。注册表信任等级不保证源码安全。自举只实现 Rust 的子集，
+不动点不能证明两个发射器所有特性等价。
 
-每个阶段我们都会同步进展；发布任何署名内容前会先征得同意。如果我们判定
-不是漏洞，会说明理由，也欢迎你反驳。
-
-没有漏洞赏金。除非你另有要求，我们会在公告与变更日志里署名致谢。有一件事
-我们不做：用修复换沉默——若漏洞正在被野外利用，即使报告者不同意，我们也会
-连同保护用户所需的信息一起公开。
-
-## 范围内
-
-- **生成代码中的内存破坏或代码执行**，且 Aoxn 源码并未主动选择危险行为——
-  错误的 `memcpy` 尺寸、聚合复制/ABI 缺陷、发射器中的越界指针运算、
-  字符串/缓冲长度处理错误、把良定义程序误编译成不安全程序。
-- **工具链中的代码执行或命令注入** —— 最终链接步骤 shell 出去调 `clang`，
-  C 后端（v0.29.0 起的唯一后端）会对编译器生成的 `.c` 文件调 `clang -c`，
-  自举 driver 调 `system("clang ...")`；构造的文件名、`-l`/`-L`
-  值或路径逃逸进 shell 的都在范围内。
-- **编译器自身的内存安全缺陷** —— unsafe Rust、释放/回收后 AST 节点的误用、
-  C 发射器（`src/codegen_c.rs`）或 FFI 辅助中的原始指针误用。
-- **构建与供应链完整性** —— CI 工作流、发布产物，或任何让源码/
-  配置影响编译器自身二进制的路径。（编译器库 `src/` 有意保持零外部依赖，
-  这本身也是安全属性；独立的 `aoxn-pkg` crate 使用 `Cargo.lock` 锁定的
-  成熟第三方 crate。往 `src/` 加依赖的 PR 需要充分理由。）
-- **构建缓存投毒** —— `aoxn run`/`aoxn build` 按内容哈希从 `target/cache`
-  执行或拷贝可执行文件；能通过该路径运行攻击者控制的代码即为漏洞。
-- **包 manifest 读取器**（`src/pkg_manifest.rs`，v0.29.1 起）—— 手写的零依赖
-  JSON 解析器，读取不可信的 `aox_modules/<pkg>/aoxn.json` 来解析裸包导入。与
-  词法/语法分析器一样消费不可信文本，因此畸形 manifest 若在编译器进程中造成
-  内存破坏或无界挂起，属范围内。（解析器刻意宽松——坏 manifest 回退到目录探针
-  而非中止——但 panic 或内存不安全读取仍是缺陷。）
-- **CSS 资产管线**（`src/assets.rs`，v0.34.0 起；v0.36.0 增加 `url()` 改写与
-  `--emit-assets`）—— 读取由源码 `import` 指定的样式表、内联 `@import` 链、
-  改写 `*.module.css` 的类名，并（v0.36.0 起）改写与产出 `url()` 目标。与词法
-  分析器和 manifest 读取器一样：手写、零依赖、消费不可信文本、运行在编译器
-  进程内——因此畸形或恶意样式表若造成内存破坏、越界切片或无界挂起，属范围内。
-  它的扫描器用手写索引运算遍历字节串（自行跳过字符串、注释与配对花括号），所以
-  越界读取与「不前进的循环」是重点排查对象。
-  **v0.36.0 改变了这一攻击面**：`--emit-assets <dir>` 会写文件，且样式表现在能
-  通过 `url()` 改写影响文件的**内容**。必须维持的不变量是：产出名一律由编译器
-  生成（`<stem>.<16 hex>.<ext>`），并在写入前用「纯文件名」谓词复查（拒绝分隔符、
-  `..` 与绝对路径）；`url()` 目标只被**读取**，从不执行；样式表永远无法把写入
-  引到用户指定目录之外。能借助攻击者可控的样式表在磁盘别处写入或覆盖文件的
-  缺陷，即属漏洞。
-- **npm 桥接**（`crates/aoxn-pkg/src/npm.rs`，v0.29.5 起）—— 导入不可信的
-  npm tarball：解包拒绝 `..` 目录穿越，sha512（`dist.integrity`）在解包前
-  验证，且只接受根目录带 `aoxn.json` 的包。能让文件落到 `vendor/` 之外的
-  穿越条目、绕过完整性校验、或把路径依赖记录逃逸出项目目录的行为，均属漏洞。
-- **不只是"坏程序"的拒绝服务** —— 一个小的、格式良好的输入让编译器无限挂起
-  或灾难性耗尽内存的，值得报告；界线见下文。**敌意长度下的二次方代价同样算
-  这一类**，且 v0.50.0 起标准库就是按这个标准审计的：按输入长度逐字符重复
-  扫描或重复拷贝的循环（len() 即 strlen 家族）、以及在循环里用拼接增长字符串
-  的写法，已从标准库各模块中清除——覆盖 os/WinHTTP 路径编码、URL 与请求头
-  扫描、JSON 数字路径、SSE 分帧与两个 SDK 的请求体构造。针对敌意输入（超长
-  路径、超长响应、超长对话）重新引入此类写法，属于拒绝服务缺陷，而不是
-  程序慢。
-- **Python 对标语法的解析期展开**（v0.29.7 起：增强赋值、`//`、一元 `+`、
-  链式比较）—— 它们降级成类型检查与代码生成本就理解的节点，因此沿用其规则。
-  链式比较与增强赋值会把用到两次的那个操作数复制一份（`a < b < c` 会求值两次
-  `b`），展开规模相对源码长度是线性的：Rust 侧解析器（`src/parser.rs`）与自举
-  侧（`selfhost/parser.ax` 的 `dup_expr`）都应保持有界——若复制代价相对源码
-  长度变成超线性，或构造出的嵌套深度能把递归 `dup_expr` 变成栈耗尽，即为缺陷。
-- **Install-layout discovery**（v0.30.0 起，`src/paths.rs`）—— 编译器现在从
-  `AOXN_HOME` / `AOXN_STDLIB` 环境变量与自身可执行文件位置推导安装根目录、
-  标准库与随包携带的 clang，并按名字解析 `import * from "stdlib"`。环境变量
-  优先级必须保持显式（`AOXN_CLANG` > `PATH` > 随包 > 系统），本地
-  `aox_modules/<name>` 包必须始终优先于安装的标准库；能让该顺序被绕过、或让
-  一个受攻击者控制的目录经由 `AOXN_HOME`/可执行文件邻接目录顶替标准库或
-  clang 的行为，均属漏洞。
-- **单文件安装器**（v0.30.0 起，`src/setup/`、`dist/package.ps1`）—— 它会写
-  PATH、解开追加在自身后面的载荷并调用 winget。载荷必须来自生成该 exe 的打包
-  脚本；解包绝不能写出安装根目录（条目路径已做校验）；解压出的 `bin\aoxn.exe`
-  必须被实际执行。篡改用户 PATH、写出安装根目录、逃出载荷沙箱，或让 PATH 上
-  留下与所装安装器不同的二进制，均属漏洞。
-- **IDE 的工作区边界**（v0.31.0 起，`ide/src-tauri/src/fsops.rs`，v0.31.1 扩展）——
-  IDE 的 webview 只通过 Rust 命令层触达文件系统，且每个路径都先过
-  `Workspace::resolve`：规范化、解析后落在打开目录之外即拒绝（按路径分量
-  比较）、创建类命令拒绝覆盖已有条目。威胁模型默认 webview 已被攻破：任何
-  让它读到、写到、创建或执行打开目录之外内容的行为——解析器漏掉的穿越、
-  同名前缀目录的混淆、绕过闸门的命令、逃逸进 shell 的路径——均属漏洞。
-  （刻意不设"读任意路径"的命令，也不装 shell 插件；要加属于设计变更，
-  不是修 bug。）
-- **IDE 的包管理闸门**（v0.33.0 起，`ide/src-tauri/src/pkg.rs`）—— 包面板在
-  打开的目录里运行 `aoxn pkg`，`ALLOWED_SUBCOMMANDS` 就是 webview 能点名的
-  全部表面：只读检查加上本地项目级变更。对外或全局的命令（publish、yank、
-  cache、trust bootstrap、npm-import）在 Rust 层直接拒绝，面板里输入的包名
-  也会先校验再交给 clap。任何能运行白名单之外子命令、能让标志位从名字字段
-  混过去、或能让命令在打开目录之外执行的方式，均属漏洞。
-- **registry 下载路径**（v0.31.0 起，`crates/aoxn-pkg/src/registry/` 的
-  `Registry::fetch_tarball`）—— 三个后端都拉取不可信的 tarball，而完整性契约里
-  有两个**不可混淆**的摘要：`checksum` 是对解包后文件树的 **manifest 哈希**，
-  `tarball_sha256` 是**所服务的 tarball 字节**的摘要，且只有 HTTP 后端才允许拿
-  下载内容与后者比对。（v0.32.0 之前 HTTP 后端拿下载内容与 `checksum` 比，
-  结果每一次真实下载都被拒——那是失败而不是绕过，但同一种混淆反过来就会是
-  静默的完整性漏洞。）范围内：任何让取回或解包后的目录树未经「与 `aoxn.lock`
-  中钉住的值做 manifest 哈希校验」就落盘的路径；任何把传输摘要变成可选时
-  **绕过**内容校验（而非仅跳过线路校验）的改动；`tarball::unpack` 中的任何
-  目录穿越；v0.32.0 新增的下载线程之间共享 registry 句柄（每个 worker 必须
-  持有自己的 `Registry::fork()`——后端带可变状态）。**v0.54.0 起，keep 路径
-  纳入同一契约**：一次 warm install 只有在**先量、后删**，且该树的
-  `manifest_hash`（排除**恰好一个**文件——install 自身在校验之后写入的
-  `index.ax` shim）与 lockfile 的 checksum 一致时，才允许复用已有的
-  `aox_modules/<name>/` 目录树；对不上的内容一律删除并重新解包。没有重新
-  测量就给出 keep 结论，或把排除清单放宽到不止我们自己写的那一个 shim，
-  均属漏洞。
-- **信任等级的处理**（v0.31.0 起，`crates/aoxn-pkg/src/trust.rs`）——
-  `trust.json` 是策展 registry 对**自己**的声明，和其他 registry 文件一样解析自
-  不可信文本。`None`（没有信任清单）与 `unreviewed` 必须彼此可区分，也必须与
-  「已评审」可区分；未知的 `schema` 必须被拒绝而不是猜测；这条路径上的任何
-  环节都不得削弱或替代锁文件里的 manifest 哈希。等级被静默提升为 `audited`，
-  或未收录的包能通过 `--tier` 门禁，均属漏洞。
-- **`--prod` 物化**（v0.31.0 起，`install::materialize`）—— dev/prod 的划分
-   决定什么会落进 `aox_modules/`。从生产根可达的包绝不能被裁掉；同时出现在
-   `dependencies` 与 `devDependencies` 的包按生产算。让某个项目丢掉它自己声明
-   的依赖，即是对该项目的拒绝服务。
-- **标准库中解析敌意输入的运行时解析器**（v0.40.1 起，v0.41.0 起有两个使用方：
-   `stdlib/net/json.ax`、`sse.ax`、`http.ax`，由 `stdlib/openai/` 与
-   `stdlib/anthropic/` 共用）—— JSON DOM 及其构建器、SSE 分帧、URL/请求头拆分与
-   原始响应头扫描解析的是远端服务器可控的字节，运行在用户进程内。它们是对 malloc
-   缓冲的手写索引运算：一个畸形响应若造成缓冲越界、走出 DOM slab、或不前进的死循环，
-   属于标准库缺陷（与下文 UI 后端的消息解析同一待遇），而不只是"程序的 bug"。
-   有三处值得点名，因为每一处都是踩出来的：DOM 访问器对缺失的键返回 `-1`，而调用方
-   会把它直接喂给另一个访问器（无保护时它会读到 slab 之前）；`jb_set_raw` /
-   `jb_push_raw` 把解析出的片段拼进已有的 slab，因此 realloc 之前的旧指针绝不可再用；
-   响应头查找扫描的块，其长度来自服务器。SDK 测试套件离线投喂敌意 fixture，正是为了
-    让这些路径保持可证明；SDK 从不在编译器进程内运行，也不新增编译器侧攻击面。
-    v0.50.0 为这一待遇添了两条：其一，敌意长度下的二次方伸缩即上文的拒绝服务
-    类（os/WinHTTP 路径编码、URL 与请求头扫描、JSON 数字路径、SSE 分帧与两个
-    SDK 请求体构造在本次清扫前都会逐字符重复扫描或拷贝）；其二，结果可能为**空**
-    的字节 sink 必须返回空串，而不是把收尾的 NUL 写进一个从未分配的缓冲区——
-    无 text 块的响应（纯工具调用，一种正常回答）曾让 an_msgs_json 的连接函数
-    写过 NULL。标准库新的字符串构造对已知片段用 buf_str(p, n)，对拼接用几何
-    增长的 sink（JOut / StrBuf），且两者都必须保持空用例有答案。
-- **标准库中解析敌意文件与目录的解析器**（`stdlib/os.ax`——v0.44.0 在
-   Windows 落地，v0.46.0 起双平台、同一套手写转换器与目录遍历以
-   `opendir`/`readdir` 服务 libc 路径——以及 `stdlib/glob.ax`、
-   `stdlib/base64.ax`、`stdlib/json.ax` 文件 I/O）—— 与 SDK
-   解析器同一待遇，只是往外挪了一环：它们消费的是**文件系统与目录项**控制的
-   字节（文件内容、`FindFirstFileW`/`readdir` 返回的名字），同样运行在用户进程内。
-   `os` 的 UTF-8 ↔ UTF-16 转换是对 malloc 缓冲的手写索引运算；`glob` 的匹配器
-   是按模式/名字长度回溯的递归，其遍历会把攻击者命名的目录项拼进路径；
-   `b64_decode` 按输入长度给输出缓冲定容、按 `n` 推导写偏移。一个畸形文件名、
-   恶意路径或 base64 输入若造成缓冲越界、下标越界或不前进的死循环，属于
-   标准库缺陷。（程序**自建**缓冲上的不检查索引运算仍属下文成文范围外行为；
-   这里的边界是程序未曾选择的数据。）
-- **基准应用与 IDE 里的第三方告警** —— 两个 Next.js 项目与 Tauri crate 树是本项目的
-  依赖面，因此针对它们的告警属于本仓库的事务，尽管代码不是 Aoxn 写的：
-  web/next-app（Next.js 对照基准——SSG/ISR 缓存投毒、sharp、source-map-js）
-  与 ide/（DOMPurify，被 Monaco 精确钉住；Tauri webview 链）。判准与本文件其余
-  部分一致：本项目够不到的版本所必需的修复（例如被精确版本传递钉死，或上游尚无补丁
-  发布的告警），必须**记录在仓库里**，连同理由与退出条件，而不是留在某个人的记忆
-  中。ide/src-tauri/audit.toml 是一个范例——RUSTSEC-2024-0429（glib）在那里被接受，
-  因为修复需要 glib >= 0.20，而 wry 0.57.0 与 tao 0.37.1（均已是各自最新版）要求的
-  是 gtk ^0.18。在没升 glib 的情况下删掉那条记录，才是值得上报的失败模式。
-- **SDK 客户端中的凭据处理**（v0.41.0）—— `AnClient` / `OaClient` 把 API key 当作
-   普通 Aoxn 字符串持有，因此它在堆里存活整个进程生命周期，并以指针传递。没有任何机制
-   会擦除它，core dump 或崩溃报告里就会有它。参考 Python SDK 同样如此。请优先用环境变量
-   （`an_client_env()` / `oa_client_env()`）而不是源码里的字面量，并且不要 `print` 一个
-   `AnClient` / `OaClient` 结构体：`print` 会把字段逐个渲染出来，key 就在其中。
-
-## 范围外（文档化行为）
-
-以下是有意的设计决定，记录在 [`docs/spec.md`](docs/spec.md)。请勿作为漏洞
-报告——不过针对*文档本身*的缺陷报告欢迎。
-
-- **不检查的数组索引与有符号整数溢出。** 与 C 相同，语言契约中是未定义行为。
-  Aoxn 源码里越界索引或 `int` 溢出是程序的 bug，不是编译器的。
-- **原始内存内建**（`load_i64`、`store_i64`、`load_f64`、`store_f64`、
-  `load_u8`、`store_u8`、`as_ptr`、`as_string`）。它们是自举逃生舱，设计上
-  就不安全；对其参数做不检查的指针运算是有意为之。
-- **字符串拼接的内存增长。** 拼接结果永不释放（不可变字符串，尚无 GC）。这是
-  成文行为，不是泄漏 bug。（v0.50.0 起标准库自身已不再在循环里这样构造字符串，
-  见 docs/stdlib.md；用户侧的拼接行为如上文所述不变。）
-- **不带引号的 import 说明符去哪里找（v0.43.0）。** `import util` 会**先**在
-  导入文件自己的目录里找，然后才是 `aox_modules/`，最后是已安装的标准库；
-  而加引号的写法（`import * from "util"`）跳过同目录探测，解析行为与此前完全
-  一致。这是编译期、在作者自己的源码树里做的解析——它只决定编译器读哪个文件，
-  仅此而已——但也意味着一个此前只会命中某个包的说明符，现在可能命中一个本地
-  文件。若你指的确实是那个包，把说明符加上引号。当两个模块争抢同一个名字时，
-  编译器用「模块路径」作前缀来区分发出的 C 标识符——而该前缀在进入生成文本前
-  会被过滤成 ASCII 字母数字与 `_`，因此路径中的任何字符都无法逃出标识符。
-- **杀毒软件隔离刚安装的编译器。** Aoxn 只发布一个未签名的 `Setup.exe`，它解
-  出一个同样未签名的 `aoxn.exe`；而 Windows Smart App Control 与 Defender 常常
-  在新生成、未签名的可执行文件*首次运行之后*将其隔离。安装器不回避这一点：它在
-  自检之后重新确认该二进制还在，会等出杀软短暂的占用窗口，若文件确实消失则以
-  明确指明原因与补救办法的方式让安装失败（把 `%LOCALAPPDATA%\aoxn` 排除在实时
-  扫描之外），而不是给用户留一个指向空处的 PATH 条目。若某环境的安全策略不允许
-  未签名二进制，应给它一份签名发行版——那是部署决策，不是 Aoxn 的漏洞。**属于范
-  围内**的是该检测本身的缺陷，例如安装器报告 Done 而编译器已不可用。
-- **编译器在畸形输入上的崩溃、挂起或错误信息。** 这些是 bug——用
-  [bug report 模板](https://github.com/AlonechatWorkspace/Aoxn-language/issues/new?template=bug_report.yml)
-  提交。仅当涉及编译器进程内存破坏、代码执行，或把良定义程序静默输出成不安
-  全代码时，才升级为安全报告。
-- **人们用 Aoxn 编译出的程序里的漏洞。** Aoxn 不提供沙箱和运行时安全网；编
-  译产物的行为由程序作者负责。（UI 工具箱的原始 FFI 与原始内存辅助同理，
-  与上述一切一样设计上不安全。）自 v0.47.0 起控件层还保存了一份裁剪栈影子
-  并据此跳过平台本来会裁掉的绘制：直接调用 `plat_clip_push` /
-  `plat_clip_pop` 而不是 `ui_clip_*` 包装会让影子失步，于是绘制被静默丢弃；
-  它的文本测量缓存以有界的 30 位内容哈希为键，撞上就会让某个标签居中偏移。
-  两者都是渲染层面的结果，不是内存安全漏洞——但若后端被构造的消息把这两处
-  状态写到越界，则**属于范围内**，请报告。自 v0.49.0 起另有两条不变式：X11
-  后端的裁剪深度（槽 821）即使 30 个矩形的存储饱和也始终随 push 递增，因此
-  深度与已存矩形数不一致意味着共享块已损坏；布局栈的溢出计数器（槽 559）与
-  每次被拒绝的 `lay_push` 对冲，因此深度归零而计数非零意味着 8 个存活层级
-  被乱序弹出。
-- **把窗口服务器当作不可信输入源。** Win32/GDI 后端（`ui_win.ax`）会与拥有
-  该进程的窗口对话；X11 后端（`ui_x11.ax`，v0.46.0 起回归）则与 `DISPLAY`
-  指向的任何服务器对话——因此恶意的（或已被攻破的）窗口管理器或 X 服务器与
-  恶意终端处于同一位置：它可以向工具箱投喂构造的消息。这是「使用窗口协议」
-  本身固有的性质，并非工具箱声称的沙箱边界。但后端*解析*这些输入时的缺陷
-  （构造消息导致的缓冲区溢写、越界写进暂存块、X11 事件结构偏移量）**属于
-  范围内**，请报告。
-- **策展 registry 的信任清单做出未经核实的声明。** 信任清单说明的是*谁评审过
-  某个包的源码*，而不是源码做了什么。一个把恶意包标成 `audited` 的 registry，
-  或评审者为自己没读过的代码背书，属于策展失职而非 Aoxn 的漏洞。安装
-  `unreviewed` 包时只告警并继续，属有意设计；在 CI 里拒绝它是显式的一步
-  `aoxn trust check <pkg> --tier audited`。*属于范围内*的是等级逻辑本身的缺陷
-  （见上文范围内条目）。
-- **无 TLS 的 HTTP registry 后端。** Aoxn 包管理器的 HTTP 客户端是手写在
-  `std::net::TcpStream` 上的，并且直接拒绝 `https://`，因此走明文 HTTP 取镜像
-  没有传输层认证——双方都不认证，响应也不保密。这是有记录的设计约束而非疏
-  漏：它让该 crate 的依赖集保持无 build script。此类镜像只应部署在你信任的
-  网络上。客户端*自身*的缺陷（请求走私、能逃出所配置 base 的重定向、可被欺
-  骗的响应体长度检查）仍在范围内。
-- **上游 clang / MSVC 的缺陷。** 请报给上游——但若编译器依赖了该坏行
-  为，请告知我们。
-- **任何已控制编译器所在机器或终端的攻击者才能利用的问题。** 文档化的
-  `AOXN_*` 旋钮是配置而非攻击面——但构造的值逃逸进链接命令或毒化构建缓存
-  仍在范围内（见上）。
-
-## 安全港
-
-对符合以下条件的研究人员，我们不会追究或支持法律行动：
-
-- 善意行事并遵守本政策；
-- 只对自己的构建与数据进行测试；
-- 不侵犯隐私、不销毁数据、不干扰不属于自己的服务；
-- 公开披露前给我们合理的修复时间；
-- 不使用社会工程、物理攻击或对基础设施的拒绝服务（编译器是本地工具，没有
-  服务可打）。
-
-不确定某问题是否在范围内，先问——发邮件到 `zmjsjsg3@163.com`，只需足够描述
-领域的细节，我们会告诉你希望如何处理。
+2026-10-17 审计的十三项问题已在 0.51.0/0.51.1 修复，涉及 SDK 重定向/编码/
+JSON/响应分帧、归档路径缓存完整性和 IDE 工作区。这是历史状态，不是无其他漏洞
+的保证。本次性能修改的测试结果、逐字节输出对比与测量限制见
+[编译器性能报告](docs/p2-compiler-performance.md)；这些是正确性证据，**不是新安全审计**。
+Linux CI 与 IDE 验证仍独立于本地 Windows 编译器检查。

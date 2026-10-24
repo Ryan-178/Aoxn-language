@@ -353,6 +353,17 @@ crates/aoxn-pkg       package manager crate (its own dependency set; see above)
 
 ## C backend invariants (src/codegen_c.rs; mirrored by selfhost/codegen.ax)
 
+- **Compiler-time graph work must be measured separately from clang.** Use
+  `AOXN_TIME=1 aoxn c <file>` and interleave release before/after processes;
+  do not benchmark while cargo builds/tests are competing for the same host.
+  `resolve` is now timed too. Exception reachability uses reverse call edges
+  with mark-on-enqueue, not repeated whole-graph scans (quadratic on long
+  forward chains); no direct raiser means no reverse graph is needed.
+  Namespace rewriting borrows the immutable `members` tables: never clone
+  the entire table once per module. Preserve caught-body/default/handler
+  semantics and C bytes when changing these algorithms. Current measurements
+  and limitations are in `docs/p2-compiler-performance.md`.
+
 - **C gives Aoxn's value semantics natively**: structs map to C structs;
   arrays are wrapped in single-field structs (`typedef struct { T data[N]; }`)
   so assignment/param/return copy by value exactly like C struct semantics.

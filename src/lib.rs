@@ -404,7 +404,7 @@ fn load_flattened(entries: &[String]) -> Result<(resolve::Flattened, assets::Ass
     // Namespaces are resolved here, on the AST, and the result is the flat
     // program every later stage already expects (see `src/resolve.rs`).
     let LoadState { modules, order, assets, .. } = state;
-    let flat = resolve::resolve(modules, &order, &entry_ids)?;
+    let flat = timed("resolve", || resolve::resolve(modules, &order, &entry_ids))?;
     Ok((flat, assets))
 }
 

@@ -1,5 +1,127 @@
 # P2 优化方案:编译器自身性能与代码质量
 
+## 2026-10-24 实测实施：调用图与模块重写
+
+本节是当前 Rust/C 编译器的测量记录；下方原方案保留为历史材料，里面的
+LLVM 文件、行号、测试数和预期收益不能作为当前实现状态。
+
+### 范围、环境与方法
+
+- 基线：`3d537f2`，编译器 `0.54.1`，包管理器 crate `0.42.0`；未 bump 版本。
+- Windows 11 x64 / Git Bash，本机 i5-1135G7；`cargo build --release`。
+- 命令为 `AOXN_TIME=1 target/release/aoxn.exe c <sample>`，stdout 指向空设备；
+  **不含 clang 编译或链接，不含生成程序运行**。`c` 不走可执行文件缓存。
+- 保留同一工作树基线 release 二进制，before/after 交错执行，每样本每版本
+  6 次，丢首轮热身，后 5 次给出原始值/min/median。偶数轮 before→after，
+  奇数轮 after→before。每次都是独立进程。
+- 第一轮与 cargo 编译/测试并行，墙钟波动达数倍，不能用于收益结论；完成测试后
+  无主动并行构建再测。仍有启动/杀毒/调度噪声，真实小样本变化不作显著收益宣传。
+- 两类扩展探针：1000/4000 个函数组成前向调用链，末端 `raise "end"`、main
+  调用链首；100/400 个独立模块，每模块 10 个简单函数，入口逐一 star import。
+  不是生成程序运行基准，分别隔离异常传播和成员表重复工作。
+
+### 证据与修改
+
+1. `src/codegen_c.rs::compute_fn_raises` 原来反复遍历所有函数与调用直到不动点。
+   扫描顺序来自随机 HashMap，链越长，轮数越多；每次进程还可能测到不同成本。
+   新算法保留 `scan_fn_body` 的既有判断，把调用边反向后从直接 raiser 出发，
+   入队时标记，每个可达函数只处理一次，每条相应调用边至多检查一次，期望
+   O(V+E)。没有直接 raiser 时不建立反向图，避免给 selfhost/UI 常见路径加工作。
+   不改变 try body/handler/default 的扫描语义，也不借机修复其他语义问题。
+2. `src/resolve.rs` 每重写一个模块都深克隆所有模块的 `members`；表在重写期间
+   完全只读，直接传 `&members` 即可。去掉的是 O(模块数×总声明数) 的额外复制，
+   **不声称整个 resolver 已线性化**。
+3. `src/lib.rs` 给 resolve 边界加 `timed("resolve", ...)`。过去 AOXN_TIME
+   不含这一段，不能把 lex+parse+typecheck+codegen 之和当完整 Rust 管线。
+
+### 语义保持与验证
+
+- 新单元测试与独立的旧式慢不动点参考算法比较，覆盖递归、无 raiser 的环、
+  重复调用、默认参数中的调用、caught try、handler 再 raise、转发链；另有
+  4096 函数长链及反向声明顺序测试。没有脆弱的毫秒阈值断言。
+- 原有命名空间/别名/选择性导入/冲突/菱形导入测试继续验证 resolver。
+- 基线/优化后二进制对 `examples/*.ax`、`selfhost/*demo.ax` 和上述探针共
+  **43 个成功样本**的 stdout C、stderr 诊断、退出状态逐字节一致；另外 5 个
+  非法输入（未定义调用、严格类型、解析失败、缺失导入、错误默认值）同样保持
+  全字节诊断与失败状态一致。
+- `cargo test`：**338 通过，0 失败，0 忽略**（根 crate，不含独立 IDE）。
+  其中 compiler lib 20、setup 3、pipeline 197、TypeScript lexer 14/parser 21、
+  assets 21+18、UI 14、symbols 8、安装 6、其余 stdlib/SDK 集成 16。
+- `bash run_pkg_tests.sh`：**104 通过，0 失败，0 忽略**。总计 **442**。
+  脚本只产生预期的测试构建标记，不把该产物当项目修改提交。
+- 首轮新测试 fixture 写成 `except e` 导致 parse 失败，改为语言已有的
+  `except as e` 后全量通过；不是 AV 或实现故障。未修改语言规则。
+- `cargo check --workspace --tests --target x86_64-unknown-linux-gnu` 通过，
+  只检查 Rust 跨平台编译，不等于 Linux 链接或运行测试。
+- 版本、README 与 SECURITY 双语均从当前树重写；wiki 未修改。IDE 测试和
+  Linux 真正的链接/运行仍由其独立验证/CI 承担。
+
+### 复现输入
+
+调用链可以用以下 Python 生成（文件应放在忽略的 `target/` 下）：
+
+```python
+from pathlib import Path
+n = 4000
+source = ''.join(
+    f'def f{i}() -> int:\n    return f{i+1}()\n' for i in range(n - 1)
+)
+source += f'def f{n-1}() -> int:\n    raise "end"\n'
+source += 'def main() -> int:\n    return f0()\n'
+Path('target/chain.ax').write_text(source, encoding='utf-8')
+```
+
+模块探针：创建 `m0.ax` 到 `m<n-1>.ax`，每个写入 10 个
+`def f<i>_<j>(x: int) -> int: return x + <j>`（使用真正缩进行）；入口每模块一行
+`import * from "./m<i>.ax"`，随后 `main` 返回 `f0_0(1)`。
+
+### 最终交错测量（毫秒）
+
+每单元为 before → after；min/median 均取热身后五次。墙钟包括进程启动、
+加载、诊断与退出，codegen 只包括 Rust 发射 C。
+
+| 样本 | 墙钟 min | 墙钟 median | codegen min | codegen median |
+|---|---:|---:|---:|---:|
+| `selfhost/driver_self_demo.ax` | 271.184 → 261.733 | 539.460 → 367.872 | 29.412 → 31.376 | 31.517 → 37.379 |
+| `examples/ui_gallery.ax` | 278.083 → 255.181 | 324.703 → 290.626 | 19.337 → 22.666 | 31.659 → 41.425 |
+| `examples/stdlib_demo.ax` | 106.463 → 115.401 | 130.312 → 158.313 | 2.589 → 2.719 | 3.556 → 3.171 |
+| `target/perf-inputs/chain-1000.ax` | 128.805 → 102.843 | 175.396 → 130.475 | 31.872 → 7.250 | 46.377 → 8.489 |
+| `target/perf-inputs/chain-4000.ax` | 670.717 → 159.383 | 767.389 → 227.846 | 535.726 → 35.131 | 590.882 → 42.834 |
+| `target/perf-inputs/modules-100/main.ax` | 208.235 → 183.507 | 274.757 → 213.499 | 6.454 → 7.213 | 8.449 → 10.157 |
+| `target/perf-inputs/modules-400/main.ax` | 1086.684 → 432.766 | 1287.115 → 804.094 | 32.141 → 26.768 | 50.894 → 41.590 |
+
+#### 原始五次墙钟 / codegen（ms）
+
+- `selfhost/driver_self_demo.ax`
+  - before wall: 400.725, 539.460, 562.778, 547.928, 271.184; codegen: 31.517, 58.146, 30.671, 38.713, 29.412
+  - after wall: 299.361, 438.080, 694.414, 367.872, 261.733; codegen: 31.376, 71.618, 72.402, 36.111, 37.379
+- `examples/ui_gallery.ax`
+  - before wall: 392.606, 324.703, 365.027, 315.612, 278.083; codegen: 36.076, 31.659, 31.750, 29.629, 19.337
+  - after wall: 290.626, 255.181, 306.663, 294.580, 279.105; codegen: 41.425, 22.666, 45.340, 45.465, 40.312
+- `examples/stdlib_demo.ax`
+  - before wall: 170.694, 106.463, 125.549, 130.312, 260.946; codegen: 4.994, 2.844, 3.556, 9.307, 2.589
+  - after wall: 214.244, 118.118, 115.401, 158.313, 278.038; codegen: 2.830, 4.617, 4.096, 2.719, 3.171
+- `target/perf-inputs/chain-1000.ax`
+  - before wall: 200.323, 128.805, 175.396, 171.772, 352.180; codegen: 46.377, 31.872, 50.345, 53.517, 45.768
+  - after wall: 130.475, 102.843, 124.106, 167.519, 139.327; codegen: 7.250, 8.435, 8.489, 8.716, 10.302
+- `target/perf-inputs/chain-4000.ax`
+  - before wall: 738.341, 670.717, 934.291, 767.389, 863.900; codegen: 590.882, 569.581, 769.413, 535.726, 614.519
+  - after wall: 159.383, 234.761, 219.580, 227.846, 252.963; codegen: 42.834, 35.131, 38.086, 49.433, 45.115
+- `target/perf-inputs/modules-100/main.ax`
+  - before wall: 274.757, 245.113, 208.235, 322.257, 292.465; codegen: 8.252, 10.120, 8.449, 13.842, 6.454
+  - after wall: 213.499, 203.523, 183.507, 216.720, 326.028; codegen: 8.100, 10.157, 7.213, 10.749, 12.252
+- `target/perf-inputs/modules-400/main.ax`
+  - before wall: 1086.684, 1161.665, 1783.307, 1455.995, 1287.115; codegen: 32.141, 50.894, 61.831, 59.281, 36.441
+  - after wall: 432.766, 1002.218, 889.490, 630.644, 804.094; codegen: 26.768, 74.583, 72.497, 36.050, 41.590
+
+真实 selfhost/UI/stdlib 的变化仍受小样本噪声影响，不能宣称普遍加速。
+长调用链与多模块探针用于证明具体重复工作的消除，不代表所有真实项目的形状。
+未测 Linux 实际性能、IDE 构建耗时、峰值内存或 clang -O3 全链路加速。
+
+下方保留历史方案。
+
+---
+
 > 状态:方案(未实施)。P0(正确性)与 P1(生成代码运行性能)见 CHANGELOG;
 > 本文档描述下一步"让编译器跑得更快、代码更干净"的工作项。
 > 每项都标注了位置、预期收益和风险,按建议顺序排列。

@@ -409,13 +409,14 @@ pub fn resolve(mut mods: Vec<Module>, order: &[usize], entries: &[usize]) -> Res
         .collect();
 
     // --- 4. rewrite references --------------------------------------------
+    // The member tables are immutable during rewriting. Borrow the shared
+    // tables rather than deep-cloning every module's names for every module.
     for (i, m) in mods.iter_mut().enumerate() {
-        let members_ref: Vec<HashMap<String, Member>> = members.iter().map(|t| t.clone()).collect();
         for f in &mut m.funcs {
-            rewrite_fn(f, &binds[i], &members_ref);
+            rewrite_fn(f, &binds[i], &members);
         }
         for s in &mut m.structs {
-            rewrite_struct(s, &binds[i], &members_ref);
+            rewrite_struct(s, &binds[i], &members);
         }
     }
 

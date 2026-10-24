@@ -75,30 +75,39 @@ struct FnSig {
 /// the slot, which needs this set. Keyed by the SOURCE name, so generic
 /// instances (whose calls spell the generic's name) resolve naturally.
 fn compute_fn_raises(program: &Program) -> HashSet<String> {
-    let mut direct: HashSet<String> = HashSet::new();
-    let mut calls: HashMap<String, Vec<String>> = HashMap::new();
+    let mut raises = HashSet::new();
+    let mut pending = Vec::new();
+    let mut scans = Vec::with_capacity(program.funcs.len());
     for f in &program.funcs {
-        let (raises, cs) = scan_fn_body(f);
-        if raises {
-            direct.insert(f.name.clone());
+        let (direct, calls) = scan_fn_body(f);
+        if direct && raises.insert(f.name.clone()) {
+            pending.push(f.name.as_str());
         }
-        calls.insert(f.name.clone(), cs);
+        scans.push((f.name.as_str(), calls));
     }
-    // fixpoint: a function raises if it raises directly or calls a raiser
-    let mut raises = direct;
-    loop {
-        let mut grew = false;
-        for (name, cs) in &calls {
-            if raises.contains(name) {
-                continue;
-            }
-            if cs.iter().any(|c| raises.contains(c)) {
-                raises.insert(name.clone());
-                grew = true;
-            }
+    // Most existing programs (including the self-host) have no raisers.
+    // Do not construct an unused reverse graph for them.
+    if pending.is_empty() {
+        return raises;
+    }
+    let mut callers: HashMap<String, Vec<&str>> = HashMap::new();
+    for (caller, calls) in scans {
+        for callee in calls {
+            callers.entry(callee).or_default().push(caller);
         }
-        if !grew {
-            break;
+    }
+    // Walk reverse call edges once instead of rescanning the entire graph
+    // until a fixpoint. The old scan was quadratic on long forward chains,
+    // and its cost depended on HashMap's randomized iteration order. Mark on
+    // enqueue: recursion, diamonds and duplicate call sites visit each edge
+    // at most once. Only set membership is observable by emission.
+    while let Some(callee) = pending.pop() {
+        if let Some(parents) = callers.get(callee) {
+            for &caller in parents {
+                if raises.insert(caller.to_owned()) {
+                    pending.push(caller);
+                }
+            }
         }
     }
     raises
@@ -2803,5 +2812,70 @@ if matches!(op, Is | IsNot) {
             }
             Expr::StructLit { name, .. } => Ok(Type::Struct(name.clone())),
         }
+    }
+}
+
+#[cfg(test)]
+mod raise_analysis_tests {
+    use super::*;
+
+    fn program(src: &str) -> Program {
+        crate::parser::parse(crate::lexer::lex(src, 0).unwrap()).unwrap()
+    }
+
+    // Independent, deliberately slow reference for the old least fixpoint.
+    fn reference(program: &Program) -> HashSet<String> {
+        let scans: Vec<_> = program.funcs.iter().map(|f| (&f.name, scan_fn_body(f))).collect();
+        let mut raised = HashSet::new();
+        loop {
+            let before = raised.len();
+            for (name, (direct, calls)) in &scans {
+                if *direct || calls.iter().any(|c| raised.contains(c)) {
+                    raised.insert((*name).clone());
+                }
+            }
+            if raised.len() == before {
+                return raised;
+            }
+        }
+    }
+
+    #[test]
+    fn reverse_edges_match_fixpoint_for_cycles_defaults_and_handlers() {
+        let p = program(concat!(
+            "def leaf() -> int:\n    raise \"bad\"\n",
+            "def a() -> int:\n    return b() + leaf() + leaf()\n",
+            "def b() -> int:\n    return a()\n",
+            "def clean_a() -> int:\n    return clean_b()\n",
+            "def clean_b() -> int:\n    return clean_a()\n",
+            "def defaulted(x: int = leaf()) -> int:\n    return x\n",
+            "def caller() -> int:\n    return defaulted()\n",
+            "def caught() -> int:\n    try:\n        return leaf()\n    except as e:\n        return 0\n",
+            "def reraised() -> int:\n    try:\n        return leaf()\n    except as e:\n        raise e\n",
+            "def main() -> int:\n    return caller()\n",
+        ));
+        let actual = compute_fn_raises(&p);
+        assert_eq!(actual, reference(&p));
+        for name in ["leaf", "a", "b", "defaulted", "caller", "reraised", "main"] {
+            assert!(actual.contains(name), "missing {name}");
+        }
+        for name in ["clean_a", "clean_b", "caught"] {
+            assert!(!actual.contains(name), "unexpected {name}");
+        }
+    }
+
+    #[test]
+    fn long_raise_chain_is_order_independent_and_iterative() {
+        let n = 4096;
+        let mut src = String::new();
+        for i in 0..n - 1 {
+            src.push_str(&format!("def f{i}() -> int:\n    return f{}()\n", i + 1));
+        }
+        src.push_str(&format!("def f{}() -> int:\n    raise \"end\"\n", n - 1));
+        let mut p = program(&src);
+        let forward = compute_fn_raises(&p);
+        assert_eq!(forward.len(), n);
+        p.funcs.reverse();
+        assert_eq!(forward, compute_fn_raises(&p));
     }
 }

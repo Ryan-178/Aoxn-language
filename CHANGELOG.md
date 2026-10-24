@@ -5,6 +5,23 @@ minor bumps while pre-1.0: each minor version is a language milestone.
 
 ## [Unreleased]
 
+### Compiler performance
+
+- Replace repeated whole-call-graph exception reachability scans with a
+  reverse-edge worklist. Each reached function is queued once, including in
+  recursive/diamond graphs. Programs with no direct raisers skip reverse-graph
+  construction. Existing default-expression and caught-handler analysis stays
+  unchanged; this is not a language or generated-program optimization.
+- Borrow immutable module-member tables during namespace rewriting instead of
+  deep-cloning every module's table for each rewritten module.
+- `AOXN_TIME=1` now includes module `resolve` time. Regression tests compare
+  exception reachability against the old least-fixpoint algorithm and exercise
+  a 4096-function chain in both declaration orders. Measurement and validation
+  details: `docs/p2-compiler-performance.md`.
+- Regenerate the bilingual README and security policy from the current tree,
+  correcting stale version/test totals, installer download behavior and the
+  scope of what the self-host fixed point proves.
+
 ## [0.54.1] - 2026-10-19
 
 The Linux CI run of v0.53.0's io-diagnostics suite failed — and the failure
