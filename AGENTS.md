@@ -639,6 +639,15 @@ crates/aoxn-pkg       package manager crate (its own dependency set; see above)
   semantics and C bytes when changing these algorithms. Current measurements
   and limitations are in `docs/p2-compiler-performance.md`.
 
+- **Struct-cycle completion is global to one `collect_structs` call.** Keep
+  the DFS black (proved acyclic) set across declaration roots; resetting it
+  per root re-walks every shared tail and makes a simple struct chain
+  quadratic. Gray stays the active path, and roots stay in source order to
+  preserve the first failing root's diagnostic. Do not expand which types
+  count as cycle edges as part of a performance change. The exhaustive
+  three-node graph/reference tests pin acceptance AND diagnostic root/position;
+  `tools/compiler_perf.py` reproduces the clang-free scaling measurements.
+
 - **C gives Aoxn's value semantics natively**: structs map to C structs;
   arrays are wrapped in single-field structs (`typedef struct { T data[N]; }`)
   so assignment/param/return copy by value exactly like C struct semantics.

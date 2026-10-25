@@ -7,6 +7,18 @@ minor bumps while pre-1.0: each minor version is a language milestone.
 
 ### Compiler performance
 
+- Retain completed acyclic struct proofs across declaration roots in the Rust
+  type checker instead of re-traversing every shared tail. Source-root order,
+  cycle diagnostics and the existing direct-struct-edge semantics are unchanged.
+  Exhaustive three-node directed graphs (both root orders) are checked against
+  an independent path-only reference, with shared-tail/disjoint-cycle coverage.
+  A test-only DFS expansion counter also asserts V total expansions across
+  all roots of a V-node shared tail (both root orders), rejecting the old
+  V*(V+1)/2 traversal without timing thresholds or release overhead.
+  `tools/compiler_perf.py` reproduces release baseline/modified comparisons
+  without clang or executable-cache work; evidence is in
+  `docs/p2-compiler-performance.md`.
+
 - Replace repeated whole-call-graph exception reachability scans with a
   reverse-edge worklist. Each reached function is queued once, including in
   recursive/diamond graphs. Programs with no direct raisers skip reverse-graph

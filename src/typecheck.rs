@@ -1795,6 +1795,13 @@ fn type_slug(t: &Type) -> String {
 
 // ---- struct table construction ----
 
+// Test-only observation of actual DFS expansion, isolated per test thread.
+// Both the counter and its increment compile out of non-test builds.
+#[cfg(test)]
+std::thread_local! {
+    static STRUCT_CYCLE_EXPANSIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 fn collect_structs(decls: &[StructDecl]) -> Result<StructTable, Diag> {
     let mut table: StructTable = HashMap::default();
 
@@ -1833,6 +1840,8 @@ fn collect_structs(decls: &[StructDecl]) -> Result<StructTable, Diag> {
             return Some(name.to_string());
         }
         gray.insert(name.to_string());
+        #[cfg(test)]
+        STRUCT_CYCLE_EXPANSIONS.with(|count| count.set(count.get() + 1));
         if let Some(info) = table.get(name) {
             for (_, t) in &info.fields {
                 if let Type::Struct(inner) = t {
@@ -1847,9 +1856,14 @@ fn collect_structs(decls: &[StructDecl]) -> Result<StructTable, Diag> {
         None
     }
 
+    // A black node has already proved its entire reachable subgraph acyclic,
+    // not merely the path from one root. Retain that proof across roots: a
+    // chain of N declarations must not re-walk its tail N times. Keep roots
+    // in declaration order so the first failing root (and diagnostic) stays
+    // exactly the same. Gray is path-local and is empty after a successful DFS.
+    let mut gray: HashSet<String> = HashSet::new();
+    let mut black: HashSet<String> = HashSet::new();
     for s in decls {
-        let mut gray: HashSet<String> = HashSet::new();
-        let mut black: HashSet<String> = HashSet::new();
         if cycles(&s.name, &table, &mut gray, &mut black).is_some() {
             return Err(Diag::at("type", s.pos.file, s.pos.line, s.pos.col, format!(
                     "recursive struct '{}' (a struct cannot contain itself, directly or indirectly)",
@@ -1859,6 +1873,113 @@ fn collect_structs(decls: &[StructDecl]) -> Result<StructTable, Diag> {
     }
 
     Ok(table)
+}
+
+#[cfg(test)]
+mod struct_cycle_tests {
+    use super::*;
+
+    fn declarations(edges: &[Vec<usize>], order: &[usize]) -> Vec<StructDecl> {
+        let mut source = String::new();
+        for &i in order {
+            source.push_str(&format!("struct S{i}:\n    value: int\n"));
+            for (field, &target) in edges[i].iter().enumerate() {
+                source.push_str(&format!("    f{field}: S{target}\n"));
+            }
+        }
+        crate::parser::parse(crate::lexer::lex(&source, 0).unwrap()).unwrap().structs
+    }
+
+    // Independent path-only reference: deliberately no completed-node cache.
+    // This checks which SOURCE ROOT reports the cycle, not just acceptance.
+    fn reaches_cycle(i: usize, edges: &[Vec<usize>], path: &mut Vec<usize>) -> bool {
+        if path.contains(&i) {
+            return true;
+        }
+        path.push(i);
+        let hit = edges[i].iter().any(|&j| reaches_cycle(j, edges, path));
+        path.pop();
+        hit
+    }
+
+    #[test]
+    fn struct_cycles_match_path_reference_for_every_three_node_graph() {
+        for bits in 0..(1usize << 9) {
+            let edges: Vec<Vec<usize>> = (0..3)
+                .map(|i| (0..3).filter(|&j| bits & (1 << (i * 3 + j)) != 0).collect())
+                .collect();
+            for order in [&[0, 1, 2][..], &[2, 1, 0][..]] {
+                let decls = declarations(&edges, order);
+                let expected = order.iter().position(|&i| reaches_cycle(i, &edges, &mut Vec::new()));
+                match (expected, collect_structs(&decls)) {
+                    (None, Ok(table)) => assert_eq!(table.len(), 3),
+                    (Some(index), Err(diag)) => {
+                        let root = &decls[index];
+                        assert_eq!(diag.stage, "type");
+                        assert_eq!(diag.file, root.pos.file);
+                        assert_eq!((diag.line, diag.col), (root.pos.line, root.pos.col));
+                        assert_eq!(diag.message, format!(
+                            "recursive struct '{}' (a struct cannot contain itself, directly or indirectly)", root.name));
+                    }
+                    _ => panic!("graph {bits}, order {order:?}: cycle result differs"),
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn struct_cycles_preserve_diamond_and_wrapped_edge_rules() {
+        let diamond = vec![vec![1, 2], vec![3], vec![3], vec![]];
+        assert!(collect_structs(&declarations(&diamond, &[0, 1, 2, 3])).is_ok());
+        for tail in [vec![3], vec![2]] {
+            let mut edges = diamond.clone();
+            edges[3] = tail;
+            let diag = collect_structs(&declarations(&edges, &[0, 1, 2, 3])).unwrap_err();
+            assert_eq!((diag.line, diag.col), (1, 1));
+            assert!(diag.message.starts_with("recursive struct 'S0'"));
+        }
+        // This pass historically follows only DIRECT struct fields, not array
+        // elements. Preserve that array-edge rule in this performance change.
+        // Pin the checker pass itself; do not send infinite layouts to clang.
+        let source = "struct A:\n    xs: [B; 1]\nstruct B:\n    a: A\n";
+        let decls = crate::parser::parse(crate::lexer::lex(source, 0).unwrap()).unwrap().structs;
+        assert!(collect_structs(&decls).is_ok());
+    }
+
+    #[test]
+    fn struct_cycles_expand_shared_tail_once_across_all_roots() {
+        let n = 256;
+        let edges: Vec<Vec<usize>> = (0..n)
+            .map(|i| if i + 1 < n { vec![i + 1, i + 1] } else { vec![] })
+            .collect();
+        for order in [(0..n).collect::<Vec<_>>(), (0..n).rev().collect()] {
+            let decls = declarations(&edges, &order);
+            STRUCT_CYCLE_EXPANSIONS.with(|count| count.set(0));
+            assert!(collect_structs(&decls).is_ok());
+            let expanded = STRUCT_CYCLE_EXPANSIONS.with(|count| count.get());
+            assert_eq!(expanded, n, "all roots together must expand exactly V nodes");
+            // Resetting black for each root (the old implementation) expands
+            // n*(n+1)/2 nodes even though duplicate edges share a tail per root.
+        }
+    }
+
+    #[test]
+    fn struct_cycles_share_completed_tails_without_hiding_later_cycles() {
+        let n = 256;
+        let mut edges: Vec<Vec<usize>> = (0..n)
+            .map(|i| if i + 1 < n { vec![i + 1, i + 1] } else { vec![] })
+            .collect();
+        let order: Vec<usize> = (0..n).collect();
+        assert!(collect_structs(&declarations(&edges, &order)).is_ok());
+        let reverse: Vec<usize> = order.iter().copied().rev().collect();
+        assert!(collect_structs(&declarations(&edges, &reverse)).is_ok());
+        // Complete the acyclic component first, then encounter a disjoint cycle.
+        edges.push(vec![n + 1]);
+        edges.push(vec![n]);
+        let order: Vec<usize> = (0..n + 2).collect();
+        let diag = collect_structs(&declarations(&edges, &order)).unwrap_err();
+        assert!(diag.message.starts_with("recursive struct 'S256'"));
+    }
 }
 
 /// validate a type annotation: struct names must exist, arrays recurse

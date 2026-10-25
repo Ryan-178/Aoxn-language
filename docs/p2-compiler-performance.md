@@ -1,5 +1,154 @@
 # P2 优化方案:编译器自身性能与代码质量
 
+## 2026-10-25 实测实施：结构体无环证明跨根复用
+
+### 先量后改与适用范围
+
+本轮基线 **82cffcd**（compiler 0.55.0 / pkg 0.42.0，不 bump 版本），
+在独立 `D:/ailanguage-bench/compiler-perf` 工作树实施。已读最近性能提交
+`b8b934e`、`dbc1256` 和本文前次记录：reverse raises、成员表借用、parser
+move-token、typecheck 局部 Map 等均已做，不重复宣传或重做。
+
+发现 `src/typecheck.rs::collect_structs` 的循环检测虽然有 gray/black DFS，
+但 **每个声明根都重建 black 集**。结构体前向尾链 N 个节点，因此遍历
+N+(N-1)+…+1 次。初测 200/800/1600 节点 typecheck 为
+9.300/164.356/698.636 ms，1600 的整次墙钟 788.939 ms；真实 selfhost/UI 的
+check 阶段仅 3.930/3.769 ms，因此不把合成扩展热点说成真实项目主瓶颈。
+
+修改仅把 gray/black 的初始化移到根循环外。一个完成节点的所有直接后继
+已经证明无环，可以跨根复用；成功 DFS 返回时 gray 为空。根仍按声明顺序，
+首次失败立即返回，错误根、位置和文案不变。对循环检测部分，节点/直接边
+不再随根重复扫描，期望 O(V+E)，不声称整个 typecheck 或整个 compiler 线性。
+没有新增 unsafe/外部 crate，没有改 selfhost、C 发射器或语言规范。
+
+### 环境与可复现命令
+
+本轮硬件为 **Intel N95 / Windows 11 x64**，Rust 1.94.1，release 默认配置。
+注意不是前次记录的 i5-1135G7，**两节绝对时间不能跨机比较**。
+clang 23.1.2 在 `E:/llvm/bin/clang.exe`，只供正确性测试，不参与基准。
+
+在未修改编译器源码的 82cffcd 工作树先执行：
+
+```sh
+cargo build --release --bin aoxn
+mkdir -p target/compiler-perf
+cp target/release/aoxn.exe target/compiler-perf/baseline.exe
+```
+
+应用本次修改后构建，完成所有 cargo 构建/测试再开始测量：
+
+```sh
+cargo build --release --bin aoxn
+python tools/compiler_perf.py --before target/compiler-perf/baseline.exe \
+  --after target/release/aoxn.exe --output target/compiler-perf/final.json
+```
+
+脚本在输出文件的同级 `inputs/` 生成 200/800/1600 个结构体尾链，生成器规则：
+每个 `S<i>` 仅含 `child: S<i+1>`，最后节点 `value: int`，main 返回0。
+此外测 selfhost driver、UI gallery、stdlib demo。两个版本每样本先热身一次，
+再独立进程**交错五次**，奇偶轮交换顺序。`AOXN_TIME=1 aoxn c <file>`，
+stdout 空设备，`AOXN_NO_CACHE=1`；`c` 本身不走 exe cache、不启动 clang。
+阶段取 Rust 边界计时，墙钟另含启动/加载/诊断/退出；所有原始 stderr 保留。
+最终测量期间没有主动 cargo 构建或测试争用本机。
+
+基线二进制 SHA256：
+`967afe0e9dd686d939b848b4536787b40908945fbc78d267413858b351a2af10`。
+
+### 最终交错结果（毫秒，before → after）
+
+| 输入 | typecheck min | typecheck median | 墙钟 min | 墙钟 median |
+|---|---:|---:|---:|---:|
+| chain 200 | 8.800 → 0.350 | 9.359 → 0.356 | 66.839 → 58.818 | 68.635 → 59.830 |
+| chain 800 | 141.061 → 1.194 | 146.002 → 1.196 | 203.106 → 60.927 | 205.310 → 62.416 |
+| chain 1600 | 593.589 → 2.328 | 602.866 → 2.398 | 662.430 → 68.985 | 672.730 → 71.759 |
+| selfhost/driver_self_demo.ax | 4.111 → 3.872 | 4.367 → 4.335 | 102.579 → 98.687 | 108.687 → 107.155 |
+| examples/ui_gallery.ax | 3.820 → 3.497 | 3.939 → 3.569 | 88.920 → 86.063 | 91.401 → 89.747 |
+| examples/stdlib_demo.ax | 0.528 → 0.533 | 0.534 → 0.556 | 58.217 → 57.927 | 59.250 → 60.502 |
+
+1600 链 typecheck median 约251倍、墙钟约9.37倍；这是特定共享尾图形的收益。
+selfhost 和 stdlib 没有可信的普遍收益（stdlib median 甚至略慢），UI typecheck
+略降但墙钟仅约1.8%，不做全局真实项目加速承诺。未测峰值内存、Linux 性能或
+含 clang 的 build/run 全链路加速。
+
+#### 原始五次（ms）
+
+- chain 200：before typecheck 8.8002,9.3592,9.1827,9.4041,9.3951；after 0.3558,0.3496,0.3747,0.3884,0.3516。
+  before wall 66.8387,70.5814,70.9623,68.6348,68.4279；after 58.8182,61.8887,60.8320,59.8298,59.2372。
+- chain 800：before typecheck 141.4783,141.0613,146.0022,146.2628,146.1671；after 1.1951,1.1940,1.2636,1.8836,1.1963。
+  before wall 203.6486,203.1057,209.2574,205.3103,208.9880；after 61.6564,62.4159,63.4984,60.9271,64.1972。
+- chain 1600：before typecheck 593.5892,621.2986,607.9765,602.8658,595.0657；after 2.7664,2.3984,2.3594,2.3280,2.5314。
+  before wall 662.4301,694.0134,675.3514,672.7298,665.2709；after 68.9846,74.1761,69.5839,71.7595,74.4614。
+- selfhost：before typecheck 4.6639,4.1589,4.6449,4.3667,4.1109；after 6.2420,3.8717,4.6277,4.3354,4.1469。
+  before wall 107.8157,108.6868,118.3519,111.9589,102.5794；after 104.3703,98.6871,112.1515,107.1552,110.0624。
+- UI：before typecheck 3.8196,4.4356,3.9391,4.4822,3.8648；after 3.8210,3.5375,3.4970,3.5691,3.8102。
+  before wall 88.9202,91.2592,91.4437,91.4015,91.7807；after 90.1434,86.0628,89.7838,88.2784,89.7475。
+- stdlib：before typecheck 0.5325,0.6337,0.5353,0.5283,0.5338；after 0.5350,0.5563,0.8012,0.5328,0.5662。
+  before wall 59.2498,62.3583,58.7088,58.2167,60.2996；after 57.9271,62.1657,58.4932,60.5018,61.1850。
+
+### 正确性、真实失败与日志
+
+4项新 library 测试：新增测试专用 thread-local Cell 计数，计数器及实际 DFS
+展开点增量都由 `#[cfg(test)]` 包裹，非测试/release 构建不包含该开销。
+256节点共享尾链（含重复边），正反根顺序均断言所有根合计展开恰为V=256，
+不用耗时判断。临时每根clear black恢复旧算法，该断言失败：32896≠256；
+随后恢复优化代码，4项受影响lib测试再次全过，补足原先只有语义测试的不足。
+
+其余测试：所有三节点有向图512种×正反根顺序（1024案例），对比
+独立、无完成集的 path-only 参考。比的不仅接受/拒绝，还包括完整首根诊断名称/
+message、stage、file、line、col。另覆盖共享尾/重复边、反向声明、菱形、
+尾部自环/互环、不连通后置环；不使用脆弱毫秒阈值。
+
+**既有缺口不掩盖：**当前原算法只跟直接 `Type::Struct` 字段，不穿透数组等包装。
+`A.xs: [B; 1]` / `B.a: A` 的间接环会被本检查阶段接受；新增测试直接测
+collect_structs 钉住原行为（不把无限布局交给clang），不是声称该布局正确。
+递归 DFS 深度/宿主栈限制仍在，不宣称无限深度防护；另立正确性任务修它们。
+
+基准脚本还单独取消计时，逐字节比 stdout C、stderr诊断和退出状态：
+examples/*.ax、selfhost/*demo.ax、3条链，以及cycle-tail/duplicate-field/
+unknown-type/strict-type/parse非法输入，**42成功+5非法，47/47一致**。
+
+测试执行和实际结果：
+
+| 命令/阶段 | 结果 |
+|---|---|
+| 初次 cargo test（无clang） | 43通过、5失败后停止；缺clang，不是优化故障 |
+| cargo test --no-fail-fast（仍无clang） | 202通过、140失败，5个test targets失败；部分其他测试内部提前跳过，所以不能称202完整运行覆盖 |
+| AOXN_CLANG=E:/llvm/bin/clang.exe cargo test --no-fail-fast | **343通过、0失败/忽略**；完整 clang/SDK/自举路径 |
+| bash run_pkg_tests.sh | **104通过、0失败/忽略** |
+| cargo check --workspace --tests --target x86_64-unknown-linux-gnu | **通过**；仅Rust编译检查，不是Linux链接/运行 |
+
+最终总计447通过。root分套件：lib24、main0、setup3、anthropic2、assets21、
+assets_v36 18、containers1、datetime2、hashlib1、install6、json_fileio1、math1、
+openai2、osglob1、pathlib1、pipeline198、stdlib_defect_pins3、stdlib_perf_pins1、
+symbols8、ts_lex14、ts_parse21、ui14、doctests0。
+
+原始未提交日志全部位于 **D:/ailanguage-bench/compiler-perf/target/compiler-perf/**：
+
+- baseline-build.log / modified-build.log：两个release构建。
+- initial.json：热点初测，保留每阶段stderr。
+- cargo-test.log / cargo-test-all.log：两次缺clang真实失败。
+- cargo-test-clang.log：初版显式clang后的342通过；review-cargo-test.log：补性能性质回归后的**343通过**。
+- review-lib-test.log / review-restored-lib-test.log：4项受影响lib测试全过。
+- review-mutation-test.log：临时恢复每根black清空时预期失败，32896次展开而非256；修改已撤回。
+- review-linux-check.log：补回归后的Linux cross-check通过。测试专用计数不影响release路径，既有基准二进制/原始数据及baseline SHA保持不变。
+- pkg-test.log：104包测试；linux-check.log：Linux cross-check。
+- benchmark.log / final.json：最终交错原始值、全阶段stderr、min/median及47个输出比较摘要。
+- baseline.exe：保留的82cffcd二进制；inputs/为可复现自动生成输入。
+
+README/SECURITY已按当前树完整双语重写，版本不变；wiki和主工作树不动，
+未提交/合并/推送。本轮没有运行IDE套件、Linux原生运行或完整新安装器打包。
+
+### 完成审计表
+
+| 用户目标 | 实现 | 基准证据 | 正确性证据 |
+|---|---|---|---|
+| 找仍存在的Rust compiler热点 | collect_structs跨根重复DFS | baseline 200→800→1600近二次增长 | 已核对最近性能提交，非重复优化 |
+| 明显收益、语义不变 | black完成集跨根保留，根/边规则不变 | 1600 TC median 602.866→2.398ms | 1024图参考+完整首根诊断比较 |
+| 排除clang/cache噪声 | release独立c进程，双热身后5轮交错 | final.json全原始相位/墙钟；无并行cargo | 47/47 C/诊断/状态完全一致 |
+| 回归与平台验证 | 新增4个checker tests | 不设时间阈值 | root343+pkg104；Linux check通过；保留失败日志 |
+| 文档/安全/隔离 | 双语README/SECURITY重写、AGENTS/CHANGELOG同步 | 本节保存方法和数据 | 无新依赖/unsafe，无wiki或主树修改，无提交 |
+
+
 ## 2026-10-24 实测实施：调用图与模块重写
 
 本节是当前 Rust/C 编译器的测量记录；下方原方案保留为历史材料，里面的
