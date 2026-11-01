@@ -134,6 +134,10 @@ const KNOWN_GAPS: &[(&str, &str, &str)] = &[
 
 fn run_comparison(known_gaps: bool) {
     let Some(clang) = aoxn::find_clang() else {
+        assert!(
+            std::env::var_os("AOXN_TEST_REQUIRE_CLANG").is_none(),
+            "clang is required for this test run; set AOXN_CLANG"
+        );
         eprintln!("skipping: clang unavailable (set AOXN_CLANG)");
         return;
     };

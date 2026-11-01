@@ -107,6 +107,9 @@ does not implement installed package/name resolution.
   prove detection of arbitrary mismatched declarations in external libraries.
 - If clang is unavailable, a reported skipped integration test is not successful
   ABI or emitter validation. Select `AOXN_CLANG` explicitly for validation runs.
+  Main CI runs both targets in a named Windows/Linux step with
+  `AOXN_TEST_REQUIRE_CLANG=1`, so missing clang fails that gate instead of
+  skipping. Without the opt-in variable, local test behavior is unchanged.
 - Windows execution and Linux Rust cross-checking are separate evidence. A Rust
   cross-check does not demonstrate Linux native linkage or runtime behavior.
 
@@ -144,6 +147,16 @@ Ordinary scalar declaration formatting is unchanged.
 
 ## Validation record
 
+CI-gate follow-up, 2026-11-01: the exact explicit command
+`cargo test -p aoxn --locked --test c_emitter_parity --test c_abi` passed with
+`AOXN_TEST_REQUIRE_CLANG=1` on Windows: **4 ABI + 2 parity tests, 0 failed or
+ignored**. Both workflow jobs contain that named step. Local runs without the
+variable keep the previous missing-clang skip behavior; the required CI path
+uses assertions before either early return.
+
+The earlier compatibility validation below remains the record for the emitter
+and ABI implementation itself:
+
 Validated on Windows x86_64 with Rust 1.94.1 and explicitly selected clang
 23.1.2 (`AOXN_CLANG=E:/llvm/bin/clang.exe`), on the `c-parity-abi` worktree
 based on `8f90aca`. Versions remain compiler 0.55.0 / package crate 0.42.0;
@@ -177,6 +190,7 @@ Reproduction (from the bench root, using an existing clang):
 
 ```powershell
 $env:AOXN_CLANG = "E:/llvm/bin/clang.exe"
+$env:AOXN_TEST_REQUIRE_CLANG = "1"
 cargo test --no-fail-fast
 cargo test --test c_abi --test c_emitter_parity -- --nocapture
 cargo test --test pipeline selfhost_driver_self_compiles -- --exact

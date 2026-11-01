@@ -6,8 +6,8 @@ on:
   pull_request:
 
 # Validation ownership:
-# - This workflow: compiler/pipeline/stdlib/TS/UI tests and explicit pkg tests
-#   on Windows + Linux; Linux also exercises the X11 backend under Xvfb.
+# - This workflow: compiler/pipeline/stdlib/TS/UI tests, required C parity/ABI
+#   gates and explicit pkg tests on Windows + Linux; Linux also runs X11/Xvfb.
 # - release.yml: Windows installer packaging/install/doctor/run smoke checks
 #   on version tags or manual dispatch, not on every push.
 # - web-bench.yml: Windows web functional parity + reference benchmark, with
@@ -47,6 +47,11 @@ jobs:
       # A non-virtual workspace defaults to the root package, not every member.
       - name: Test compiler (pipeline, stdlib, TS, UI)
         run: cargo test -p aoxn --locked
+
+      - name: Test C emitter parity and ABI (clang required)
+        run: cargo test -p aoxn --locked --test c_emitter_parity --test c_abi
+        env:
+          AOXN_TEST_REQUIRE_CLANG: "1"
 
       # Use Cargo directly: run_pkg_tests.sh is a local Windows SAC workaround,
       # and its unreferenced stamp does not guarantee a new binary hash.
@@ -100,6 +105,11 @@ jobs:
       # A non-virtual workspace defaults to the root package, not every member.
       - name: Test compiler (pipeline, stdlib, TS, UI)
         run: cargo test -p aoxn --locked
+
+      - name: Test C emitter parity and ABI (clang required)
+        run: cargo test -p aoxn --locked --test c_emitter_parity --test c_abi
+        env:
+          AOXN_TEST_REQUIRE_CLANG: "1"
 
       # Use Cargo directly: run_pkg_tests.sh is a local Windows SAC workaround,
       # and its unreferenced stamp does not guarantee a new binary hash.

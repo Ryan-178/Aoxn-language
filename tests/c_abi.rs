@@ -34,6 +34,10 @@ fn checked(cmd: &mut Command, stage: &str) -> std::process::Output {
 
 fn run_native(src: &str, helper: Option<&str>, marker: &str) {
     let Some(clang) = aoxn::find_clang() else {
+        assert!(
+            std::env::var_os("AOXN_TEST_REQUIRE_CLANG").is_none(),
+            "{marker}: clang is required for this test run; set AOXN_CLANG"
+        );
         eprintln!("SKIP {marker}: clang not found; set AOXN_CLANG");
         return;
     };

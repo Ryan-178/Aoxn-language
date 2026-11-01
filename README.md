@@ -109,8 +109,11 @@ The [IDE](docs/ide.md) is a Tauri/Next.js/Monaco application, separately tested.
 
 Main CI explicitly runs `cargo test -p aoxn --locked` and
 `cargo test -p aoxn-pkg --locked` on Windows/Linux: the root non-virtual workspace
-otherwise defaults to only `aoxn`. Linux also runs the X11 probe under Xvfb.
-Release packaging/install smoke runs on tags or manual dispatch, not every push;
+otherwise defaults to only `aoxn`. A separate named step reruns
+`--test c_emitter_parity --test c_abi` with `AOXN_TEST_REQUIRE_CLANG=1`; missing
+clang fails that gate instead of silently skipping the comparisons. Linux also
+runs the X11 probe under Xvfb. Release packaging/install smoke runs on tags or
+manual dispatch, not every push;
 web benchmarks and IDE checks are separate. Windows smoke commands now check
 native exit codes immediately. Release notes match the installer's opt-in clang
 download behavior.
@@ -134,15 +137,17 @@ links, execute documented commands, validate anchors or replace a security audit
 
 ```powershell
 $env:AOXN_CLANG = "E:/llvm/bin/clang.exe"  # choose an existing clang
+$env:AOXN_TEST_REQUIRE_CLANG = "1"
 cargo test -p aoxn --locked --no-fail-fast
+cargo test -p aoxn --locked --test c_emitter_parity --test c_abi
 cargo test -p aoxn-pkg --locked
 cargo check --workspace --tests --target x86_64-unknown-linux-gnu
 ```
 
-Final Windows validation for this compatibility change: **349 root + 104 package
-= 453 passed, 0 failed/ignored**, with Rust 1.94.1 and explicit clang 23.1.2.
-The four ABI tests and two parity tests passed; native ABI cases actually ran at
-O0/O3. Six common-subset inputs have identical C, while five known gaps are
+Final Windows validation for the current tree: **349 root + 105 package = 454
+passed, 0 failed/ignored**. The separate required CI command also passed its four
+ABI and two parity targets; native ABI cases actually ran at O0/O3. Six
+common-subset inputs have identical C, while five known gaps are
 separately pinned, not counted as parity. The original fixed point and
 cross-process determinism tests passed. Linux Rust workspace/tests cross-check
 passed, not Linux native linking/runtime. An intermediate incorrect known-gap
@@ -291,6 +296,8 @@ npm-import 与直接别名；注册表为目录/git/只读明文 HTTP。npm-impo
 
 主 CI 在 Windows/Linux 显式执行 `cargo test -p aoxn --locked` 和
 `cargo test -p aoxn-pkg --locked`；非虚拟工作区裸 cargo test 默认只测试根包。
+独立命名步骤以 `AOXN_TEST_REQUIRE_CLANG=1` 重跑
+`--test c_emitter_parity --test c_abi`，缺少 clang 会判定门禁失败，不再静默跳过比较。
 Linux 另跑 Xvfb 下 X11 probe。安装打包与冒烟在 tag/手动触发，不是每次 push；
 Web 基准和 IDE 独立。Windows 冒烟逐条检查原生命令退出码，发布文案与安装器
 显式启用 clang 下载的行为一致。
@@ -311,14 +318,16 @@ python tools/check_doc_links.py
 
 ```powershell
 $env:AOXN_CLANG = "E:/llvm/bin/clang.exe"  # 替换为已有 clang
+$env:AOXN_TEST_REQUIRE_CLANG = "1"
 cargo test -p aoxn --locked --no-fail-fast
+cargo test -p aoxn --locked --test c_emitter_parity --test c_abi
 cargo test -p aoxn-pkg --locked
 cargo check --workspace --tests --target x86_64-unknown-linux-gnu
 ```
 
-本次 Windows 最终验证：Rust 1.94.1、显式 clang 23.1.2 下 **349根+104包=453项
-通过，0失败/忽略**。新增4项 ABI、2项 parity 通过，原生 ABI 实际执行 O0/O3。
-6个共同子集输入 C 相同，5个已知缺口独立钉住，不混算为 parity。不动点和跨进程
+当前树 Windows 最终验证：**349根+105包=454项通过，0失败/忽略**。独立必跑 CI
+命令另完成4项 ABI、2项 parity，原生 ABI 实际执行 O0/O3。6个共同子集输入 C
+相同，5个已知缺口独立钉住，不混算为 parity。不动点和跨进程
 确定性通过，Linux Rust workspace/tests cross-check 通过，不证明 Linux 链接/运行。
 中间一项 known-gap 预期失败，经完整 C 实测纠正后最终全过，见
 [C 兼容证据](docs/c-compatibility.md)。未运行 IDE 或完整安装器打包。

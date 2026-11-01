@@ -112,10 +112,12 @@ verification does not establish sandboxing or constitute a security audit.
 ### Repository checks and automation scope
 
 Main CI names both compiler and package-manager packages explicitly; default
-root Cargo testing does not imply member test execution. Native command exit
+root Cargo testing does not imply member test execution. A separate Windows/Linux
+step requires clang for the C parity and ABI targets, so their early-return skip
+path cannot produce a green gate without the comparisons. Native command exit
 codes gate Windows smoke/release steps, and installer downloads remain opt-in.
-Local workflow syntax checking is not proof of successful hosted Actions or
-installer execution; no remote workflows were triggered for this maintenance.
+Local workflow checks are not proof of successful hosted Actions or installer
+execution.
 
 `tools/check_doc_links.py` is read-only and dependency-free. It reads local Git
 history, never fetches URLs or executes documented commands, and defaults to
@@ -135,10 +137,11 @@ registry trust tiers do not sandbox or certify programs.
 
 The thirteen findings from the 2026-10-17 audit were fixed in 0.51.0/0.51.1;
 that is history, not absence of new defects. Baseline **8f90aca** recorded
-343 root + 104 package tests on Windows with explicit clang 23.1.2. Current
-compatibility-work validation passed **349 root + 104 package tests (453),
-0 failed/ignored** on Windows with explicit clang 23.1.2. Native ABI cases ran
-at O0/O3; original fixed point and cross-process determinism passed. Linux Rust
+343 root + 104 package tests on Windows with explicit clang 23.1.2. Current-tree
+validation passed **349 root + 105 package tests (454), 0 failed/ignored** on
+Windows; the explicit required gate separately completed all four ABI and two
+parity targets. Native ABI cases ran at O0/O3; original fixed point and
+cross-process determinism passed. Linux Rust
 workspace/tests cross-check passed, not Linux native runtime. An intermediate
 wrong known-gap expectation failed and was corrected from direct C comparison;
 see [verification evidence](docs/c-compatibility.md). No fresh security audit,
@@ -231,8 +234,9 @@ IDE/Web 的 JS/Tauri 为另一供应链边界。发射器/ABI 验证不是安全
 ### 仓库检查与自动化范围
 
 主 CI 显式指定编译器和包管理器，不能把默认根包测试当成员测试已执行。
-Windows 冒烟/发布逐条检查原生命令退出码，安装器下载仍为显式启用。
-本地 workflow 语法校验不证明托管 Actions 或安装器运行成功；本次未触发远程工作流。
+Windows/Linux 另有独立步骤强制 C parity/ABI 目标使用 clang，提前返回的跳过路径
+不能让未实际比较的门禁变绿。Windows 冒烟/发布逐条检查原生命令退出码，
+安装器下载仍为显式启用。本地 workflow 检查不证明托管 Actions 或安装器运行成功。
 
 文档检查器只读、无外部依赖，仅读本地 Git 历史，不访问 URL 或执行文档命令，
 默认仅警告。历史白名单与命令启发式限制其覆盖，不是安全/链接完整性保证。
@@ -246,9 +250,10 @@ Windows 冒烟/发布逐条检查原生命令退出码，安装器下载仍为�
 与调用方主动不安全操作有别；窗口服务和注册表等级不沙箱或认证程序。
 
 2026-10-17 审计13项已在0.51.0/0.51.1修复，不保证没有新缺陷。
-历史基线 **8f90aca** 在 Windows 显式 clang 23.1.2 记录343根+104包；本次最终
-**349根+104包=453项通过，0失败/忽略**，ABI 实际执行 O0/O3，不动点和跨进程
-确定性通过；Linux Rust workspace/tests cross-check 通过，不等于原生运行。
+历史基线 **8f90aca** 在 Windows 显式 clang 23.1.2 记录343根+104包；当前树最终
+**349根+105包=454项通过，0失败/忽略**，独立必跑门禁另完成4项 ABI 与2项 parity，
+ABI 实际执行 O0/O3，不动点和跨进程确定性通过；Linux Rust workspace/tests
+cross-check 通过，不等于原生运行。
 中间 known-gap 错误预期曾失败，已据完整 C 比较纠正并最终全过，见
 [C 兼容证据](docs/c-compatibility.md)。不暗示新安全审计、IDE 验证、Linux 原生运行
 或完整安装器发布。P2维护后又执行显式locked编译器/包测试，结果与Python检查器

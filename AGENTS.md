@@ -1709,8 +1709,11 @@ crates/aoxn-pkg       package manager crate (its own dependency set; see above)
   `ci.yml` has Windows/Linux jobs with explicit `cargo test -p aoxn --locked`
   and `cargo test -p aoxn-pkg --locked`; bare `cargo test` in this non-virtual
   workspace defaults to the root package, not the pkg member's own tests.
-  Linux additionally runs the X11 probe under Xvfb. `release.yml` packages and
-  smoke-installs the Windows installer on tags/manual dispatch, not every push.
+  A separate step runs `--test c_emitter_parity --test c_abi` with
+  `AOXN_TEST_REQUIRE_CLANG=1`, making missing clang a failure rather than a
+  skipped comparison. Linux additionally runs the X11 probe under Xvfb.
+  `release.yml` packages and smoke-installs the Windows installer on
+  tags/manual dispatch, not every push.
   IDE checks are separate; `web-bench.yml` owns web parity/benchmarks. Keep
   validation records explicit about which commands actually ran.
 - **Documentation maintenance checks:** `python -B tools/test_check_doc_links.py`

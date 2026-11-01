@@ -32,6 +32,9 @@ minor bumps while pre-1.0: each minor version is a language milestone.
   document IDE/web/release coverage boundaries, and fail Windows smoke steps
   immediately on native command errors. Initialize the installer smoke prefix
   and state that clang downloads are opt-in in release notes.
+- Run C emitter parity and C ABI targets in their own Windows/Linux CI step.
+  `AOXN_TEST_REQUIRE_CLANG=1` turns a missing-clang early return into a failed
+  test in that gate; ordinary local runs retain the documented skip behavior.
 - Remove the duplicate 0.54.1 heading. Add a dependency-free, read-only document
   path auditor with warning-only default and a repository artifact audit;
   historical assets are retained, not deleted as unexplained clutter.
