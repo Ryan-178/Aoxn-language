@@ -51,24 +51,48 @@ pnpm test:rust             # the Rust command layer
 pnpm typecheck             # tsc --noEmit
 ```
 
-### Pinned dependency, and one accepted advisory
+### Dependency pins, and one accepted advisory
 
-- **`dompurify` is overridden to 3.4.16** (`package.json`'s
-  `pnpm.overrides`). Monaco depends on it but pins an EXACT version
-  (`3.4.15`), and 0.57.0 is monaco's latest release, so the two patched
-  versions of DOMPurify's `IN_PLACE` handling (a node-removing
-  `afterSanitize` hook leaving a detached subtree's handlers armed, and a
-  force-removed rawtext root whose text carries attacker markup) could not
-  be cleared any other way. The override is a patch bump within the same
-  minor, and the editor's 62 frontend tests plus `pnpm build` pass on it.
+- **`next` is on 16.4.3.** The 16.3 line carried three advisories — two
+  critical (the image-optimisation RCE via `sharp`, and `use cache` returning
+  typed arrays) and the App Router Server-Action DoS — all patched at 16.4.1.
+  This app is a static export (`output: 'export'`), so no Next server runs in
+  the shipped product and none of the three is reachable here; it is upgraded
+  anyway, because the lockfile is what a scanner reads and what a future
+  `next start` would run.
+- **`dompurify` is overridden to 3.4.17** in `ide/pnpm-workspace.yaml`.
+  Monaco depends on it but pins an EXACT version (`3.4.15`), and 0.57.0 is
+  monaco's latest release, so no bump reaches it — an override is the only
+  route. 3.4.16 fixed two `IN_PLACE` advisories but left three more open
+  (a critical `SAFE_FOR_TEMPLATES` bypass through attached shadow-root content,
+  the incomplete `IN_PLACE` fix, and a skipped SMIL `attributeName=href`
+  guard); 3.4.17 closes all three. They are DOM XSS in the sanitiser Monaco
+  applies to pasted and loaded HTML. The override is a patch bump within the
+  same minor, and the editor's 62 frontend tests, `pnpm typecheck` and
+  `pnpm build` pass on it.
+- **The override lives in `ide/pnpm-workspace.yaml`, not in the
+  `pnpm.overrides` field of `ide/package.json`, and that is not a style
+  choice.** The dependabot PR that
+  bumped `next` (2026-11-01) regenerated `ide/pnpm-lock.yaml` without the
+  package.json override: dompurify fell back to monaco's exact 3.4.15 and two
+  already-closed XSS advisories came back — with `ide/package.json` still
+  claiming the pin in prose, so nothing in the diff said anything had been
+  reverted. `web/next-app/pnpm-workspace.yaml` pins `postcss` for the same
+  reason. After any bot-driven lockfile change, check that the lock's
+  `overrides:` block still names dompurify.
+- `pnpm audit` reports **no known vulnerabilities** for `ide/pnpm-lock.yaml`.
+  Re-check both JS manifests with `pnpm --dir ide audit` and
+  `pnpm --dir web/next-app audit`; the Rust one with
+  `cargo audit` in `ide/src-tauri` (it reads the `audit.toml` below).
 - **`RUSTSEC-2024-0429` (glib) is ACCEPTED, not fixed** —
-  `ide/src-tauri/audit.toml` records why in the repo: the advisory needs
-  glib ≥ 0.20, and glib reaches this lock through wry 0.57.0 → `gtk ^0.18`
-  → `glib ^0.18`, with both wry and tao already at their latest releases,
-  so `cargo update` has nothing to move (the lock stays at glib 0.18.5).
-  The unsound `VariantStrIter` path is a transitive webview-backend
-  dependency, is Linux-only, and this app never calls it. The file's
-  exit condition says when to delete the entry.
+  `ide/src-tauri/audit.toml` records why in the repo and carries the
+  2026-11-01 re-check: the advisory needs glib ≥ 0.20, and glib reaches this
+  lock through wry → `gtk ^0.18` → `glib ^0.18`. The fix is released on the
+  glib 0.20+ line but nothing on the 0.18 line backports it, and the newest
+  wry (0.57.1) still asks for `gtk ^0.18`, so `cargo update` has nothing to
+  move (the lock stays at glib 0.18.5). The unsound `VariantStrIter` path is a
+  transitive webview-backend dependency, is Linux-only, and this app never
+  calls it. The file's exit condition says when to delete the entry.
 
 ## What it does
 

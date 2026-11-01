@@ -1,0 +1,17 @@
+# pnpm 10+/11 reads overrides from pnpm-workspace.yaml (not package.json).
+# The dompurify pin used to live in package.json's `pnpm.overrides` field, and
+# the dependabot lockfile regeneration that bumped `next` (PR #2, 2026-11-01)
+# rewrote pnpm-lock.yaml WITHOUT it — which silently reverted dompurify from
+# 3.4.16 to monaco's exact 3.4.15 and re-opened two DOM XSS advisories that had
+# already been closed. Same reason web/next-app/pnpm-workspace.yaml exists:
+# this is the location a regeneration reads.
+#
+# monaco-editor pins dompurify to an EXACT version (3.4.15) and 0.57.0 is
+# monaco's latest release, so a patched dompurify only ever arrives through an
+# override. 3.4.17 closes the critical SAFE_FOR_TEMPLATES bypass
+# (GHSA-cg2g-xh64-v4q7), the incomplete IN_PLACE fix (GHSA-mrv2-3pqr-j5jr) and
+# the skipped SMIL attributeName=href guard (GHSA-c6gr-qvv4-5v3f); 3.4.16 had
+# already fixed two earlier IN_PLACE advisories. Every one of them is DOM XSS in
+# the sanitiser Monaco applies to pasted and loaded HTML.
+overrides:
+  dompurify: 3.4.17

@@ -65,6 +65,59 @@ minor bumps while pre-1.0: each minor version is a language milestone.
   correcting stale version/test totals, installer download behavior and the
   scope of what the self-host fixed point proves.
 
+### Dependency security (IDE and web benchmark)
+
+Seven of the eight open dependency advisories are now closed; the eighth is
+re-verified as still unfixable and its in-repo acceptance record was
+corrected. No compiler or language code changed — this is the two JS
+manifests and the Rust acceptance note.
+
+- **`ide`: `next` 16.3.8 → 16.4.3.** Three advisories ride that one line:
+  the image-optimisation SVG RCE (GHSA-2464-fhr4-w9xw, critical), the
+  `use cache` typed-array RCE (GHSA-673q-mjm6-r5xr, critical) and the App
+  Router Server-Action DoS (GHSA-p3m5-59mp-jv5r, high). All three are patched
+  at 16.4.1 — which the dependabot PR merged on 2026-11-01 had already taken,
+  so this branch lands on the current 16.4.3 instead. The IDE ships as a static
+  export, so no Next server runs in the product and none of the three is
+  reachable there; the lockfile is what a scanner reads, so it moves.
+- **`ide`: `dompurify` override 3.4.16 → 3.4.17.** 3.4.16 fixed two `IN_PLACE`
+  advisories and left three open — the critical `SAFE_FOR_TEMPLATES` bypass
+  (GHSA-cg2g-xh64-v4q7), the incomplete `IN_PLACE` fix (GHSA-mrv2-3pqr-j5jr)
+  and the skipped SMIL `attributeName=href` guard (GHSA-c6gr-qvv4-5v3f). All
+  are DOM XSS in the sanitiser Monaco applies to pasted and loaded HTML, and
+  monaco-editor pins dompurify to an EXACT 3.4.15, so an override is the only
+  route to a patched release.
+- **The override moved out of `ide/package.json` into
+  `ide/pnpm-workspace.yaml`, because a regeneration had silently dropped it.**
+  That dependabot PR rewrote `ide/pnpm-lock.yaml` without the `pnpm.overrides`
+  field, so dompurify fell back to monaco's exact 3.4.15 — two already-closed
+  XSS advisories reopened, and the manifest's own prose still described the
+  pin, so nothing in the diff announced the regression.
+  `web/next-app/pnpm-workspace.yaml` pins `postcss` the same way for the same
+  reason. Reviewing a generated lockfile diff means reading its `overrides:`
+  block, not only the version lines.
+- **`web/next-app`: `next` 15.5.27 → 15.5.28** — the same two `next`
+  advisories, cleared on the 15.x backport line rather than by a major bump
+  that would move the benchmark baseline for no reason connected to the alert.
+  `sharp` was already 0.35.5 (the RCE's actual fix) and `source-map-js`
+  already 1.2.2, so only `next` and its own `@next/*` satellites moved.
+- **`ide/src-tauri`: RUSTSEC-2024-0429 (glib) stays ACCEPTED.** Re-checked
+  against crates.io: the fix IS released — on the glib 0.20+ line, now at
+  0.22.x — which is what the old note got wrong ("upstream's fix is
+  unreleased"). What blocks it is the constraint two crates away: the newest
+  wry (0.57.1) still asks for `gtk ^0.18`, gtk 0.19.0 requires glib ^0.22, and
+  the glib 0.18 line stops at 0.18.5 with no backport, so `cargo update` has
+  nothing to move. `audit.toml` now carries the dated re-check and a
+  re-check command; the entry is deleted when either half changes.
+
+Verified: `pnpm audit` reports no known vulnerabilities in both `ide` and
+`web/next-app`; `ide` passes 62/62 frontend tests, `pnpm typecheck` and
+`pnpm build` (static export) on Next 16.4.3; `web/next-app` builds and
+`next start` serves `/`, `/api/json`, `/text` with correct bodies and 404
+intact on 15.5.28. Not run: `cargo audit` (cargo-audit is not installed on
+this machine), the Tauri Rust test layer (no Rust source or lockfile change),
+and any re-benchmark of the Next.js columns.
+
 ## [0.55.0] - 2026-10-24
 
 **`-2 ** 2` is `-4` — now actually true.** The parser had computed

@@ -150,6 +150,15 @@ expectation failed and was corrected from actual full-C comparison; see
 [C compatibility](docs/c-compatibility.md) for evidence and reproduction.
 IDE tests and full installer packaging were not run.
 
+**Dependency security, 2026-11-01**: the two JS manifests were re-audited and
+upgraded — `ide` to `next` 16.4.3 plus dompurify 3.4.17, `web/next-app` to
+`next` 15.5.28 — closing seven advisories; `pnpm audit` now reports no known
+vulnerabilities in either, with 62/62 IDE frontend tests, `pnpm typecheck`, both
+`pnpm build`s and a `next start` route smoke passing. The one remaining Rust
+advisory (glib, `RUSTSEC-2024-0429`) stays accepted in `ide/src-tauri/audit.toml`
+with a dated re-check. No compiler suite re-ran for it: nothing in `src/`,
+`tests/`, the Aoxn sources or any `Cargo.lock` changed.
+
 Historical baseline **8f90aca** recorded 343 root + 104 package tests (447), with
 explicit clang 23.1.2 on Windows. This is a dated baseline, not a live count of
 the modified tree. The [performance report](docs/p2-compiler-performance.md)
@@ -299,6 +308,13 @@ cargo check --workspace --tests --target x86_64-unknown-linux-gnu
 确定性通过，Linux Rust workspace/tests cross-check 通过，不证明 Linux 链接/运行。
 中间一项 known-gap 预期失败，经完整 C 实测纠正后最终全过，见
 [C 兼容证据](docs/c-compatibility.md)。未运行 IDE 或完整安装器打包。
+
+**依赖安全 2026-11-01**：两份 JS 清单重新审计并升级——`ide` 到 `next` 16.4.3
+加 dompurify 3.4.17，`web/next-app` 到 `next` 15.5.28，共关闭 7 项公告；两份清单
+`pnpm audit` 均已无已知漏洞，IDE 前端 62/62、`pnpm typecheck`、两侧 `pnpm build`
+与 `next start` 路由冒烟全部通过。唯一保留的 Rust 公告（glib
+`RUSTSEC-2024-0429`）连同本次复核仍记在 `ide/src-tauri/audit.toml`。
+本次未重跑编译器测试：src、tests、Aoxn 源码与任何 Cargo.lock 都未改动。
 
 历史基线 **8f90aca** 在 Windows 显式 clang 23.1.2 下记录 343 根+104 包=447 项，
 不是修改后实时计数。[性能报告](docs/p2-compiler-performance.md)保留具体实验与失败：

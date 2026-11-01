@@ -31,12 +31,14 @@ Three servers, three routes, same bodies:
 - **Aoxn v0.26.3** — `web/server_win.ax` (Windows) / `web/server_posix.ax`
   (Linux/macOS), compiled with `aoxn build` (LLVM `default<O3>`).
 - **Node.js 22.22.1** — `web/node-server.mjs`, plain `node:http`.
-- **Next.js 15.5.27** — `web/next-app`, app router, `next build` +
-  `next start` (production). The 15.x line is held here on purpose: 15.5.27
-  is the backport release that clears the two SSG/ISR cache-poisoning
-  advisories (GHSA-4jqv-mc3x-m676, GHSA-mcj8-r9mp-w47p) without a major
-  bump, and it carries the patched `sharp` 0.35.5 and `source-map-js` 1.2.2
-  transitively (v0.50.1).
+- **Next.js 15.5.28** — `web/next-app`, app router, `next build` +
+  `next start` (production). The 15.x line is held here on purpose: 15.5.28
+  is the backport release that clears the image-optimisation SVG RCE
+  (GHSA-2464-fhr4-w9xw) and the App Router Server-Action DoS
+  (GHSA-p3m5-59mp-jv5r) without a major bump, on top of the two SSG/ISR
+  cache-poisoning advisories 15.5.27 had already cleared
+  (GHSA-4jqv-mc3x-m676, GHSA-mcj8-r9mp-w47p). It carries the patched
+  `sharp` 0.35.5 and `source-map-js` 1.2.2 transitively (v0.50.1).
 
 The Aoxn and Node response bodies are **byte-identical** (SHA-256 verified on
 all three routes). The Next.js page carries the same content (title, table,
@@ -54,6 +56,10 @@ sum) with Next's own document markup and hydration payload.
 - Each server is warmed up (3 s) before measurement.
 
 ## Results
+
+The Next.js columns below were measured on 15.5.27. The bump to 15.5.28 is a
+security backport (no feature or route change), so it is not re-benched here;
+`.github/workflows/web-bench.yml` re-measures on every run it is invoked.
 
 ### Throughput & latency (median of 3 × 10 s, 32 connections)
 

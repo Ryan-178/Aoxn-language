@@ -17,10 +17,15 @@ id = "RUSTSEC-2024-0429"
 #
 # NOT FIXABLE TODAY, and the reason is a version constraint two crates away:
 # the advisory is patched only in glib >= 0.20, and glib reaches this lock
-# through wry 0.57.0 -> gtk ^0.18 -> glib ^0.18. Both of those are at their
-# LATEST releases (wry 0.57.0, tao 0.37.1 — checked on crates.io), so there
-# is no version to bump: `cargo update` leaves glib at 0.18.5 because ^0.18
-# is all wry asks for. Upstream's fix (gtk-rs-core PR #1343) is unreleased.
+# through wry -> gtk ^0.18 -> glib ^0.18. Upstream HAS released the fix (the
+# glib 0.20 line, now at 0.22.x); what has not moved is the constraint, so
+# `cargo update` leaves glib at 0.18.5 because ^0.18 is all wry asks for.
+#
+# RE-CHECKED 2026-11-01 against crates.io: newest wry is 0.57.1 and newest tao
+# 0.37.2, and wry still declares `gtk ^0.18` for its Linux targets. gtk 0.19.0
+# (the newest gtk) requires glib ^0.22, and the glib 0.18 line stops at 0.18.5
+# — no backport of this fix was ever cut. So there is still nothing to bump to:
+# taking the wry/tao patch releases would not move glib by one digit.
 #
 # Blast radius here is small and Linux-only: glib is a transitive dependency
 # of the webview backend, and this project calls none of the affected API
@@ -29,9 +34,10 @@ id = "RUSTSEC-2024-0429"
 # compiled into the Linux build.
 #
 # EXIT CONDITION — delete this entry and run `cargo update` as soon as EITHER
-# (a) gtk-rs releases the glib 0.18 line with the fix, letting a patch bump
-# clear it, OR (b) wry/tao publish a release on the gtk 0.20 line. Re-check
-# with: cargo update && cargo audit --file ide/src-tauri/audit.toml
+# (a) gtk-rs backports the fix onto the glib 0.18 line, letting a patch bump
+# clear it, OR (b) wry publishes on a gtk line that allows glib >= 0.20 (gtk
+# 0.19 already requires glib ^0.22). Re-check with:
+# cargo update -p glib --dry-run && cargo audit --file ide/src-tauri/audit.toml
 #
 # Do NOT "fix" this by deleting the block without bumping glib: a silent
 # removal is how an accepted risk becomes an unnoticed one.

@@ -91,6 +91,19 @@ verification does not establish sandboxing or constitute a security audit.
   environment configuration and redact dumps; WinHTTP transport is Windows-only.
 - IDE/web advisories are in scope. Exceptions require reasons and exit conditions;
   do not drop the glib audit exception without resolving its dependency constraint.
+- JS manifests carry no known advisory as of 2026-11-01: `ide` runs `next` 16.4.3
+  and dompurify 3.4.17, `web/next-app` runs `next` 15.5.28. Re-check with
+  `pnpm --dir ide audit` and `pnpm --dir web/next-app audit`. The one accepted
+  exception stays `RUSTSEC-2024-0429` (glib, Linux-only webview backend, API
+  never called), recorded with its 2026-11-01 re-check in
+  `ide/src-tauri/audit.toml`.
+- A bot-driven lockfile regeneration **can silently revert a security pin**:
+  dependabot's `next` bump rewrote `ide/pnpm-lock.yaml` without the
+  `pnpm.overrides` field in `ide/package.json`, dropping dompurify back to
+  monaco's exact 3.4.15 while the manifest still described the pin. Overrides
+  that carry a security fix live in `pnpm-workspace.yaml`, and reviewing a
+  generated lockfile diff means checking its `overrides:` block, not only
+  version lines.
 
 ### Repository checks and automation scope
 
@@ -192,6 +205,17 @@ IDE/Web 的 JS/Tauri 为另一供应链边界。发射器/ABI 验证不是安全
 - 字符串 clamp 属安全属性，不得借数组不检查取消。SDK key 不清零，优先环境配置，
   转储脱敏；WinHTTP 为 Windows-only。IDE/Web 公告在范围内，例外需要理由与退出条件，
   未解决依赖约束前不得删除 glib audit 例外。
+- 2026-11-01 起 JS 清单无已知公告：`ide` 为 `next` 16.4.3、dompurify 3.4.17
+  （monaco 锁死精确版本，只能靠 override），`web/next-app` 为 `next`
+  15.5.28。复核命令 `pnpm --dir ide audit`、`pnpm --dir web/next-app audit`。
+  唯一保留的例外仍是 `RUSTSEC-2024-0429`（glib，仅 Linux webview 后端传递依赖，
+  本项目不调用受影响 API），理由与退出条件连同本次复核写在
+  `ide/src-tauri/audit.toml`。
+- 机器人重新生成 lockfile **会静默回退安全 pin**：dependabot 升 `next` 那次重写
+  `ide/pnpm-lock.yaml`，丢掉了 `ide/package.json` 里的 `pnpm.overrides`，
+  dompurify 退回 monaco 锁定的 3.4.15，而清单正文仍在描述这个 pin。承载安全
+  修复的 override 一律放在 `pnpm-workspace.yaml`；审查生成的 lockfile diff 要
+  看 `overrides:` 段，不能只看版本号行。
 
 ### 仓库检查与自动化范围
 
