@@ -3,7 +3,8 @@
 Thanks for taking a look at Aoxn. This repository **is** the compiler: a
 Python-syntax, statically typed language that lowers to ISO C and compiles
 through clang to native code, written in Rust with **zero external crate
-dependencies**. Bug reports,
+dependencies in the compiler library** (`src/`). The CLI's package manager
+has a separate dependency set. Bug reports,
 spec corrections, tests, stdlib work, performance measurements, and docs are all
 useful — you do not have to write compiler internals to help.
 
@@ -35,20 +36,26 @@ Please report security vulnerabilities privately per [SECURITY.md](SECURITY.md)
 
 ## Getting started
 
-Aoxn targets **Windows x86_64** (v0.30.0). Prerequisites:
+Aoxn supports **Windows x86_64 (first-class)** and **Linux x86_64**
+(since v0.46.0). macOS is unsupported. Prerequisites:
 
 | Requirement | Notes |
 |---|---|
-| **Rust** (stable, `x86_64-pc-windows-msvc` host) | `cargo build` / `cargo test` |
-| **clang** | The C backend compiles the generated C and the final link step shells out to it: `AOXN_CLANG` → `PATH` → `<toolchain root>/toolchain/bin/clang` (a portable LLVM dropped into an install) → repo-local `LLVM\bin\clang.exe` → `C:\Program Files\LLVM\bin\clang.exe` |
-| **MSVC Build Tools** | clang auto-detects them; required for the MSVC host |
+| **Rust** (stable) | Windows uses `x86_64-pc-windows-msvc`; Linux uses the native GNU toolchain |
+| **clang** | Required to compile generated C and link programs, not to build the Rust compiler library. Discovery is in `find_clang` in `src/lib.rs`; `AOXN_CLANG` overrides it |
+| **MSVC Build Tools** (Windows) | clang auto-detects the host linker/CRT |
+| **X11/Xft development libraries + Xvfb** (Linux UI tests) | `apt install clang libx11-dev libxft-dev libfontconfig1-dev xvfb` |
 
-Since v0.29.0 the compiler carries **no LLVM dependency** — the C-emitting
-backend (`src/codegen_c.rs`) is the only backend, so `cargo build` needs only
-the Rust toolchain and there is no `AOXN_LLVM_DIR`/`LLVM-C` anywhere. Read
-[`docs/platform-support.md`](docs/platform-support.md) before touching
-platform assumptions in tests or `selfhost/`. CI is a single `windows-latest`
-job (`.github/workflows/ci.yml`).
+Since v0.29.0 there is **no LLVM-C library dependency**; the C-emitting
+backend (`src/codegen_c.rs`) is the only backend. The zero-external-crate
+policy applies to the compiler **library**; the CLI also links the local
+`aoxn-pkg` crate, which has its own pinned dependencies.
+Read [`docs/platform-support.md`](docs/platform-support.md) before changing
+platform assumptions. [CI](.github/workflows/ci.yml) builds, tests and
+smoke-tests on `windows-latest` and `ubuntu-latest`; Linux additionally runs
+the X11 probe under Xvfb. Windows-only tests remain cfg-gated.
+[Release automation](.github/workflows/release.yml), separately, packages
+and verifies the Windows installer (install, doctor, run).
 
 ```powershell
 git clone https://github.com/AlonechatWorkspace/Aoxn-language.git
@@ -73,7 +80,7 @@ See [`docs/install.md`](docs/install.md) for the user-facing guide.
 
 ```powershell
 cargo build                                    # build the `aoxn` compiler
-cargo test                                     # the full end-to-end suite (97 tests)
+cargo test                                     # compiler tests (platform-gated where needed)
 cargo test --test pipeline recursion_fib       # a single test
 cargo run -- run examples\hello.ax             # compile + run a program
 cargo run -- build examples\fib.ax -o fib.exe  # emit a standalone executable
@@ -83,21 +90,28 @@ cargo run -- run selfhost\lex_demo.ax          # the Aoxn-written lexer
 cargo run -- run selfhost\driver_self_demo.ax  # the fixed point: Aoxn compiles the compiler
 ```
 
+For package-manager tests also run `cargo test -p aoxn-pkg --locked`.
+`run_pkg_tests.sh` is a historical Smart App Control workaround, not a
+reliable way to refresh the executable hash or bypass SAC; if policy blocks
+a binary, diagnose the policy failure rather than assuming the script fixes it.
+IDE tests are separate: `cargo test --manifest-path ide/src-tauri/Cargo.toml`,
+`pnpm --dir ide test`, and `pnpm --dir ide typecheck`.
+
 `cargo test` compiles `.ax` sources to executables and runs them, so a full
 suite run is slower than a typical Rust crate. While iterating on something big,
-`--O1` cuts compile time roughly in half (O3 stays the default and is the level
-that must match `clang -O3`).
+`--O1` can reduce clang compile time; measure on the actual workload instead
+of treating the historical LLVM-pipeline measurements as a current guarantee.
+O3 stays the default; performance claims need a measured `clang -O3` baseline.
 
 Debugging switches (all environment variables, all verified in the source):
 
 | Variable | Effect |
 |---|---|
 | `AOXN_DUMP_C=1` | dump the generated C text to stderr |
-| `AOXN_TIME=1` | per-stage wall clock (lex / parse / typecheck / codegen / link, plus codegen sub-phases) |
+| `AOXN_TIME=1` | per-stage wall clock (lex / parse / resolve / typecheck / codegen / link) |
 | `AOXN_TC_TRACE=1` | per-function typecheck markers on stderr |
-| `AOXN_CG_TRACE=1` | per-function codegen markers on stderr |
 | `AOXN_CPU=native` | same as `--cpu native` (host SIMD; off by default so output stays reproducible) |
-| `AOXN_NO_CACHE=1`, `AOXN_CACHE_DIR=<dir>` | disable / relocate the `aoxn run` build cache |
+| `AOXN_NO_CACHE=1`, `AOXN_CACHE_DIR=<dir>` | disable / relocate the shared `run` / `build` executable cache |
 | `AOXN_CLANG` | override the clang path used for the C compile and final link |
 
 ## Repository layout
@@ -125,13 +139,16 @@ this is done in the same change:
 2. **`src/parser.rs`** and **`src/typecheck.rs`** — parse it, then check it.
 3. **`src/codegen_c.rs`** — emit it.
 4. **`tests/pipeline.rs`** — a test that would fail before the change.
-5. **`selfhost/*.ax`** — port the same behavior to the Aoxn-written compiler.
-   The fixed point (`selfhost/driver_self_demo.ax`) compares the generated C
-   text **and the emitted object** byte-for-byte between the Rust-built and
-   the Aoxn-built compiler, so any `target_os()`-style compile-time fold must
-   agree in both implementations. It runs on every platform with clang (since
-   v0.29.0 no LLVM library is involved); the self-host tests skip themselves
-   only when clang cannot be found.
+5. **`selfhost/*.ax`** — mirror changes used on the selfhost path, or document
+   explicitly when a new feature remains Rust-only.
+   Keep the supported selfhost subset explicit: stage-2 is not a full mirror
+   of current language features. The fixed point compares C and objects from
+   two builds of the **same selfhost emitter**, masking Windows COFF timestamps;
+   direct emitter parity is a separate common-subset test. See
+   [`docs/selfhost.md`](docs/selfhost.md) and
+   [`docs/c-compatibility.md`](docs/c-compatibility.md). Compile-time folds
+   such as `target_os()` must agree across stages. clang is required; these
+   native tests can skip when it is absent.
 6. **`CHANGELOG.md`** — a version bump always comes with an entry.
 
 House rules that are deliberately strict (proposals to relax them are language
@@ -139,7 +156,8 @@ proposals, not drive-by patches):
 
 - **No implicit `int`/`float` conversions**, no re-typing a bound name, `bool`
   conditions only, all paths must return, no unreachable code.
-- **No new external crates.** The compiler is Rust-only with zero dependencies;
+- **No external crates in the compiler library.** `aoxn-pkg` has its own
+  dependency set pinned by `Cargo.lock`;
   the generated C is the integration surface with the outside world.
 - **Codegen rests on the C mapping.** Structs map to C structs, arrays are
   wrapped in single-field structs (`typedef struct { T data[N]; }`) so they copy
@@ -170,45 +188,50 @@ proposals, not drive-by patches):
 
 ## Tests
 
-`tests/pipeline.rs` is the suite that matters: it compiles `.ax` source to a
+`tests/pipeline.rs` is the main language end-to-end suite: it compiles `.ax` source to a
 native executable and checks its stdout / exit code. Add a test whenever you
 change observable behavior, and give it a name that reads like the invariant it
 protects (`optimization_levels_agree_on_program_output`,
 `selfhost_driver_links_hello`).
 
+- [`tests/c_emitter_parity.rs`](tests/c_emitter_parity.rs) compares complete
+  C bytes on an explicit common subset; known gaps are separate assertions.
+  [`tests/c_abi.rs`](tests/c_abi.rs) links typed C helpers at O0/O3 and checks
+  internal aggregate value semantics, not public C struct interop.
 - Indented Aoxn sources embedded in tests go through the `dedent()` helper —
   strip the common leading whitespace before compiling.
 - Prefer the platform helpers in `src/platform.rs` over literals such as
   `.exe` (some older tests still hardcode it — do not add more of the same);
-  the suite must pass on Windows, Linux, and macOS.
+  supported targets are Windows and Linux, not macOS.
 - Do not weaken or delete an existing test to make a change fit. If a test
   encodes outdated behavior, change it deliberately and say so in the PR.
 
 ## Commits and pull requests
 
-**Commit policy for this repository: full commits.** Every commit includes the
-whole working tree:
+**Commit policy: per-session worktree benches and full commits.** Follow
+[`AGENTS.md`](AGENTS.md): work in `D:/ailanguage-bench/<topic>` on a topic
+branch, never in the shared main worktree. When a commit is requested, include
+the whole **bench** working tree (after removing your throwaway probes):
 
 ```powershell
 git add -A            # not `git add <file>`, not `git add .`
 git commit -m "..."
 git status            # verify nothing is left behind
-git push
 ```
 
 This applies to source, tests, docs, `selfhost/` sources, CI config, and any new
-file created in the session. Work happens on `main` and is pushed, so CI
-exercises every change on all four platforms.
-
-Using an AI agent to do the work does not change the policy: run `git add -A`,
-commit the whole tree, and push.
+file created in the session. Do not sweep another session's work into a commit.
+When landing is requested, require a clean tracked main worktree, fast-forward
+merge the bench (rebase and retest if needed), push, then remove the landed
+bench/branch. Do not commit or push without explicit authorization.
+The wiki is frozen; update living `docs/` instead.
 
 Pull requests:
 
 1. One logical change per PR; keep unrelated cleanups in a separate one.
 2. Fill in [`.github/PULL_REQUEST_TEMPLATE.md`](.github/PULL_REQUEST_TEMPLATE.md)
    — the summary, the verification commands you ran, and the checklist.
-3. Green CI on Windows (Tier 1) and the Tier 2 targets is required before
+3. Green CI on Windows and Linux is required before
    review. `cargo test` must pass locally too; paste the result if anything is
    platform-specific.
 4. Performance claims need numbers and a method (machine, warm/cold, best of N).

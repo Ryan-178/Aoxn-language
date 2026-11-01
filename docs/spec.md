@@ -26,16 +26,16 @@ the deviation is called out explicitly below.
 
 | Type     | Meaning                  | Backend       |
 |----------|--------------------------|---------------|
-| `int`    | signed 64-bit integer    | i64           |
-| `float`  | 64-bit IEEE float        | double        |
-| `bool`   | `True` / `False`         | i1            |
+| `int`    | signed 64-bit integer    | C `long long` |
+| `float`  | 64-bit IEEE float        | C `double`    |
+| `bool`   | `True` / `False`         | C `int`       |
 | `string` | immutable byte string    | ptr to NUL-terminated bytes (heap when built, static when literal) |
 | `void`   | absence of a value       | (function return only) |
-| `[T; N]` | fixed-size array, N > 0  | [N x T]       |
+| `[T; N]` | fixed-size array, N > 0  | C struct wrapping `T data[N]` |
 | `dict[V]`| string-keyed map of V (v0.40.0) | heap handle (`struct ax_dict_V*`) |
 | `T \| None` | nullable T; the only union form (v0.40.0) | carrier struct (value + tag) |
 | `fn(A, ...) -> R` | function pointer (v0.40.0) | raw address |
-| `Name`   | struct (see below)       | named %struct |
+| `Name`   | struct (see below)       | generated C struct |
 
 No implicit conversions. `int` and `float` never mix silently; `%` is
 int-only, and so are the bitwise/shift operators (`&`, `|`, `^`, `~`, `<<`,
@@ -105,7 +105,10 @@ print("apple" < "banana")      # true (byte-wise lexicographic)
   because strings never mutate, so sharing/aliasing is sound).
 - Strings may appear in struct fields, array elements, parameters, and
   returns; copies share the underlying bytes (safe: immutability).
-- No string indexing yet (returns no `char` type 闂?roadmap).
+- String indexing, slicing and iteration are byte-based (v0.51.2), not a `char`
+  or Unicode-character type: `s[i]` returns a one-byte string, negative indices
+  count from the end, and out-of-range indexing returns `""`. Slices clamp bounds
+  and may have open ends. Arrays are not sliceable; their length is in the type.
 
 ## Loops
 
@@ -122,8 +125,9 @@ for x in arr:                 # iterate array elements (each copied into x)
 - `range(...)` takes 1..3 `int` arguments; start/end/step are evaluated once
   at loop entry (Python semantics). A zero step loops forever (undefined, not
   checked).
-- `for x in arr` requires an array; the loop variable gets the element type.
-  Iterating strings is not supported yet.
+- `for x in arr` gives the loop variable the array element type.
+  `for c in s` walks one-byte strings; `for k in d` walks dict string keys in
+  insertion order. These are not Unicode codepoint or arbitrary iterator loops.
 - The loop variable follows normal binding rules (first use declares; the
   type is fixed thereafter).
 - `break` exits the innermost loop; `continue` jumps to the next iteration.
@@ -176,8 +180,10 @@ sort(["b", "a"])      # T = string, N = 2
 
 ## Value semantics (arrays and structs)
 
-Assignment, parameter passing, and returns **copy** the whole value (lowered
-to memcpy). There are no references or pointers yet:
+Assignment, parameter passing, and returns **copy** the whole aggregate value
+through generated C structs and explicit copies. There is no general reference
+type or struct-address operator. Raw-memory builtins and function pointers exist,
+but do not turn an aggregate assignment into shared reference semantics:
 
 ```Aoxn
 b = a          # b is an independent copy
@@ -200,11 +206,13 @@ def main() -> int:
     return 0
 ```
 
-- `extern def` declares a C-runtime function: no body, resolved at link time
-  from the default libraries. Extern functions cannot be named `main`, cannot
-  be generic, and may only use the scalar types (`int`, `float`, `bool`,
-  `string`, `void`) - aggregate parameters by value would need a struct ABI
-  the `extern` surface cannot spell.
+- `extern def` declares a bodyless function resolved at link time from default
+  or explicitly linked libraries. Externs cannot be named `main`, be generic,
+  take void/function-pointer parameters, or have default parameters. Supported
+  scalar mappings are documented under C interoperability below; function-pointer
+  returns are covered by native tests. The checker does not uniformly reject
+  aggregate extern signatures, but acceptance is **not** a guarantee of matching
+  arbitrary C struct-by-value ABI. No header importer or variadic ABI is provided.
 - **Imports** load another file and decide what of it enters scope. The
   Python spellings and the Aoxn-native ones are interchangeable:
   ```Aoxn
@@ -765,8 +773,11 @@ f = p as fn(int) -> int   # and back (a COM vtable slot, a Win32 callback)
   pointers of different signatures are different types.
 - Pointers are ordinary values 闁?they copy, and they live in arrays and
   struct fields.
-- `extern def` declarations reject fn-pointer parameters (the ABI has no
-  closure representation to pass through).
+- `extern def` declarations reject fn-pointer parameters; the checker explicitly
+  directs callers to pass an address as an `int` for compatible native APIs.
+  This restriction does not mean ordinary function pointers are closures.
+  Ordinary and extern functions returning a function pointer are covered by
+  native O0/O3 factory-call tests in `tests/c_abi.rs`.
 
 ## Dictionaries (v0.40.0)
 
@@ -866,6 +877,23 @@ for k in d:                 # walks KEYS, in insertion order
 
 Diagnostics stages: `lex`, `parse`, `type`, `internal`, `link`, `io`, `asset`,
 `cc`.
+
+## C interoperability and verification
+
+The C backend is not a C source importer or a general C header binding generator.
+Aoxn `int` emits `long long`, `float` emits `double`, `bool` emits C `int`, and
+`string` emits `char *`. Fixed-arity extern declarations must match the actual
+external function: C `int`, `_Bool`, variadic signatures and arbitrary
+struct-by-value APIs are not automatically compatible. Internal Aoxn aggregate
+calls are not a public promise of arbitrary C aggregate interoperability.
+
+Direct Rust-emitter/self-hosted-emitter C-text comparison and the cross-stage
+self-host fixed point test different things. Exact parity is limited to the
+explicitly tested common subset; selfhost does not yet emit dict, None, function
+pointers or exceptions, nor implement parameter defaults or namespace bindings.
+See [C compatibility and emitter parity](c-compatibility.md) for the mapping,
+intentional semantic differences, tests and limits. This does not change the
+language's existing unsafe-memory or FFI contract.
 
 ## Platform support
 

@@ -13,7 +13,7 @@ ubuntu-latest; the installer and the WinHTTP transport stay Windows-only 鈥?
 repo IS the
 compiler (Rust workspace: root `aoxn` crate + `crates/aoxn-pkg`).
 Language sources use the `.ax` extension. Language rules live in
-`docs/spec.md` (Windows-only: `docs/platform-support.md`) 鈥?keep it in sync with `src/parser.rs` + `src/typecheck.rs`
+`docs/spec.md` (platform policy: `docs/platform-support.md`) 鈥?keep it in sync with `src/parser.rs` + `src/typecheck.rs`
 when the grammar changes. **Writing or editing `.ax` code: start from the
 language card below** (`## Aoxn language card`) -- the whole surface,
 condensed from `docs/spec.md` + the stdlib sources, so a correct program can
@@ -279,8 +279,8 @@ def main() -> int:            # FIXED shape: no parameters, -> int or -> void
 
 ### Expressions -- the precedence traps
 
-- `-2 ** 2` is `-4` (`**` binds looser than unary minus, tighter than `*`,
-  right-associative); `2 ** -1` on two ints is `0` (negative int exponent) --
+- `-2 ** 2` is `-4` (`**` binds tighter than a prefix operator on its left,
+  accepts a unary expression on its right, and is right-associative); `2 ** -1` on two ints is `0` (negative int exponent) --
   use `to_float(2) ** -1`.
 - **`==` binds TIGHTER than `&`** (C rule kept): `a & b == c` is
   `a & (b == c)`; write `(a & b) == c`.
@@ -683,13 +683,22 @@ crates/aoxn-pkg       package manager crate (its own dependency set; see above)
   driver twice (once with the Rust compiler, once with the Aoxn-built one) and
   diffs the C they emit 鈥?but the driver is an Aoxn program importing
   `selfhost/driver.ax`, so BOTH stages emit through `selfhost/codegen.ax`.
-  That is exactly how the address-named helper above survived for years, and
-  the two emitters DO currently diverge: the Rust backend sorts `extern def`
-  declarations by C name while the self-hosted emitter keeps first-use order.
-  Both are individually deterministic, so this is a gap in what the fixed point
-  *proves*, not a live correctness bug 鈥?but do not read a green
-  `selfhost_driver_self_compiles` as "the two backends agree on emitted C".
-  Closing it means a genuine stage-1-vs-stage-2 C comparison.
+  The separate `tests/c_emitter_parity.rs` suite now compares Rust
+  `compile_paths_to_c` directly with an Aoxn driver executing selfhost `emit_c`.
+  It compares full bytes without normalization, over an explicit common subset;
+  it is not a new stage-2 bootstrap or an all-feature equivalence proof.
+  Selfhost extern, struct-root and array-typedef-root emission now follows the
+  Rust emitter's sorted traversal while preserving dependency-first definitions.
+  Previously both emitters were deterministic but disagreed on these orders.
+  Known-gap cases separately pin unsupported conversions and NUL/float spelling
+  differences; those cases must not count as parity passes.
+  Keep both the direct-emitter comparison and the cross-stage fixed point.
+- **Function return types need a complete C declarator.** Insert `name(args)`
+  through `c_decl`, including for extern declarations, so a function-pointer
+  return is `R (*name(args))(callback_args)`. Prefixing `c_type(ret)` produces
+  invalid C for this case. `tests/c_abi.rs` links actual typed C helpers and
+  checks scalar/aggregate/indirect calls at O0/O3; do not equate Aoxn `int`
+  (`long long`) with C `int`, or Aoxn `bool` (C `int`) with `_Bool`.
 - `target_os()` is a compile-time builtin folding the OS the compiler was
   BUILT on: `"windows"` on a Windows build, `"linux"` on a Linux build
   (v0.46.0), `"other"` elsewhere. **Both** compilers must fold the same
@@ -705,8 +714,8 @@ crates/aoxn-pkg       package manager crate (its own dependency set; see above)
   builtin name list (`malloc`, `memcpy`, `strlen`, `snprintf`, 鈥?.
 - platform.rs centralizes exe/obj extensions (`exe_ext`/`obj_ext`), the
   Windows stack-link flag (`-Wl,/STACK:8388608`), and `target_os_name()`.
-  Tests must use these helpers, not literals (CI runs the suite on ONE
-  platform, `windows-latest`, since v0.30.0 鈥?the language is Windows-only).
+  Tests must use these helpers, not literals. CI runs Windows and Linux jobs;
+  Windows-only native-library tests remain explicitly gated.
 
 ## Lexer invariants (Python-style layout)
 
@@ -744,8 +753,8 @@ crates/aoxn-pkg       package manager crate (its own dependency set; see above)
   - **Both branches of `a if c else b` must have the SAME type.** There is
     no conversion to fall back on, and a pair that merely "unifies" would
     invent one in the least-looked-at place.
-  - **`-2 ** 2` is `-4`** (`**` binds looser than unary minus, tighter than
-    `*`, right-associative), and a **negative `int` exponent yields 0**,
+  - **`-2 ** 2` is `-4`** (`**` binds tighter than a prefix on its left,
+    accepts a unary expression on its right, and is right-associative), and a **negative `int` exponent yields 0**,
     not a float — `to_float(3) ** -1` for that. (v0.55.0: the parser had
     computed `(-2) ** 2` = 4 from day one — the test's assert matched the
     parser while its own comment and every doc said -4; the language
@@ -771,11 +780,10 @@ crates/aoxn-pkg       package manager crate (its own dependency set; see above)
     (`slice_msg` in `typecheck.rs`, shared by the expression and the
     lvalue path): an array is `[T; N]` with the length in its type, so a slice
     has no type to return, and it already copies on assignment.
-  - **`not a in b` keeps C's precedence**, so it is `(not a) in b` and `!`
-    requires a bool -- the unparenthesised spelling is a **type error**, not a
-    silent wrong answer. Moving `not` to Python's level would silently change
-    every existing `not b == c`; that is a semantic change to a shipped
-    operator and wants its own version. `not (a in b)` is the spelling.
+  - **Historical v0.51.2 precedence**: `not a in b` then parsed as
+    `(not a) in b`. **Superseded by v0.52.0** below: current `not` binds looser
+    than comparison/membership, so it means `not (a in b)`. Do not revive the
+    old type-error rule or use this historical paragraph as the current grammar.
   - The `in` helpers are collected in a **`BTreeMap`**, never a `HashSet`:
     the emitted C must be byte-identical ACROSS PROCESSES (see the
     reproducibility rules above), and hash iteration order is not. The
@@ -1686,12 +1694,21 @@ crates/aoxn-pkg       package manager crate (its own dependency set; see above)
   `docs/ts-m1-spec.md` / `docs/web-platform-plan.md` 鈥?TS platform decisions
 - `AGENTS.md` 鈥?this file: agent/contributor working agreement (published
   since v0.29.3)
-- Repo: github.com/AlonechatWorkspace/Aoxn-language 路 Apache-2.0 路 CI: two
-  jobs. `windows-latest` (winget clang) runs the suite, packages the
-  single-file installer, installs it into a scratch prefix and runs
-  `aoxn doctor` 鈥?a broken installer fails the build. `ubuntu-latest`
-  (v0.46.0) runs the whole suite plus the X11 probe under Xvfb
-  (`apt install clang libx11-dev libxft-dev libfontconfig1-dev xvfb`).
+- Repo: github.com/AlonechatWorkspace/Aoxn-language; Apache-2.0.
+  `ci.yml` has Windows/Linux jobs with explicit `cargo test -p aoxn --locked`
+  and `cargo test -p aoxn-pkg --locked`; bare `cargo test` in this non-virtual
+  workspace defaults to the root package, not the pkg member's own tests.
+  Linux additionally runs the X11 probe under Xvfb. `release.yml` packages and
+  smoke-installs the Windows installer on tags/manual dispatch, not every push.
+  IDE checks are separate; `web-bench.yml` owns web parity/benchmarks. Keep
+  validation records explicit about which commands actually ran.
+- **Documentation maintenance checks:** `python -B tools/test_check_doc_links.py`
+  tests the read-only auditor; `python -B tools/check_doc_links.py` reports
+  relative-link failures and heuristic command drift without network access or
+  executing examples. Default is warning-only; strict mode fails on all findings.
+  Keep the frozen wiki and explicit historical reports out of current-state
+  rewriting. `docs/repository-audit.md` records artifact provenance and retained
+  files; no missing reference alone authorizes deleting user/history artifacts.
 - **Cfg-gated code needs a cross-check before it lands.** `rustup target
   add x86_64-unknown-linux-gnu` (std only, no linker needed) +
   `cargo check --workspace --tests --target x86_64-unknown-linux-gnu`

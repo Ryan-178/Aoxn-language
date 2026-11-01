@@ -48,13 +48,16 @@ jobs:
         run: |
           $ErrorActionPreference = "Stop"
           cargo build --release --locked
+          if ($LASTEXITCODE -ne 0) { throw "release build failed (exit $LASTEXITCODE)" }
           powershell -ExecutionPolicy Bypass -File dist\package.ps1 -Output dist\release -SkipBuild
+          if ($LASTEXITCODE -ne 0) { throw "release packaging failed (exit $LASTEXITCODE)" }
 
       - name: Verify the installer (install into a scratch prefix, doctor, run)
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
           $setup = (Get-ChildItem "dist\release\*Setup.exe").FullName
+          $prefix = Join-Path $env:RUNNER_TEMP "aoxn-install-smoke"
           # `aoxn-setup.exe` is a WINDOWS_GUI subsystem binary (PE subsystem 2),
           # because double-clicking it must not flash a console window. The
           # PowerShell call operator does NOT wait for a GUI-subsystem process and
@@ -84,6 +87,7 @@ jobs:
           "@
           }
           & $aoxn run (Join-Path $prefix "examples\stdlib_demo.ax") | Out-Null
+          if ($LASTEXITCODE -ne 0) { throw "the installed toolchain failed stdlib_demo" }
           & $aoxn doctor | Out-Null
           if ($LASTEXITCODE -ne 0) { throw "the installed toolchain failed doctor" }
 
@@ -123,8 +127,10 @@ jobs:
             ```
 
             The installer unpacks the compiler, the standard library, the UI
-            toolkit and the examples into `%LOCALAPPDATA%\aoxn`, and installs
-            LLVM through winget when clang is missing. Linking on Windows also
-            needs the MSVC Build Tools (`winget install
-            Microsoft.VisualStudio.2022.BuildTools`); `aoxn doctor` detects
-            them when they are absent.
+            toolkit and the examples into `%LOCALAPPDATA%\aoxn`, updates PATH,
+            and runs `aoxn doctor`. It downloads nothing by default. clang is
+            an external prerequisite; pass `-InstallClang` to the setup exe to
+            opt in to installing LLVM through winget when clang is missing.
+            Linking on Windows also needs the MSVC Build Tools (`winget install
+            Microsoft.VisualStudio.2022.BuildTools`); `aoxn doctor` reports
+            missing prerequisites.

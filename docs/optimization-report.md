@@ -1,5 +1,20 @@
 # Aoxn 优化空间调查报告（重点：编译速度）
 
+> **历史报告边界**：正文保留 2026-09-27、v0.25.0–v0.26.3 的 LLVM-C
+> 后端数据、实验和判断，不能作为当前 C 后端的耗时或瓶颈结论。
+> v0.29.0 已删除 `src/codegen.rs`、`src/llvm.rs` 和 `build.rs`；
+> `AOXN_PASSES`、`AOXN_DUMP_IR`、`AOXN_CG_TRACE` 不再是有效调试开关，
+> 也不应再针对 Aoxn 做 LLVM-C.dll delay-load。
+> 当前 [`src/codegen_c.rs`](../src/codegen_c.rs) 发射 C 并调用 clang；
+> O0–O3 选择 clang 优化级别，C 文本不随级别改变（测试
+> `c_text_is_opt_level_independent`，见 [`tests/pipeline.rs`](../tests/pipeline.rs)）。
+> F1 的优化档、F3 的 run/build 共用缓存（[`src/main.rs`](../src/main.rs)）和
+> F4 的 dev `opt-level = 1`（[`Cargo.toml`](../Cargo.toml)）已有实现；
+> F2 的 TargetMachine 改造随旧后端退役。后文 §六的 F5 复核否决了早先的
+> MSVC 探测绕行假设，不应把 §2.2 的驱动启动时间直接解释成可消除的探测成本。
+> 当前前端图算法实测与局限见 [`p2-compiler-performance.md`](p2-compiler-performance.md)，
+> 后端迁移记录见 [`llvm-independence-report.md`](llvm-independence-report.md)。
+
 - 日期：2026-09-27 ｜ 基线：v0.25.0 + 工作区中已实现的 M0 平台抽象（`src/platform.rs`，Windows 行为不变）
 - 方法：release 构建实测（`AOXN_TIME=1` 阶段计时 + 端到端循环计时，数据为多次取样均值/区间）；对照组实验（O1/O2/O3 管线、lld、直连 link.exe、debug 构建）。所有实验在本机 Windows x64（LLVM 23.1.0，lld-link 为默认链接器）。
 - 两个代表负载：**小程序** `hello.ax`（10 行）；**大输入** `driver_self_demo.ax`（整个自举编译器，7 个文件约 7k 行）。

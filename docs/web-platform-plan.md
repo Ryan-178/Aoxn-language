@@ -1,5 +1,13 @@
 # 网页开发平台设计讨论（v0）
 
+> **阅读边界**：本文保留最初的方案讨论与目标，不是完整兼容性承诺。
+> 当前 TS 前端是静态子集，经 AST → C → clang（v0.29.0 后不再直通 LLVM）；
+> W1 子集、包管理 beta、CSS 管线已有实现，完整 JS 对象/闭包/GC 仍属后续。
+> 当前状态见下文 §8、[`ts-m1-spec.md`](ts-m1-spec.md)、
+> [`pkg-manager.md`](pkg-manager.md) 和 [`css-assets.md`](css-assets.md)。
+> 平台支持以 [`platform-support.md`](platform-support.md) 为准；
+> 早期三平台 web CI 不代表当前矩阵，macOS 不受支持。
+
 > 背景：前一版 benchmark 只证明了「Aoxn 能写网页、跑得快」，但对标
 > pnpm+nodejs+nextjs 的真正目标是**开发者体验的等价迁移**——团队用
 > TypeScript 编码习惯不变、现有代码无感迁移。本文按议题给出方案选项与
@@ -10,7 +18,7 @@
 2. 移除现有 import 架构，换 TS 式模块系统
 3. 网页包管理架构——**已决策：A2 独立包管理**
 4. 服务端状态可观测【本次落地第一步】
-5. 测试覆盖补齐 macOS / Linux【本次落地】
+5. 测试覆盖平台【历史三平台计划；当前 web CI 仅 Windows】
 6. 性能指标体系与复杂场景压测（请求耗时 / 页面渲染耗时 / 编译时长）
 7. 样式方案——**已决策：B1 完整兼容 CSS 打底 + Tailwind 工具链 + CSS Modules**
 
@@ -25,7 +33,7 @@
 
 | 方案 | 描述 | 迁移体验 | 代价 |
 |------|------|----------|------|
-| **A. TS 前端 → 现有编译管线（推荐）** | 新增 TS 语法 lexer/parser，产出与现有 Aoxn 管线相同的 AST/IR，直通 LLVM | 语法无感；语义按 TS 对齐分期 | TS 类型系统（结构化类型、联合、收窄、any、可选、元组）要在 typecheck 层重建 |
+| **A. TS 前端 → 现有编译管线（推荐）** | 新增 TS 语法 lexer/parser，产出相同 AST，经 C 后端与 clang（当前路径） | 语法无感；语义按 TS 对齐分期 | TS 类型系统（结构化类型、联合、收窄、any、可选、元组）要在 typecheck 层重建 |
 | B. TS 语法 + Aoxn 严格语义 | 只借语法，语义保持 Aoxn 严格性（如 int/float 不混用） | 现有代码大概率跑不起来 | 小，但违背「无感迁移」 |
 | C. 嵌入 JS/TS 运行时（QuickJS 类） | 解释执行 | 完整 | 背离 AOT 编译定位，性能目标失效 |
 
@@ -53,8 +61,10 @@
 
 ## 2. 移除现有 import 架构
 
-现状：`import "相对路径"`（include-once、相对文件解析，见 `src/lib.rs`
-load_program 与 `selfhost/load.ax`）。目标形态是 TS 模块：
+原始讨论以 `import "相对路径"` 的合并导入为起点。当前 Rust loader 保留
+include-once/循环检测，`src/resolve.rs` 已实现编译期命名空间、选择性导入与
+别名；`import "path"` 在 S3 删除后于 v0.43.0 恢复。下列示例仍是迁移目标，
+不是完整 TS/Node 模块兼容保证：
 
 ```typescript
 import { render, type Page } from "./renderer";
@@ -62,7 +72,10 @@ import express from "express";            // 包导入
 export function handler(req: Request) { ... }
 ```
 
-- 解析规则采用 **node_modules 式自底向上查找** + `package.json`
+以下三条是原始方案，不是当前实现：当前使用 `aox_modules/` + `aoxn.json`，
+不读取 node_modules；旧导入已恢复，自举 loader 也未获得完整绑定层。
+
+- 原计划解析规则采用 **node_modules 式自底向上查找** + `package.json`
   `exports`/`main`/`types` 字段；相对路径 `./` `../` 照 TS 语义。
 - 影响面：Rust 侧 loader、自举侧 `selfhost/load.ax`、`stdlib/` 全部改用
   新语法；旧 `import "path"` 语法**移除**（不是保留兼容——按要求移除）。
@@ -73,6 +86,9 @@ export function handler(req: Request) { ... }
 ---
 
 ## 3.【决策点 A】网页包管理架构：分离 vs 合并共用
+
+本节选项与服务端设想保留为设计讨论；实际 beta 客户端/registry 后端与
+npm 桥接范围见 §8，不表示鉴权 registry 服务和 npm 代码转换已经实现。
 
 「现有包管理架构」如果指团队今天用的 **npm/pnpm 生态**：
 
@@ -115,20 +131,22 @@ export function handler(req: Request) { ... }
 
 ---
 
-## 5. 测试覆盖补齐 macOS / Linux【本次落地】
+## 5. 测试覆盖平台（历史与当前）
 
-上一版只有 Windows（本机）数据。本次新增
-`.github/workflows/web-bench.yml`：**windows-latest / ubuntu-latest /
-macos-latest** 三平台矩阵——
+早期曾有 Windows/Linux/macOS 的 web benchmark 矩阵，v0.30.0 移除了
+POSIX web server/socket。当前 [`web-bench.yml`](../.github/workflows/web-bench.yml)
+**仅 `windows-latest`**，构建 `web/server_win.ax` 并执行以下验证；
+常规 [`ci.yml`](../.github/workflows/ci.yml) 是 Windows/Linux 两个 job，
+Linux 的恢复不等于 web benchmark 已移植，macOS 仍不支持。
 
-1. 构建 Aoxn 编译器与 web 服务器（`server_win.ax` / `server_posix.ax`）；
+1. 构建 Aoxn 编译器与 web 服务器（`server_win.ax`；当前无 `server_posix.ax`）；
 2. **功能验证**：三个路由的响应体与 Node 参考实现逐字节一致性、
    keep-alive、`/metrics` 可用性；
 3. **参考基准**：oha 短压测（5s × 1 轮）写入 job summary。
 
 注意：CI runner 噪声大（共享 CPU），数据用于**趋势与回归**，不作绝对值；
 正式对比仍以专用机器全量 `web/loadtest/bench.mjs`（3 轮交错取中位数）为准。
-如团队能提供 Linux / macOS 机器，我可以出同口径全量数据。
+Linux web 全量数据需要先补齐 POSIX server/socket；不能据早期计划宣称已有。
 
 ---
 
@@ -193,8 +211,9 @@ Modules**。落地形态：
   拒绝这类包（`plain_js_package_is_rejected`）——Aoxn 链接的是 Aoxn 包，
   不是 JavaScript。改为前端自行运行 Tailwind CLI，产物作为普通 `.css`
   进入同一管线：既不把 Node 变成构建前置（一键安装刻意避免），也与
-  「clang 是外部前置」的边界一致。**JIT 扫描器未实现**——它要么把 Node
-  变成前置，要么要求长期维护一个「Tailwind 兼容子集」的保真度；
+  「clang 是外部前置」的边界一致。另在 v0.36.0 已实现
+  `--tailwind` 内置工具类子集（`src/tailwind.rs`），只扫描
+  `class=`/`className=`/`class:` 属性并报告不支持的类；这不是完整 Tailwind JIT；
 - **二期**：CSS-in-TS 类型化封装（styled API）作为可选糖；
 - **图形样式**：一期 SVG + CSS；复杂图形（Canvas 类）二期提供类型化
   绘图 API。
@@ -207,18 +226,18 @@ Modules**。落地形态：
 
 | 阶段 | 内容 | 状态 |
 |------|------|------|
-| **W0** | 可观测性 `/metrics`（RED 指标）+ 功能测试 `parity.mjs`；三平台 CI（`web-bench.yml`）功能验证 + 参考基准；本设计文档 | **已完成** |
-| **W1** | TS-M1 前端（语法子集→现有管线）+ 新模块系统（import/export）+ **移除旧 import**；stdlib/selfhost 同批迁移 | 待启动（依赖【C】） |
-| **W2** | 独立包管理（manifest/lockfile/registry 客户端 + npm 桥接）；CSS 资源管线 + CSS Modules + Tailwind 接入；静态文件服务 + Range + 缓存头 | 部分落地：静态文件服务已完成（2026-10-02）；**CSS 管线 + CSS Modules + Tailwind 接入已完成（2026-10-03，v0.34.0 建管线；v0.36.0 补齐产物目录、`url()` 改写、`styles.title` 点号访问与内置 Tailwind 生成器）**；包管理客户端进行中（`aoxn-pkg` beta） |
+| **W0** | 可观测性 `/metrics`（RED 指标）+ 功能测试 `parity.mjs`；web CI 功能验证 + 参考基准（当前仅 Windows）；本设计文档 | **已完成** |
+| **W1** | TS-M1 前端（语法子集→现有管线）+ 新模块系统（import/export）及当年的 stdlib/selfhost 迁移 | **W1 静态子集已完成**（v0.28.0；S0–S3），见 `ts-m1-spec.md`；非完整 TS 兼容，旧导入 v0.43.0 已恢复 |
+| **W2** | 独立包管理（manifest/lockfile/registry 客户端 + npm 桥接）；CSS 资源管线 + CSS Modules + Tailwind 接入；静态文件服务 + Range + 缓存头 | 部分落地：静态文件服务已完成（2026-10-02）；**CSS 管线 + CSS Modules + Tailwind 接入已完成（2026-10-03，v0.34.0 建管线；v0.36.0 补齐产物目录、`url()` 改写、`styles.title` 点号访问与内置 Tailwind 生成器）**；包管理客户端 **beta 已落地**（v0.29.0；v0.29.5 增 `npm-import`），不表示自建 registry 服务或普通 JS 包兼容已完成 |
 | **W3** | 基准 v2 全量执行（复杂场景 + 浏览器渲染指标 + 编译时长），Linux/macOS 专用机数据 | 依赖 W2 |
 | **W4** | TS-M2 运行时语义（对象/闭包/GC）→ 团队真实项目迁移验收 | 依赖样本项目 |
 
-**剩余待决**（2026-09-27 已全部决策，执行者自行选定）：
-- 【C】旧 `import` 移除节奏：**随 W1 一次切换，不留双轨**（双轨使自举
-  固定点测试面翻倍）。
-- 【A2 配套】npm 桥接：**一次性导入工具** `aoxn pkg import <pkg>`（拉取
-  npm tarball → 转 aoxn.json → 入自有 registry/包目录并记入 aoxn.lock）；
-  注册表代理层不做，留作远期选项。
+**原始决策及当前执行边界**（不将尚未验收的目标标为完成）：
+- 【C 历史决策】W1 曾一次切换；**v0.43.0 已恢复旧导入**为整模块形式，
+  当前以 `src/resolve.rs` 的绑定语义为准，不再把移除旧语法列作待办。
+- 【A2 配套已落地】`aoxn npm-import <pkg>` 用 npm CLI 获取**已有
+  `aoxn.json`** 的包，vendor 为 path dependency；拒绝普通 JS 包，不做
+  自动转换/发布或透明代理（`crates/aoxn-pkg/src/npm.rs`）。
 - 【TS】TS-M1 验收样本：暂以 3 个规范样本（REST API 服务 / SSR 页面渲染 /
   泛型工具库）作为验收基线，团队真实项目到位后替换。
 - 【渲染指标】**认可** Playwright + Chrome（FCP/LCP/TTI）。

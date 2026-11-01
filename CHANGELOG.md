@@ -5,6 +5,37 @@ minor bumps while pre-1.0: each minor version is a language milestone.
 
 ## [Unreleased]
 
+### C compatibility verification
+
+- Fix C function declarators for Aoxn and extern functions returning function
+  pointers. Both definitions/prototypes and separately compiled C factory calls
+  are exercised at O0/O3; ordinary scalar declarations keep their original form.
+- Add direct Rust-emitter versus self-hosted-emitter C-text regression coverage,
+  separate from the existing cross-stage self-host fixed point. Comparisons use
+  full emitted bytes, not normalized declarations or whitespace. Align selfhost
+  extern, struct-root and array-typedef-root ordering with the Rust emitter.
+  Six common-subset fixtures compare equal; five explicitly tested known gaps
+  remain separate from parity (numeric conversions, indexed augmented assignment,
+  embedded NUL and noncanonical float spelling).
+- Add C ABI tests with separately compiled, explicitly typed C helper functions,
+  alongside Aoxn aggregate-copy and indirect-call tests and rejected extern shapes.
+- Document the tested C mappings, intentional language differences and self-host
+  subset limits in `docs/c-compatibility.md`. No C source importer, variadic
+  extern support or newer-language-feature self-host port is introduced.
+
+### Repository maintenance and validation
+
+- Correct current C type mappings, byte-string iteration/indexing, extern
+  limitations and precedence descriptions; keep LLVM-era reports as explicitly
+  historical material rather than rewriting their original measurements.
+- Separate compiler and package-manager CI test commands on Windows/Linux,
+  document IDE/web/release coverage boundaries, and fail Windows smoke steps
+  immediately on native command errors. Initialize the installer smoke prefix
+  and state that clang downloads are opt-in in release notes.
+- Remove the duplicate 0.54.1 heading. Add a dependency-free, read-only document
+  path auditor with warning-only default and a repository artifact audit;
+  historical assets are retained, not deleted as unexplained clutter.
+
 ### Compiler performance
 
 - Retain completed acyclic struct proofs across declaration roots in the Rust
@@ -63,8 +94,6 @@ The blast radius was measured before fixing: no `.ax` source in the
 repository uses a unary operator directly before `**` (the only hits are
 comments), so the change touches exactly one test's expectations, plus the
 new `~2 ** 2` pin.
-
-## [0.54.1] - 2026-10-19
 
 ## [0.54.1] - 2026-10-19
 

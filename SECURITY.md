@@ -2,208 +2,219 @@
 
 ## English
 
-### Versions and private reporting
+### Supported versions and reporting
 
-The current compiler is **0.55.0**, supported on the **0.55.x** line; the
-independent package-manager crate is **0.42.0**. Fixes land on main first;
-earlier minor lines are not maintained. See [CHANGELOG.md](CHANGELOG.md).
-Windows and Linux are supported; macOS is not.
+The compiler is **0.55.0**, supported on the **0.55.x** line. The independent
+package-manager crate is **0.42.0**. Fixes land on main first; earlier minor
+lines are not maintained. Windows and Linux are supported, macOS is not.
+Version history is in [CHANGELOG.md](CHANGELOG.md).
 
-Report vulnerabilities privately to **zmjsjsg3@163.com** before opening public
-issues or disclosing reproducers. Include version/commit, OS/architecture,
-`aoxn doctor` output, minimal input, exact command, expected/actual behavior
-and impact. Miscompilation reports should include `aoxn c` output and whether
-O0 reproduces it. Redact credentials/private paths. State your credit preference;
-an initial nonsensitive email can arrange encryption.
+Report vulnerabilities privately to **zmjsjsg3@163.com**, before public issues
+or disclosure. Include commit/version, OS/architecture, `aoxn doctor`, minimal
+input, commands, expected/actual behavior and impact. For miscompilation include
+`aoxn c` output and whether O0 reproduces it. Redact secrets and private paths;
+state credit preference. An initial nonsensitive email can arrange encryption.
 
-Targets are acknowledgement within **3 business days**, initial assessment
-within **10 business days**, and coordinated disclosure within **90 days of
-acknowledgement or when a fix ships, whichever comes first**. Confirmed critical
-issues target the next release or an urgent patch. Reporters receive progress,
-an explanation of rejected reports, and a credit consent request. There is no
-bounty. Active exploitation may require earlier public guidance.
+Targets: acknowledgement within **3 business days**, initial assessment within
+**10 business days**, coordinated disclosure within **90 days of acknowledgement
+or when a fix ships, whichever comes first**. Confirmed critical issues target
+an urgent patch or next release. Reporters receive progress and explanations;
+credit requires consent. There is no bounty. Active exploitation may require
+earlier protective guidance.
 
-### Trust model
+### Trust boundaries
 
-Neither compiling nor executing Aoxn is a sandbox. Imports read files; assets
-can write output; clang produces native executable code. The Rust compiler
-uses argument vectors to invoke clang; the self-hosted driver also has a
-shell-based path. Use OS/container isolation with restricted filesystem,
-network and credentials for untrusted projects. Successful checking is not
-permission to run untrusted native output.
+Compiling or executing Aoxn is **not a sandbox**. Imports read files, asset
+commands write files, and clang produces native code. Rust invokes clang using
+argument vectors; the self-hosted driver also has a shell-based path. Isolate
+untrusted projects with OS/container controls over files, network and credentials.
+Type checking is not permission to execute untrusted output.
 
-The compiler library in `src/` has **zero external Rust crate dependencies**.
-`crates/aoxn-pkg` has a separate dependency set pinned by `Cargo.lock` and does
-not depend on the compiler library. IDE and benchmark applications have separate
-JavaScript/Tauri supply-chain exposure. No external compiler dependency or
-unsafe code was added by the struct-cycle performance change.
+`src/` has zero external Rust crate dependencies. Package-manager dependencies
+are pinned in Cargo.lock and do not depend on the compiler library. IDE and
+benchmark JS/Tauri dependencies are separate supply-chain surfaces. Emitter/ABI
+verification does not establish sandboxing or constitute a security audit.
 
-### In-scope invariants
+### Compiler and build invariants
 
-- Crafted source, imports, manifests, CSS and diagnostics must not corrupt the
-  compiler, run unintended commands, or miscompile otherwise defined programs.
-  Ordinary wrong diagnostics/panics are bugs; small inputs causing catastrophic
-  resource amplification also merit private reporting.
-- Compiler graph optimizations retain semantics and diagnostic order. Exception
-  propagation uses reverse edges; namespace rewriting borrows immutable tables.
-  Struct-cycle checking reuses completed acyclic-node proofs across roots,
-  retaining source-root order and path-local gray state. This removes a specific
-  quadratic traversal, **not all denial-of-service opportunities**. Recursive
-  walkers still have depth limits imposed by the host stack, and no universal
-  source-size/time/memory bound is promised. The existing struct-cycle pass only
-  follows direct `Type::Struct` fields; wrapped/array indirect cycles are a known
-  checker limitation, not fixed or expanded by this optimization.
-- Generated identifiers derive from stable source identities/counters/names,
-  never heap addresses. Hash iteration must not alter emitted C. Build/run cache
-  keys include dependencies, compiler identity and options; stale or substituted
-  output reuse is in scope. Do not share writable caches with untrusted users.
-- Project packages precede installed stdlib. Bare imports probe siblings first;
-  quoted imports use sibling fallback after package probes. AOXN_HOME,
-  AOXN_STDLIB, AOXN_CLANG, PATH and link flags are caller-controlled configuration,
-  not security boundaries against a process controlling that environment.
-- CSS emitted filenames are compiler-generated and checked against separators,
-  `..` and absolute paths. Content may affect bytes, not escape output roots.
-  URL assets are not executed; Tailwind support does not silently download Node.
-- Package `checksum` pins the unpacked content tree; `tarball_sha256` checks
-  served bytes when supplied by the HTTP backend. Missing legacy transport
-  digests never waive content verification. Warm reuse re-hashes installed trees
-  before keeping them, excluding **only the installer-owned index.ax shim**.
-  Mismatches rebuild and re-verify. Broadening exclusions or unverified reuse
-  is a vulnerability.
-- Dependency/cache path components are validated. Extraction rejects escaping
-  paths, absolute paths and links. npm-import checks npm integrity and Aoxn
-  metadata. Read-only HTTP registries are **plain HTTP, not HTTPS**: no transport
-  confidentiality/authentication is claimed; an untrusted index can replace
-  both data and claimed hashes. Use trusted sources and appropriate transport.
-- Registry trust tiers are claims, not independent audits. Missing/unreviewed/
-  reviewed remain distinct, unknown schemas fail, and production-reachable
-  dependencies survive prod pruning. Parallel workers own forked registry state.
-- Windows installation stays within its chosen root, updates PATH and rechecks
-  compiler presence after self-test. It downloads **nothing by default**;
-  InstallClang is explicit opt-in. Windows quarantine is a deployment policy,
-  not itself a compiler vulnerability; falsely reporting success is a defect.
-- The IDE Rust boundary canonicalizes paths and enforces workspace containment,
-  refuses creation clobbering and link escapes, recreates build outputs rather
-  than writing through hard links, and validates package-command names/allowlists.
-  A hostile webview must not invent arbitrary shell/global commands.
-- Runtime parsers over hostile data (JSON, UTF encodings, SSE, URL/headers,
-  glob/base64 and UI messages) must advance and respect buffers. Missing slab
-  indices including -1 are guarded; reallocating helpers return live handles;
-  builder growth never shrinks below live children. Empty/nonfinite/deep JSON
-  inputs terminate. WinHTTP does not silently follow credential-bearing
-  redirects or accept truncation as success. String index/slice bounds clamp;
-  removing these guards is a vulnerability, not unchecked-array semantics.
-- SDK keys are ordinary heap strings and are not scrubbed. Environment-based
-  configuration is preferable; do not print clients and redact dumps/reports.
-  SDK transport is Windows WinHTTP and does not run within the compiler.
-- IDE/web dependency advisories are in scope. Accepted advisory exceptions need
-  a reason and exit condition; the glib exception in ide/src-tauri/audit.toml
-  must not be deleted without resolving the dependency constraint.
+- Crafted sources, imports, assets and diagnostics must not corrupt the compiler,
+  execute unintended commands or miscompile defined programs. Ordinary wrong
+  diagnostics/panics are bugs; small-input catastrophic resource amplification
+  also warrants private reporting.
+- Generated names must derive from stable source identities/counters/names,
+  never addresses. Hash iteration must not change C output. Cache keys include
+  compiler identity, options and dependencies. Do not share writable caches with
+  untrusted users.
+- Direct Rust-vs-selfhost C parity and the self-host stage fixed point are
+  different checks. Equal fixture outputs do not prove every feature equivalent.
+  Selfhost lacks several newer language features. See
+  [C compatibility](docs/c-compatibility.md) for exact limits and validation.
+- ABI correctness requires a matching external declaration. Aoxn `int` maps to
+  `long long`, bool to C `int`; neither implies arbitrary C `int`/`_Bool`
+  interoperability. Fixed-arity externs do not implement variadic C calls.
+  A mismatched user declaration may link yet have undefined behavior; tests with
+  known C helpers are not a validator for arbitrary third-party signatures.
+- Graph optimizations preserve semantics and diagnostic order. Reverse exception
+  edges, borrowed module tables and reused acyclic proofs remove specific costs,
+  not all denial-of-service opportunities. Recursive passes retain host-stack
+  limits. Wrapped/array indirect struct cycles remain a known checker limitation.
+- Packages take precedence over installed stdlib. Bare imports probe siblings
+  first; quoted imports have sibling fallback. Environment paths, AOXN_CLANG and
+  link flags are caller-controlled configuration, not an adversarial boundary.
+- CSS emitted filenames are generated and checked against traversal/separators.
+  URLs influence content, not output roots. Tailwind does not silently fetch Node.
 
-### Deliberate limitations and actual validation
+### Package, installer and application boundaries
 
-User-program unchecked array indexing, signed overflow and invalid raw-memory/
-FFI usage are undefined behavior. `as_string` aliases storage; callers must not
-free that storage. Strings are NUL-terminated bytes; concatenation intentionally
-leaks and no GC/general runtime memory safety is promised. User-authored unsafe
-code is distinct from corruption in a library processing external data.
-The window server is not a sandbox; message parsing remains in scope, while
-pure visual clipping/cache issues are ordinary bugs. Registry tiers do not
-certify code. The self-host fixed point proves products across stages, not
-all Rust/Aoxn emitter feature equivalence.
+- Package checksum pins unpacked content; tarball_sha256 checks served bytes when
+  supplied. Missing legacy transport digests never waive content verification.
+  Warm reuse hashes the real tree, excluding **only its own index.ax shim**;
+  mismatches rebuild and verify. Broader exclusions or unverified reuse are flaws.
+- Extraction rejects escaping/absolute paths and links. Dependency/cache path
+  components are validated. npm-import checks integrity and Aoxn metadata.
+  HTTP registries are plain HTTP, not HTTPS; an untrusted index can replace data
+  and hashes. Registry tiers are claims, not independent audits.
+- Parallel workers own forked registry state, unknown schemas fail, and prod
+  pruning must retain production-reachable dependencies.
+- Windows installation stays under its selected root, updates PATH and rechecks
+  the compiler after self-test. Downloads are disabled by default; InstallClang
+  is opt-in. Quarantine is OS policy; falsely reporting install success is a bug.
+- The IDE canonicalizes workspace paths, rejects link escapes/clobbering, recreates
+  outputs rather than following hard links and validates commands in Rust.
+  Hostile webviews must not acquire arbitrary shell/global command execution.
+- JSON/UTF/SSE/URL/headers/glob/base64/UI parsers must advance and respect buffers.
+  Missing slab indices are guarded; realloc helpers return live handles; builder
+  growth cannot shrink below live children. Empty/nonfinite/deep JSON terminates.
+  WinHTTP must not silently leak credentials across redirects or accept truncation.
+- String bounds clamps are compiler/library safety properties, not interchangeable
+  with unchecked array semantics. SDK keys are unsanitized heap strings: use
+  environment configuration and redact dumps; WinHTTP transport is Windows-only.
+- IDE/web advisories are in scope. Exceptions require reasons and exit conditions;
+  do not drop the glib audit exception without resolving its dependency constraint.
 
-The thirteen findings of the 2026-10-17 audit were fixed in 0.51.0/0.51.1;
-that history is not a guarantee against new defects. This compiler performance
-change is **not a security audit**. Final Windows validation with explicit
-clang 23.1.2 passed **343 root + 104 package tests (447 total), 0 failed/ignored**;
-Linux Rust workspace/tests cross-check also passed, not Linux linking/runtime.
-An earlier attempt without clang had 202 passes/140 failures and is retained
-in the evidence. Four new checker tests compare all three-node graphs against
-an independent reference, including full first-root diagnostics, shared DAGs,
-diamonds and cycles. Baseline/modified C, diagnostic bytes and statuses match
-for 42 successful and 5 invalid inputs. See
-[performance evidence](docs/p2-compiler-performance.md) for logs, measurements
-and unresolved limits. IDE checks and a new full installer package were not
-run; local Windows tests do not replace Linux CI.
+### Repository checks and automation scope
+
+Main CI names both compiler and package-manager packages explicitly; default
+root Cargo testing does not imply member test execution. Native command exit
+codes gate Windows smoke/release steps, and installer downloads remain opt-in.
+Local workflow syntax checking is not proof of successful hosted Actions or
+installer execution; no remote workflows were triggered for this maintenance.
+
+`tools/check_doc_links.py` is read-only and dependency-free. It reads local Git
+history, never fetches URLs or executes documented commands, and defaults to
+warning-only. Its explicit historical allowlist and command heuristics limit
+coverage; it is not a security/link-completeness guarantee. The
+[artifact audit](docs/repository-audit.md) documents provenance/retention rather
+than deleting or certifying stored archives. No archive content was executed.
+
+### Deliberate limitations and evidence
+
+User-program signed overflow, unchecked array indexing, invalid raw-memory/FFI
+use remain undefined behavior. `as_string` aliases memory that must remain live.
+Strings are NUL-terminated bytes; concatenation leaks by design. There is no GC
+or universal runtime memory safety. Corruption in libraries processing external
+data is distinct from caller-authored unsafe operations. The window server and
+registry trust tiers do not sandbox or certify programs.
+
+The thirteen findings from the 2026-10-17 audit were fixed in 0.51.0/0.51.1;
+that is history, not absence of new defects. Baseline **8f90aca** recorded
+343 root + 104 package tests on Windows with explicit clang 23.1.2. Current
+compatibility-work validation passed **349 root + 104 package tests (453),
+0 failed/ignored** on Windows with explicit clang 23.1.2. Native ABI cases ran
+at O0/O3; original fixed point and cross-process determinism passed. Linux Rust
+workspace/tests cross-check passed, not Linux native runtime. An intermediate
+wrong known-gap expectation failed and was corrected from direct C comparison;
+see [verification evidence](docs/c-compatibility.md). No fresh security audit,
+IDE validation, Linux native runtime or full installer release is implied.
+The P2 maintenance follow-up reran the explicit locked compiler/package commands;
+results and the Python checker tests are recorded in
+[repository maintenance evidence](docs/repository-audit.md). Hosted CI was not
+triggered; workflow syntax validation is local only.
 
 ---
 
 ## 中文
 
-### 支持版本与私密报告
+### 支持版本与报告
 
-当前编译器 **0.55.0**，受支持系列 **0.55.x**，独立包管理器 crate **0.42.0**。
-修复先落 main，更早小版本不维护；见 [CHANGELOG.md](CHANGELOG.md)。
-支持 Windows/Linux，不支持 macOS。
+编译器 **0.55.0**，支持系列 **0.55.x**；独立包管理器 crate **0.42.0**。
+修复先落 main，旧小版本不维护；支持 Windows/Linux，不支持 macOS。
+见 [CHANGELOG](CHANGELOG.md)。
 
-漏洞请先私报 **zmjsjsg3@163.com**，修复前不要公开 issue 或复现。提供版本/
-提交、系统架构、aoxn doctor、最小输入、完整命令、预期/实际结果和影响。
-误编译附 aoxn c 及 O0 是否复现；清除密钥和私有路径，注明署名意愿。
-可先发不含敏感内容的邮件协商加密。
+漏洞先私报 **zmjsjsg3@163.com**，不要先发公开 issue。提供 commit/版本、系统架构、
+aoxn doctor、最小输入、命令、预期/实际行为与影响。误编译附 aoxn c 与 O0 复现情况。
+去除密钥/私有路径并注明署名意愿；可用无敏感内容邮件协商加密。
 
-目标为 **3 个工作日确认、10 个工作日初评、确认后90天或修复发布两者较早时
-协调披露**。严重问题安排下一版本或紧急补丁；同步进度、解释拒绝原因、署名前
-征得同意；没有赏金。主动利用时可能提前发布保护建议。
+目标为 **3 个工作日确认、10 个工作日初评、确认后90天或修复发布两者较早时协调披露**。
+严重问题安排紧急补丁/下一版本；提供进度与解释，署名须同意，无赏金。
+主动利用时可能提前发布保护建议。
 
-### 信任模型
+### 信任边界
 
-编译和执行都不是沙箱：导入读文件、资源输出写文件、clang 产出原生程序。
-Rust 使用参数向量调用 clang，自举驱动另有 shell 路径。处理不可信项目请用
-系统/容器隔离并限制文件、网络与凭据权限；检查成功不代表原生输出可安全执行。
+编译/执行**不是沙箱**：导入读文件、资源命令写文件、clang 产出原生代码。
+Rust 使用参数向量，自举驱动还使用 shell。对不可信项目使用系统/容器文件、网络和
+凭据隔离；类型检查通过不代表可以安全执行。
 
-src/ 编译器库**无外部 Rust crate 依赖**；独立 aoxn-pkg 依赖由 Cargo.lock
-固定且不依赖编译器库。IDE/Web 的 JS/Tauri 是另一供应链表面。本次结构体环
-性能优化没有增加外部编译器依赖或 unsafe。
+src/ 无外部 Rust crate 依赖；包管理器独立依赖固定在 Cargo.lock，不依赖编译器库。
+IDE/Web 的 JS/Tauri 为另一供应链边界。发射器/ABI 验证不是安全审计，也不提供沙箱。
 
-### 安全范围与不变量
+### 编译器与构建不变量
 
-- 特制源码/导入/清单/CSS/诊断不能损坏编译器内存、执行非预期命令或误编译
-  定义良好程序。普通诊断/panic 是 bug；小输入引发灾难性资源放大也值得私报。
-- 图优化保留语义和诊断顺序：异常走反向边、模块表只读借用；结构体检查跨根
-  复用已完成无环证明，根按源码顺序、gray 仅活动路径。这去掉特定二次遍历，
-  **不是所有 DoS 已消除**。递归仍受宿主栈限制，没有通用大小/时间/内存上限。
-  原检查器只跟直接 Type::Struct 字段，数组等包装类型间接环是既有缺口，
-  本次不扩大边定义或修语义。
-- 生成标识只能来自稳定源码/计数器/名字，不可用堆地址；哈希顺序不能改 C。
-  缓存键包含依赖/编译器/选项，陈旧或被替换输出复用在范围内；勿共享不可信可写缓存。
-- 本地包优先安装 stdlib，裸导入先同目录，引号导入包失败才回退。AOXN_HOME/
-  AOXN_STDLIB/AOXN_CLANG/PATH/链接参数是调用者配置，不是对环境控制者的安全边界。
-- CSS 输出名由编译器生成并拒绝分隔符、..、绝对路径；内容不能逃出输出根。
-  URL 不执行，Tailwind 不自动下载 Node。
-- checksum 校验解包内容树，tarball_sha256 校验 HTTP 传输字节；旧索引缺后者
-  不能跳过内容校验。热复用前重新哈希真实树，**仅排除自身 index.ax shim**，
-  不匹配重建再验证。扩大排除项或未验证复用是漏洞。
-- 依赖键/缓存路径组件必须验证，解包拒绝逃逸/绝对路径/链接。npm-import 验完整性
-  与 Aoxn 元数据。HTTP 注册表是**明文 HTTP 非 HTTPS**，没有传输认证/保密性；
-  恶意索引可同时改数据和摘要，需可信来源及合适传输。
-- 信任等级是自述非审计，缺失/未审阅/已审阅有别，未知 schema 拒绝；生产可达
-  包不得被 prod 裁掉；并行 worker 分别持有 fork 的 registry 状态。
-- 安装器只在指定根解包，更新 PATH，自检后确认编译器仍在。**默认不下载**，
-  InstallClang 显式启用；隔离策略本身不是编译器漏洞，假报成功是缺陷。
-- IDE Rust 层规范化路径并限制工作区，拒绝创建覆盖/链接逃逸，重建输出避免写穿
-  硬链接，在 Rust 校验包命令白名单/名称，恶意 webview 不能发明任意 shell/全局命令。
-- JSON/UTF/SSE/URL/头/glob/base64/UI 等外部输入解析器必须推进且不越界。
-  slab -1 等缺失索引守卫、realloc 返回活句柄、builder 不缩到存活子项以下；
-  空/非有限/深层 JSON 要终止。WinHTTP 不自动携密钥重定向、不把截断当成功；
-  字符串索引/切片必须保留越界空串防护，不能借数组不检查之名移除。
-- SDK 密钥是普通堆字符串，不清零；优先环境配置，不打印 client，转储/报告先脱敏。
-  SDK 使用 Windows WinHTTP，不在编译器进程运行。
-- IDE/Web 依赖公告在范围内；接受风险须有原因/退出条件，未解决 glib 上游约束前
-  不得删除 ide/src-tauri/audit.toml 例外。
+- 特制源码/导入/资源/诊断不得损坏编译器、执行非预期命令或误编译定义良好程序。
+  普通错误诊断/panic 是 bug；小输入灾难性资源放大值得私报。
+- 生成标识来自稳定源码/计数器/名字，不能用地址；hash 迭代不应改变 C。
+  缓存包含编译器、选项、依赖；勿共享不可信可写缓存。
+- Rust-vs-selfhost 直接 C 比较和自举跨阶段不动点是不同检查；有限 fixture
+  不证明全特性等价，自举仍缺新功能，见[C 边界](docs/c-compatibility.md)。
+- 外部 ABI 依赖正确声明。Aoxn int 对应 long long，bool 对应 C int，不能推为
+  任意 C int/_Bool 兼容；固定参数 extern 不支持 C 可变参数。错误声明可能链接
+  成功却产生 UB；已知签名 C helper 测试不能校验任意第三方声明。
+- 图优化保留语义与诊断顺序；反向边、借用模块表、无环证明复用只消除特定开销，
+  不是消除所有 DoS。递归仍有宿主栈限制；数组等包装间接结构体环为既有缺口。
+- 包优先安装 stdlib，裸导入先同目录，引号导入有同目录兜底；环境路径和 clang/
+  链接选项是调用方配置，不对控制环境者构成安全边界。
+- CSS 输出名由编译器生成并防路径逃逸；URL 只影响内容，Tailwind 不静默下载 Node。
 
-### 有意限制与真实验证
+### 包、安装器与应用边界
 
-用户程序数组越界、带符号溢出、无效原始内存/FFI 为未定义行为。
-as_string 别名引用存储，调用方不能释放；字符串 NUL 结束，拼接结果故意泄漏，
-没有 GC/通用运行时内存安全保证。用户主动不安全代码与库处理外部数据损坏有别。
-窗口服务不是沙箱，消息解析仍在范围，纯显示问题是普通 bug。注册表等级不保证
-代码安全；自举不动点不证明 Rust/Aoxn 全特性等价。
+- checksum 锚定内容树，tarball_sha256 校验传输字节；旧索引缺摘要不豁免内容验证。
+  热复用重算真实树，**只排除自身 index.ax shim**，不符则重建校验。
+- 解包拒绝逃逸/绝对路径/链接，校验依赖和缓存路径；npm-import 验完整性与元数据。
+  注册表 HTTP 为明文，恶意索引可同时替换数据和摘要；信任等级是声明而非审计。
+- 并行 worker 各有 registry state；未知 schema 失败；生产剪枝保留生产可达包。
+- 安装器限制在选定根、更新 PATH、自检后再确认二进制。默认不下载，InstallClang
+  显式启用；系统隔离不是编译器漏洞，假报成功是 bug。
+- IDE Rust 层限制工作区路径、防链接逃逸/覆盖、重建输出防硬链接，并验证命令。
+  恶意 webview 不能取得任意 shell/全局命令能力。
+- JSON/UTF/SSE/URL/头/glob/base64/UI 解析必须推进且不越界；缺失 slab 索引守卫、
+  realloc 活句柄写回、builder 不缩到 live count 以下；空/非有限/深 JSON 终止。
+  WinHTTP 不静默跨重定向泄密、不把截断当成功。
+- 字符串 clamp 属安全属性，不得借数组不检查取消。SDK key 不清零，优先环境配置，
+  转储脱敏；WinHTTP 为 Windows-only。IDE/Web 公告在范围内，例外需要理由与退出条件，
+  未解决依赖约束前不得删除 glib audit 例外。
 
-2026-10-17 审计的13项问题已在0.51.0/0.51.1修复，不等于无新问题。
-本次性能修改**不是安全审计**。Windows 显式使用 clang 23.1.2 最终 **343根+
-104包=447项通过，0失败/忽略**；Linux Rust workspace/tests cross-check 通过，
-不等于 Linux 链接/运行。首轮缺 clang 的202通过/140失败保留记录。
-新增4项检查器测试覆盖三节点全图参考比较、完整首根诊断、共享DAG/菱形/环。
-基线和修改版42成功+5非法输入的 C/诊断/状态相同。日志与限制见
-[性能证据](docs/p2-compiler-performance.md)。未运行 IDE 检查或新全量安装打包，
-本地 Windows 不能代替 Linux CI。
+### 仓库检查与自动化范围
+
+主 CI 显式指定编译器和包管理器，不能把默认根包测试当成员测试已执行。
+Windows 冒烟/发布逐条检查原生命令退出码，安装器下载仍为显式启用。
+本地 workflow 语法校验不证明托管 Actions 或安装器运行成功；本次未触发远程工作流。
+
+文档检查器只读、无外部依赖，仅读本地 Git 历史，不访问 URL 或执行文档命令，
+默认仅警告。历史白名单与命令启发式限制其覆盖，不是安全/链接完整性保证。
+[产物审计](docs/repository-audit.md)记录来源与保留决定，不删除或认证归档，
+没有执行归档内容。
+
+### 有意限制与证据
+
+用户数组越界、带符号溢出、无效原始内存/FFI 是 UB。as_string 别名存储必须存活；
+字符串 NUL 结束、拼接故意泄漏，没有 GC/通用运行时内存安全。库处理外部数据损坏
+与调用方主动不安全操作有别；窗口服务和注册表等级不沙箱或认证程序。
+
+2026-10-17 审计13项已在0.51.0/0.51.1修复，不保证没有新缺陷。
+历史基线 **8f90aca** 在 Windows 显式 clang 23.1.2 记录343根+104包；本次最终
+**349根+104包=453项通过，0失败/忽略**，ABI 实际执行 O0/O3，不动点和跨进程
+确定性通过；Linux Rust workspace/tests cross-check 通过，不等于原生运行。
+中间 known-gap 错误预期曾失败，已据完整 C 比较纠正并最终全过，见
+[C 兼容证据](docs/c-compatibility.md)。不暗示新安全审计、IDE 验证、Linux 原生运行
+或完整安装器发布。P2维护后又执行显式locked编译器/包测试，结果与Python检查器
+测试见[仓库维护证据](docs/repository-audit.md)。未触发托管CI，workflow仅本地语法校验。

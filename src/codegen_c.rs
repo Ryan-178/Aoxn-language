@@ -613,7 +613,8 @@ impl<'a> GenC<'a> {
         if params.is_empty() {
             params.push("void".to_string());
         }
-        Ok(format!("{} {}({});", self.c_type(&f.ret), f.name, params.join(", ")))
+        let declarator = format!("{}({})", f.name, params.join(", "));
+        Ok(format!("{};", self.c_decl(&f.ret, &declarator)))
     }
 
     fn c_string_lit(s: &str) -> String {
@@ -1088,7 +1089,11 @@ impl<'a> GenC<'a> {
         if params.is_empty() {
             params.push("void".to_string());
         }
-        let header = format!("{} {}({})", self.c_type(&sig.1), sig.0, params.join(", "));
+        // Insert the whole function declarator into the return type. For a
+        // function-pointer return this gives `R (*factory(args))(cb_args)`,
+        // not the invalid `R (*)(cb_args) factory(args)`.
+        let declarator = format!("{}({})", sig.0, params.join(", "));
+        let header = self.c_decl(&sig.1, &declarator);
         let proto = header.clone();
         let mut text = format!("{header} {{\n");
         for d in &decls {

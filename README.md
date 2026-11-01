@@ -2,29 +2,19 @@
 
 ## English
 
-### Current project
+### Project and current scope
 
-Aoxn is a statically typed, AI-native compiled language with Python-style
-indentation. The Rust compiler emits ISO C, then invokes external clang to
-produce native programs. It has no LLVM library dependency. The compiler
-library (`src/`) has zero external Rust crate dependencies; the independent
-package manager has its own dependencies pinned in `Cargo.lock`.
+Aoxn is a statically typed native language with Python-style indentation. The
+Rust compiler emits ISO C99 and invokes external clang. The compiler library
+`src/` has no external Rust crate dependencies or LLVM library dependency. The
+independent package manager has dependencies pinned in `Cargo.lock`.
 
-**Compiler 0.55.0; package-manager crate 0.42.0.** Versions come from the
-current manifests and the latest released [changelog](CHANGELOG.md) entry.
-v0.55.0 fixes Python exponentiation precedence (`-2 ** 2 == -4`) and adds
-an agent-oriented language card in [AGENTS.md](AGENTS.md). Unreleased compiler
-performance work preserves language semantics and generated C: reverse-edge
-exception propagation, borrowed module tables, and now reuse of completed
-acyclic-struct proofs across declaration roots.
-
-The latest optimization removes repeated DFS of shared struct tails. A release
-comparison against `82cffcd` reduced typecheck median for a synthetic 1600-struct
-chain from **602.866 ms to 2.398 ms**, and `aoxn c` process wall median from
-**672.730 ms to 71.759 ms**. Real selfhost/UI/stdlib workloads do not demonstrate
-a general end-to-end speedup; small changes remain noise-sensitive. Method,
-raw samples, limitations and reproduction instructions are in the
-[compiler performance report](docs/p2-compiler-performance.md).
+**Compiler 0.55.0; package-manager crate 0.42.0.** The latest versioned
+[changelog](CHANGELOG.md) entry fixes exponentiation precedence: `-2 ** 2` is
+`-4`. Unreleased work optimizes exception propagation, module-table access and
+struct-cycle checking, and strengthens direct C-emitter and ABI verification.
+This does not introduce C source compatibility or port newer features to the
+self-hosted compiler. See [C compatibility](docs/c-compatibility.md).
 
 ```python
 import * from "stdlib"
@@ -33,27 +23,23 @@ def square(x: int, scale: int = 1) -> int:
     return x ** 2 * scale
 
 def main() -> int:
-    values = [2, 3, 5]
-    for value in values:
+    for value in [2, 3, 5]:
         print(value, square(value))
     return 0
 ```
 
-### Platforms and installation
+### Installation, platforms and commands
 
-**Windows is first-class, Linux is supported, macOS is unsupported.** The
-[platform policy](docs/platform-support.md) is authoritative. Windows releases
-ship one `Aoxn-<version>-Setup.exe` from the
-[release page](https://github.com/AlonechatWorkspace/Aoxn-language/releases).
+Windows is first-class, Linux is supported, macOS is unsupported. The
+[platform policy](docs/platform-support.md) is authoritative. Windows ships
+`Aoxn-<version>-Setup.exe` from the [release page](https://github.com/AlonechatWorkspace/Aoxn-language/releases).
 It unpacks into `%LOCALAPPDATA%\aoxn`, updates PATH and runs `aoxn doctor`.
-It downloads **nothing by default**; `-InstallClang` explicitly opts in.
-clang is external, and Windows linking requires MSVC-compatible build tools.
-Unsigned binaries may be quarantined by Windows policy; see
-[installation](docs/install.md) and [security](SECURITY.md).
+**Nothing is downloaded by default**; `-InstallClang` explicitly opts in.
+clang is external; Windows linking needs MSVC-compatible build tools. Unsigned
+binaries can be quarantined by OS policy; see [installation](docs/install.md).
 
-Building the compiler requires Rust. Compiling Aoxn programs also requires
-clang. Linux GUI programs additionally require X11/Xft/fontconfig development
-libraries; headless compiler commands do not.
+Build the compiler with Rust. Compile native Aoxn programs with clang as well.
+Linux GUI programs need X11/Xft/fontconfig development libraries.
 
 ```powershell
 cargo build --release
@@ -66,137 +52,142 @@ cargo run -- doctor --json
 cargo run -- version
 ```
 
-Use `-o fib` on Linux. `check`, `c` and `symbols` do not invoke clang.
-`--json` supplies structured diagnostics. `--O0` through `--O3` select clang's
-optimization level (default O3), not a different C text. `--clang-arg`, `-g`
-and `--cc-warnings` expose clang arguments, debug information and warnings.
+On Linux use an output such as `-o fib`. `check`, `c` and `symbols` do not invoke
+clang. `--json` provides machine-readable diagnostics. `--O0` through `--O3`
+select clang optimization (default O3), not different C text. `--clang-arg`, `-g`
+and `--cc-warnings` expose clang options, debug information and warnings.
 
-`run` and `build` share a content-keyed executable cache; `AOXN_NO_CACHE=1`
-disables it and `AOXN_CACHE_DIR` relocates it. `AOXN_TIME=1` reports lex,
-parse, resolve, typecheck, codegen and link phases where applicable. Use
-`aoxn c` to measure Rust compilation without clang/cache work. `AOXN_CLANG`
-selects clang; `AOXN_HOME`/`AOXN_STDLIB` select toolchain/library locations;
-`AOXN_DUMP_C=1` prints emitted C.
+`run`/`build` share a content-keyed cache. `AOXN_NO_CACHE=1` disables it;
+`AOXN_CACHE_DIR` relocates it. `AOXN_CLANG` selects clang; `AOXN_HOME` and
+`AOXN_STDLIB` select installed toolchain/library paths. `AOXN_DUMP_C=1` prints
+C, and `AOXN_TIME=1` reports lex/parse/resolve/typecheck/codegen/link phases.
 
-### Language and boundaries
+### Language, ABI and self-hosting
 
-- Indentation blocks, `def`/`elif`/`pass`, `#` comments, inference, generics,
-  trailing parameter defaults, conditional expressions and multi-value print.
-- Strict types: no implicit int/float conversion, bool-only conditions, no
-  retyping variables, checked returns and unreachable statements.
-- `**` associates right; `-2 ** 2` is `-4`. `not` uses Python comparison
-  precedence, while bitwise operators retain the documented C-style rules.
+- Strict types, explicit int/float conversion, bool-only conditions, checked
+  returns and unreachable statements. Defaults, generics, conditional expressions,
+  multi-value print, namespaces and selective/star imports are available.
 - Structs and fixed arrays copy by value. Strings are immutable NUL-terminated
-  **bytes**, not Unicode characters. Indexing/slicing/iteration use bytes;
-  string bounds clamp to `""`, but array indexing remains unchecked.
-- `dict[V]` is a shared heap handle with insertion order and linear lookup.
-  Function pointers, nullable `T | None` narrowing and string-payload exceptions
-  (`raise`/`try`/`except`) are supported.
-- Raw-memory builtins and C FFI are unsafe. Concatenation results intentionally
-  leak; there is no GC or universal runtime memory-safety guarantee.
-- Modules provide namespaces, aliases and selective/star imports. Bare imports
-  probe siblings first; quoted imports prefer packages/stdlib, then siblings.
-- The TypeScript front end lowers a supported subset to the same AST; it is
-  **not full TypeScript/JavaScript compatibility**. Objects/closures/GC remain
-  gaps. See [TS plan](docs/ts-m1-spec.md).
+  bytes; string bounds clamp, while fixed-array indexing is unchecked.
+- Dicts share heap handles and preserve insertion order with linear lookup.
+  Nullable narrowing, function pointers and string-payload exceptions are supported
+  by the Rust compiler. Concatenation intentionally leaks; there is no GC.
+- C FFI and raw-memory builtins require correct caller contracts. Aoxn `int`
+  maps to `long long`, not arbitrary C `int`; bool maps to C `int`, not a promise
+  of `_Bool` compatibility. Externs are fixed-arity, not variadic. Internal
+  aggregate ABI is not arbitrary C struct-by-value extern compatibility.
+- The TypeScript front end is a supported subset, not full TS/JavaScript.
+  Closures, objects and GC remain gaps; see the [TS plan](docs/ts-m1-spec.md).
 
-The [specification](docs/spec.md), [language card](AGENTS.md) and
-[language gaps](docs/language-gaps.md) describe the actual surface and limits.
+The self-hosted compiler implements a subset. Its stage fixed point compares
+self-hosted driver products across stages, including C/object bytes (masking
+Windows COFF timestamps). Direct Rust-vs-selfhost C comparison is a separate
+claim. Neither finite corpus proves all-feature equivalence. The self-hosted
+backend lacks dict/None/function-pointer/exception emission, default parameters
+and namespace binding. Read [C compatibility](docs/c-compatibility.md), the
+[spec](docs/spec.md), [language card](AGENTS.md) and [gaps](docs/language-gaps.md).
 
 ### Libraries and tools
 
-The Aoxn-written [stdlib](docs/stdlib.md) includes core containers/I/O and
-separate math, time, datetime, calendar, pathlib, base64, hashlib, hmac, os,
-glob, JSON, bisect and heapq modules. Import explicitly, for example
-`import * from "stdlib/math"`. The [UI toolkit](docs/ui.md) shares a portable
-widget layer between Win32/GDI and Linux X11/Xft. The [OpenAI](docs/openai-sdk.md)
-and [Anthropic](docs/anthropic-sdk.md) SDKs share JSON/HTTP/SSE infrastructure;
-their WinHTTP transport is Windows-only.
+Explicitly imported [stdlib modules](docs/stdlib.md) include math, time,
+datetime, calendar, pathlib, base64, hashlib, hmac, os, glob, JSON, bisect and
+heapq. Core containers/I/O remain in `stdlib/stdlib.ax`. The [UI](docs/ui.md)
+shares widgets across Win32/GDI and Linux X11/Xft. The [OpenAI](docs/openai-sdk.md)
+and [Anthropic](docs/anthropic-sdk.md) SDKs share JSON/HTTP/SSE; WinHTTP transport
+is Windows-only.
 
 The [package manager](docs/pkg-manager.md) uses `aoxn.json`, `aoxn.lock` and
-`aox_modules/`. Commands include `aoxn pkg init|add|remove|install|update|list|freeze|tree|why|audit|trust|publish|yank|cache|npm-import`;
-direct aliases are available. Registries can be directories, git repos or
-read-only plain-HTTP mirrors. npm-import accepts Aoxn metadata, not arbitrary
-JavaScript packages. Warm installs retain trees only after verifying their
-content hash, excluding only the installer-owned `index.ax` shim.
+`aox_modules/`, with init/add/remove/install/update/list/freeze/tree/why/audit/
+trust/publish/yank/cache/npm-import commands and direct aliases. Registries are
+directories, git or read-only plain HTTP. npm-import requires Aoxn metadata,
+not arbitrary JS. Warm reuse rechecks content hashes, excluding only its own
+`index.ax` shim. [CSS assets](docs/css-assets.md) include CSS Modules,
+minification, URL handling and `--emit-assets`; built-in `--tailwind` is a subset.
+The [IDE](docs/ide.md) is a Tauri/Next.js/Monaco application, separately tested.
 
-[CSS assets](docs/css-assets.md) support CSS imports/Modules, minification,
-URLs and `--emit-assets`. Tailwind may be pre-generated CSS; `--tailwind` is
-only a documented built-in subset. The [IDE](docs/ide.md) (`ide/`) is a
-Tauri 2/Next.js/Monaco workbench driving the real compiler; `pnpm --dir ide dev`
-can run its in-memory browser fixture.
+### Repository maintenance and CI scope
 
-`selfhost/` contains an Aoxn-written lexer/parser/checker/loader/C emitter/driver.
-The fixed point compares self-hosted driver products across compiler stages,
-including C/object bytes (masking Windows COFF timestamps). It does **not**
-prove equivalence of every Rust and Aoxn emitter feature. The self-hosted
-backend still lacks several newer features, including dict/None/fn-pointer/
-exception emission. Runtime benchmarks such as [web results](docs/web-benchmark.md)
-are distinct from compiler-time measurements.
+Main CI explicitly runs `cargo test -p aoxn --locked` and
+`cargo test -p aoxn-pkg --locked` on Windows/Linux: the root non-virtual workspace
+otherwise defaults to only `aoxn`. Linux also runs the X11 probe under Xvfb.
+Release packaging/install smoke runs on tags or manual dispatch, not every push;
+web benchmarks and IDE checks are separate. Windows smoke commands now check
+native exit codes immediately. Release notes match the installer's opt-in clang
+download behavior.
 
-### Validation of this tree
+Current specifications and contributor instructions have been reconciled with
+the C backend; LLVM-era reports retain historical data with explicit boundaries.
+`wiki/` stays frozen. The [repository audit](docs/repository-audit.md) records
+artifact provenance without deleting unexplained files. Run the dependency-free
+read-only checks with Python:
 
-On Windows, using Rust 1.94.1 and explicitly selecting existing clang 23.1.2:
+```text
+python tools/test_check_doc_links.py
+python tools/check_doc_links.py
+```
+
+The path auditor is warning-only by default; `--strict` treats all findings as
+failures. Command hints are heuristic, not confirmed bugs. It does not fetch
+links, execute documented commands, validate anchors or replace a security audit.
+
+### Validation and evidence
 
 ```powershell
-$env:AOXN_CLANG = "E:/llvm/bin/clang.exe"  # substitute your installed clang
-cargo test --no-fail-fast
-bash run_pkg_tests.sh
+$env:AOXN_CLANG = "E:/llvm/bin/clang.exe"  # choose an existing clang
+cargo test -p aoxn --locked --no-fail-fast
+cargo test -p aoxn-pkg --locked
 cargo check --workspace --tests --target x86_64-unknown-linux-gnu
 ```
 
-**343 root tests + 104 package-manager tests = 447 passed, zero failed or
-ignored** in the final runs. Root coverage includes 24 library, 3 setup,
-198 pipeline, 39 assets, 35 TS, 14 UI, 8 symbol and 22 other integration tests.
-The Linux Rust cross-check passed; it is not a Linux link/runtime test.
-Initially clang was absent from PATH: the complete attempt had **202 passed,
-140 failed**, before configuring `AOXN_CLANG`. That failed attempt and the
-successful rerun are both documented, rather than hiding the environment issue.
-The release baseline and modified compiler produced identical C, diagnostics
-and exit status for **42 successful and 5 invalid inputs**.
+Final Windows validation for this compatibility change: **349 root + 104 package
+= 453 passed, 0 failed/ignored**, with Rust 1.94.1 and explicit clang 23.1.2.
+The four ABI tests and two parity tests passed; native ABI cases actually ran at
+O0/O3. Six common-subset inputs have identical C, while five known gaps are
+separately pinned, not counted as parity. The original fixed point and
+cross-process determinism tests passed. Linux Rust workspace/tests cross-check
+passed, not Linux native linking/runtime. An intermediate incorrect known-gap
+expectation failed and was corrected from actual full-C comparison; see
+[C compatibility](docs/c-compatibility.md) for evidence and reproduction.
+IDE tests and full installer packaging were not run.
 
-IDE tests are separate and were not run for this compiler-only change:
-`pnpm --dir ide test`, `pnpm --dir ide typecheck`, and
-`cargo test --manifest-path ide/src-tauri/Cargo.toml`. Windows/Linux CI remains
-necessary; Linux UI tests use Xvfb. See the performance report for logs and
-exact scope, including pre-existing unchecked wrapped struct-cycle edges.
+Historical baseline **8f90aca** recorded 343 root + 104 package tests (447), with
+explicit clang 23.1.2 on Windows. This is a dated baseline, not a live count of
+the modified tree. The [performance report](docs/p2-compiler-performance.md)
+records exact comparisons and failures: the 1600-struct synthetic chain improved
+from 602.866 to 2.398 ms typecheck median, but real workloads do not establish a
+general end-to-end speedup. Wrapped/array indirect struct cycles remain a known
+checker limitation.
 
 | Location | Purpose |
 |---|---|
 | `src/`, `tests/` | compiler, CLI, installer and regression suites |
-| `stdlib/`, `examples/` | libraries and examples |
 | `selfhost/` | self-hosted compiler subset |
+| `stdlib/`, `examples/` | libraries and examples |
 | `crates/aoxn-pkg/` | independent package manager |
-| `ide/`, `web/` | IDE and Windows web benchmark suite |
-| `dist/package.ps1` | single-file Windows installer packaging |
-| `tools/compiler_perf.py` | clang-free interleaved compiler benchmark |
-| `docs/` | maintained specs, guides and measurements |
-| `wiki/` | frozen historical documentation, not current authority |
+| `ide/`, `web/` | IDE and Windows web benchmarks |
+| `dist/package.ps1` | Windows installer packaging |
+| `tools/compiler_perf.py` | clang-free interleaved measurements |
+| `docs/` | maintained specifications and evidence |
+| `wiki/` | frozen historical documentation |
 
-Contributions follow [AGENTS.md](AGENTS.md). Report vulnerabilities privately
-under [SECURITY.md](SECURITY.md). License: [Apache-2.0](LICENSE).
+Contribute under [AGENTS.md](AGENTS.md); report vulnerabilities privately under
+[SECURITY.md](SECURITY.md). License: [Apache-2.0](LICENSE).
 
 ---
 
 ## 中文
 
-### 当前项目
+### 项目与当前范围
 
-Aoxn 是面向 AI 的静态类型原生编译语言，使用 Python 风格缩进。Rust 编译器
-输出 ISO C，再调用外部 clang，已无 LLVM 库依赖。`src/` 编译器库不依赖
-外部 Rust crate；独立包管理器的依赖由 `Cargo.lock` 固定。
+Aoxn 是使用 Python 风格缩进的静态类型原生语言。Rust 编译器发射 ISO C99，
+再调用外部 clang；`src/` 编译器库没有外部 Rust crate 或 LLVM 库依赖。
+独立包管理器的依赖固定在 `Cargo.lock`。
 
-**编译器 0.55.0，包管理器 crate 0.42.0**，以当前清单与
-[CHANGELOG](CHANGELOG.md) 最新已发布条目为准。v0.55.0 修复 Python 幂运算
-优先级（`-2 ** 2 == -4`），并在 [AGENTS.md](AGENTS.md) 加入代理语言卡。
-未发布的编译器优化保留语言语义和 C 文本：反向调用边异常传播、借用模块成员表，
-以及本次跨声明根复用已证明无环的结构体节点。
-
-对 `82cffcd` 的 release 交错实测，1600 个结构体共享尾链的 typecheck 中位数
-**602.866 ms → 2.398 ms**，`aoxn c` 进程墙钟中位数
-**672.730 ms → 71.759 ms**。这不是所有项目的加速承诺：真实 selfhost/UI/stdlib
-的端到端小幅变化仍受噪声影响。方法、原始数据与复现命令见
-[编译器性能报告](docs/p2-compiler-performance.md)。
+**编译器 0.55.0，包管理器 crate 0.42.0**；以清单和
+[CHANGELOG](CHANGELOG.md) 最新版本条目为准，0.55.0 修复 `-2 ** 2 == -4`。
+未发布工作包括异常传播、模块表、结构体环检查优化，以及直接 C 发射器比较和 ABI
+验证。不新增 C 源码兼容，也不把 Rust 新特性移植到自举编译器。见
+[C 兼容边界](docs/c-compatibility.md)。
 
 ```python
 import * from "stdlib"
@@ -205,23 +196,22 @@ def square(x: int, scale: int = 1) -> int:
     return x ** 2 * scale
 
 def main() -> int:
-    values = [2, 3, 5]
-    for value in values:
+    for value in [2, 3, 5]:
         print(value, square(value))
     return 0
 ```
 
-### 平台、安装与命令
+### 平台、安装和命令
 
-**Windows 为一等平台，支持 Linux，不支持 macOS**，以
+Windows 为一等平台，支持 Linux，不支持 macOS，以
 [平台政策](docs/platform-support.md) 为准。[Windows 发布包](https://github.com/AlonechatWorkspace/Aoxn-language/releases)
-是单文件 `Aoxn-<version>-Setup.exe`，解包到 `%LOCALAPPDATA%\aoxn`，设置 PATH
-并运行 `aoxn doctor`。**默认不下载任何东西**，只有 `-InstallClang` 显式启用
-安装 clang。clang 是外部前提，Windows 链接需要 MSVC 兼容构建工具。
-未签名程序可能被系统隔离，详见[安装指南](docs/install.md)与[安全政策](SECURITY.md)。
+为 `Aoxn-<version>-Setup.exe`，解包至 `%LOCALAPPDATA%\aoxn`、设置 PATH、
+运行 doctor。**默认不下载**；`-InstallClang` 显式启用下载。
+clang 为外部前提，Windows 链接需要 MSVC 兼容工具；未签名程序可能被系统隔离。
+见[安装指南](docs/install.md)。
 
-构建编译器需要 Rust；编译 Aoxn 程序还需 clang。Linux 图形程序另需
-X11/Xft/fontconfig 开发库，纯命令行编译器不需要图形库。
+构建编译器需要 Rust，编译 Aoxn 程序还需 clang；Linux 图形程序另需
+X11/Xft/fontconfig 开发库。
 
 ```powershell
 cargo build --release
@@ -234,84 +224,90 @@ cargo run -- doctor --json
 cargo run -- version
 ```
 
-Linux 可使用 `-o fib`。`check`、`c`、`symbols` 不调用 clang，`--json` 提供
-结构化诊断。`--O0` 至 `--O3` 选择 clang 优化级别，默认 O3，不改变 C 文本。
-`--clang-arg`、`-g`、`--cc-warnings` 分别透传参数、请求调试信息与启用警告。
+Linux 输出可写 `-o fib`。check/c/symbols 不调用 clang；`--json` 提供结构化诊断。
+`--O0` 至 `--O3` 仅选择 clang 优化级别（默认 O3），不改变 C 文本。
+`--clang-arg`、`-g`、`--cc-warnings` 用于透传参数、调试信息和警告。
+run/build 共享内容缓存；AOXN_NO_CACHE 禁用，AOXN_CACHE_DIR 改位置。
+AOXN_CLANG 指定 clang，AOXN_HOME/AOXN_STDLIB 指定安装位置；
+AOXN_DUMP_C 打印 C，AOXN_TIME 输出各编译阶段耗时。
 
-`run`/`build` 共享内容缓存；`AOXN_NO_CACHE=1` 禁用，`AOXN_CACHE_DIR` 改位置。
-`AOXN_TIME=1` 输出 lex/parse/resolve/typecheck/codegen/link 实际阶段耗时；
-用 `aoxn c` 排除 clang 和可执行文件缓存。`AOXN_CLANG` 指定 clang，
-`AOXN_HOME`/`AOXN_STDLIB` 指定工具链/标准库，`AOXN_DUMP_C=1` 打印 C。
+### 语言、ABI 与自举
 
-### 语言和边界
+- 类型严格，int/float 显式转换，条件必须 bool，检查返回路径和不可达代码。
+  支持默认参数、泛型、条件表达式、多参数 print、命名空间和选择性/星号导入。
+- 结构体与定长数组按值复制；字符串是不可变 NUL 结束字节，字符串越界 clamp，
+  数组索引不检查。dict 为保序共享堆句柄，查询线性。
+- Rust 编译器支持 nullable 收窄、函数指针与异常；拼接字符串故意不释放，没有 GC。
+- C FFI/原始内存依赖调用方正确约定。int 对应 long long 而不是任意 C int；
+  bool 对应 C int，并不保证兼容 _Bool。extern 固定参数，不支持可变参数；
+  内部聚合 ABI 不等于任意 C struct-by-value extern 兼容。
+- TS 前端为子集而非完整 TS/JS；对象、闭包、GC 仍有缺口，见[计划](docs/ts-m1-spec.md)。
 
-- 支持缩进块、def/elif/pass、# 注释、推断、泛型、尾部默认参数、条件表达式、
-  多参数 print。类型严格，不隐式转换 int/float，条件必须 bool，变量不改类型，
-  返回路径与不可达语句受检查。
-- `**` 右结合，`-2 ** 2` 为 `-4`；`not` 使用 Python 比较优先级，位运算保留
-  文档记录的 C 规则。
-- 数组和结构体按值复制；字符串是不可变、NUL 结束的**字节**，长度/索引/切片/
-  遍历不是 Unicode 字符操作。字符串越界返回空串，数组索引仍不检查。
-- `dict[V]` 共享堆句柄，保留插入顺序但键查询线性；支持函数指针、`T | None`
-  收窄与字符串载荷 raise/try/except。
-- 原始内存与 C FFI 不安全；字符串拼接结果按设计不释放，没有 GC 或通用运行时
-  内存安全保证。
-- 模块支持命名空间、别名、选择性/星号导入。裸导入先同目录，引号导入优先包与
-  标准库，失败后回退同目录。
-- TypeScript 前端是同一 AST 上的已支持子集，**不是完整 TS/JS 兼容**，对象/
-  闭包/GC 仍缺失，见 [TS 计划](docs/ts-m1-spec.md)。
-
-实际规则见[规范](docs/spec.md)、[语言卡](AGENTS.md)及[语言缺口](docs/language-gaps.md)。
+自举不动点比较自举驱动跨阶段 C/目标文件（屏蔽 Windows COFF 时间戳）；
+Rust-vs-selfhost 完整 C 比较是另一个验证，两者都不证明所有功能等价。
+自举仍缺 dict/None/函数指针/异常发射、默认参数与命名空间绑定。
+实际规则见[C 边界](docs/c-compatibility.md)、[规范](docs/spec.md)、
+[语言卡](AGENTS.md)和[语言缺口](docs/language-gaps.md)。
 
 ### 库与工具
 
-Aoxn 编写的[标准库](docs/stdlib.md)提供核心容器/I/O 与独立 math、time、datetime、
-calendar、pathlib、base64、hashlib、hmac、os、glob、JSON、bisect、heapq 模块，
-例如 `import * from "stdlib/math"`。[UI](docs/ui.md)共享可移植控件层，后端为
-Win32/GDI 和 Linux X11/Xft。[OpenAI](docs/openai-sdk.md)/[Anthropic](docs/anthropic-sdk.md)
-SDK 共享 JSON/HTTP/SSE，WinHTTP 传输仅 Windows。
+[标准库](docs/stdlib.md)独立模块提供 math/time/datetime/calendar/pathlib/
+base64/hashlib/hmac/os/glob/json/bisect/heapq；核心容器与 I/O 在 stdlib/stdlib.ax。
+[UI](docs/ui.md)共享控件层，后端为 Win32/GDI 与 X11/Xft。
+[OpenAI](docs/openai-sdk.md)/[Anthropic](docs/anthropic-sdk.md) SDK 共享传输基础，
+WinHTTP 为 Windows-only。
 
 [包管理器](docs/pkg-manager.md)使用 aoxn.json/aoxn.lock/aox_modules，提供
-`aoxn pkg init|add|remove|install|update|list|freeze|tree|why|audit|trust|publish|yank|cache|npm-import`
-及直接别名。注册表可为目录、git 或只读明文 HTTP。npm-import 只接受 Aoxn
-元数据，不接受任意 JS 包。热安装复用前仍计算真实内容哈希，仅排除自身生成的
-index.ax shim。[CSS](docs/css-assets.md)支持导入/Modules、压缩、URL 与
---emit-assets；Tailwind 可预生成，内建 --tailwind 仅为已记录子集。
-[IDE](docs/ide.md)采用 Tauri 2/Next.js/Monaco 并调用真实编译器；
-`pnpm --dir ide dev` 可运行浏览器内存样例。
+init/add/remove/install/update/list/freeze/tree/why/audit/trust/publish/yank/cache/
+npm-import 与直接别名；注册表为目录/git/只读明文 HTTP。npm-import 只收 Aoxn
+元数据，不支持任意 JS。热安装复用前重算内容哈希，仅排除自身 index.ax shim。
+[CSS](docs/css-assets.md)支持 Modules、压缩、URL、emit-assets，内建 Tailwind 是子集。
+[IDE](docs/ide.md)为独立测试的 Tauri/Next.js/Monaco 应用。
 
-selfhost/ 包含本语言实现的词法器/解析器/检查器/加载器/C 发射器/驱动。
-不动点比较驱动跨阶段产物（C/目标文件，屏蔽 Windows COFF 时间戳），
-**不证明 Rust 与 Aoxn 发射器所有功能等价**。自举后端仍缺 dict/None/函数指针/
-异常等新特性。[Web 运行基准](docs/web-benchmark.md)与编译器自身耗时不是同一指标。
+### 仓库维护与 CI 范围
 
-### 当前树验证
+主 CI 在 Windows/Linux 显式执行 `cargo test -p aoxn --locked` 和
+`cargo test -p aoxn-pkg --locked`；非虚拟工作区裸 cargo test 默认只测试根包。
+Linux 另跑 Xvfb 下 X11 probe。安装打包与冒烟在 tag/手动触发，不是每次 push；
+Web 基准和 IDE 独立。Windows 冒烟逐条检查原生命令退出码，发布文案与安装器
+显式启用 clang 下载的行为一致。
 
-本地 Windows、Rust 1.94.1、显式选择已有 clang 23.1.2：
+规范/贡献指南对齐当前 C 后端；LLVM 历史报告保留数据并标清边界，wiki 不修改。
+[仓库审计](docs/repository-audit.md)记录产物来源，未盲删历史文件。
+只读检查命令无需外部 Python 包：
+
+```text
+python tools/test_check_doc_links.py
+python tools/check_doc_links.py
+```
+
+检查器默认仅警告，--strict 对所有发现返回失败；命令提示只是启发式，不是确认缺陷。
+不访问网络、不执行文档命令、不校验锚点，也不是安全审计。
+
+### 验证与证据
 
 ```powershell
-$env:AOXN_CLANG = "E:/llvm/bin/clang.exe"  # 替换为本机 clang
-cargo test --no-fail-fast
-bash run_pkg_tests.sh
+$env:AOXN_CLANG = "E:/llvm/bin/clang.exe"  # 替换为已有 clang
+cargo test -p aoxn --locked --no-fail-fast
+cargo test -p aoxn-pkg --locked
 cargo check --workspace --tests --target x86_64-unknown-linux-gnu
 ```
 
-最终 **343 项根测试 + 104 项包测试 = 447 项通过，0 失败/忽略**。
-根套件包含 library 24、setup 3、pipeline 198、assets 39、TS 35、UI 14、
-symbols 8、其他集成 22。Linux Rust cross-check 通过，但不等于 Linux 链接或运行。
-首轮 PATH 缺 clang，全量尝试为 **202 通过、140 失败**；设置 AOXN_CLANG 后重跑
-全过，报告保留失败与成功日志。release 基线和修改版的 **42 个成功输入与5个
-非法输入**保持 C、诊断和退出状态逐字节一致。
+本次 Windows 最终验证：Rust 1.94.1、显式 clang 23.1.2 下 **349根+104包=453项
+通过，0失败/忽略**。新增4项 ABI、2项 parity 通过，原生 ABI 实际执行 O0/O3。
+6个共同子集输入 C 相同，5个已知缺口独立钉住，不混算为 parity。不动点和跨进程
+确定性通过，Linux Rust workspace/tests cross-check 通过，不证明 Linux 链接/运行。
+中间一项 known-gap 预期失败，经完整 C 实测纠正后最终全过，见
+[C 兼容证据](docs/c-compatibility.md)。未运行 IDE 或完整安装器打包。
 
-IDE 未在本次编译器修改中运行，其独立命令为 `pnpm --dir ide test`、
-`pnpm --dir ide typecheck`、`cargo test --manifest-path ide/src-tauri/Cargo.toml`。
-仍需 Windows/Linux CI，Linux UI 在 Xvfb 下运行；性能报告说明日志与既有的
-包装类型结构体环检测缺口。
+历史基线 **8f90aca** 在 Windows 显式 clang 23.1.2 下记录 343 根+104 包=447 项，
+不是修改后实时计数。[性能报告](docs/p2-compiler-performance.md)保留具体实验与失败：
+1600 结构体合成链 typecheck 中位数 602.866→2.398ms，不能推为所有项目端到端加速。
+数组等包装类型间接结构体环仍为已知检查器限制。
 
-目录：src/tests 为编译器/CLI/安装器与回归，stdlib/examples 为库/示例，
-selfhost 为自举子集，crates/aoxn-pkg 为独立包管理器，ide/web 为 IDE/Windows
-Web 基准，dist/package.ps1 打包，tools/compiler_perf.py 为无 clang 交错基准，
-docs 为当前文档。**wiki 已冻结，不作为当前权威**。
+目录：src/tests 为编译器与回归，selfhost 为自举子集，stdlib/examples 为库/示例，
+crates/aoxn-pkg 为包管理，ide/web 为 IDE/Windows Web 基准；dist/package.ps1 打包，
+tools/compiler_perf.py 测量编译耗时；docs 为维护文档，**wiki 冻结且不作为当前权威**。
 
-贡献遵守 [AGENTS.md](AGENTS.md)，漏洞按 [SECURITY.md](SECURITY.md) 私报。
+贡献遵守 [AGENTS.md](AGENTS.md)，漏洞私报见 [SECURITY.md](SECURITY.md)。
 许可证 [Apache-2.0](LICENSE)。

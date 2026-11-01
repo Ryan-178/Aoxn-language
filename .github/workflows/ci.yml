@@ -5,10 +5,18 @@ on:
     branches: [main]
   pull_request:
 
+# Validation ownership:
+# - This workflow: compiler/pipeline/stdlib/TS/UI tests and explicit pkg tests
+#   on Windows + Linux; Linux also exercises the X11 backend under Xvfb.
+# - release.yml: Windows installer packaging/install/doctor/run smoke checks
+#   on version tags or manual dispatch, not on every push.
+# - web-bench.yml: Windows web functional parity + reference benchmark, with
+#   its own web/** path filters; root Cargo tests do not run that suite.
+# - IDE: excluded from the root Cargo workspace and NOT validated here.
+#   Separate checks: cargo test --manifest-path ide/src-tauri/Cargo.toml,
+#   pnpm --dir ide test, and pnpm --dir ide typecheck (see ide/package.json).
 jobs:
-  # Windows is the FIRST-CLASS platform: the installer, the release
-  # packaging and the Win32/GDI UI backend live here. This job runs the
-  # whole suite.
+  # Windows is the FIRST-CLASS platform: Win32/GDI and WinHTTP tests run here.
   windows:
     runs-on: windows-latest
     steps:
@@ -36,24 +44,33 @@ jobs:
       - name: Build
         run: cargo build
 
-      - name: Test
-        run: cargo test
+      # A non-virtual workspace defaults to the root package, not every member.
+      - name: Test compiler (pipeline, stdlib, TS, UI)
+        run: cargo test -p aoxn --locked
+
+      # Use Cargo directly: run_pkg_tests.sh is a local Windows SAC workaround,
+      # and its unreferenced stamp does not guarantee a new binary hash.
+      - name: Test package manager
+        run: cargo test -p aoxn-pkg --locked
 
       - name: Smoke test
         shell: pwsh
         run: |
           cargo run -- run examples\hello.ax
+          if ($LASTEXITCODE -ne 0) { throw "hello.ax failed (exit $LASTEXITCODE)" }
           cargo run -- run examples\strings.ax
+          if ($LASTEXITCODE -ne 0) { throw "strings.ax failed (exit $LASTEXITCODE)" }
           cargo run -- run examples\stdlib_demo.ax
+          if ($LASTEXITCODE -ne 0) { throw "stdlib_demo.ax failed (exit $LASTEXITCODE)" }
           cargo run -- build examples\primes.ax -o primes.exe
+          if ($LASTEXITCODE -ne 0) { throw "primes build failed (exit $LASTEXITCODE)" }
           $count = .\primes.exe
+          if ($LASTEXITCODE -ne 0) { throw "primes execution failed (exit $LASTEXITCODE)" }
           if ("$count" -ne "9592") { throw "primes returned $count, expected 9592" }
 
-  # Linux (v0.46.0): the compiler itself (ELF objects, -lm, no /STACK flag),
-  # the whole suite, and the X11 UI backend — linked against the real
-  # libX11/libXft, then driven for 30 real frames under Xvfb by
-  # examples/ui_probe_x11.ax. The Windows-only surface (installer stub,
-  # WinHTTP transport) stays gated to the windows job.
+  # Linux: compiler and package-manager tests plus the X11 UI backend,
+  # linked against libX11/libXft and driven for 30 real frames under Xvfb.
+  # The Windows-only surface (installer, WinHTTP) is not covered here.
   linux:
     runs-on: ubuntu-latest
     steps:
@@ -80,8 +97,14 @@ jobs:
       - name: Build
         run: cargo build
 
-      - name: Test
-        run: cargo test
+      # A non-virtual workspace defaults to the root package, not every member.
+      - name: Test compiler (pipeline, stdlib, TS, UI)
+        run: cargo test -p aoxn --locked
+
+      # Use Cargo directly: run_pkg_tests.sh is a local Windows SAC workaround,
+      # and its unreferenced stamp does not guarantee a new binary hash.
+      - name: Test package manager
+        run: cargo test -p aoxn-pkg --locked
 
       - name: Smoke test
         run: |

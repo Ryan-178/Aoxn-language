@@ -12,7 +12,7 @@
 
 每条缺口用同一个格式写：**缺什么 → 挡住了什么 → 要动哪里 → 代价 → 解锁**。
 「要动哪里」给的是**实测的文件清单**，因为 Aoxn 的语言改动成本高度可预测
-（见 §6）。
+（见 §4）。
 
 | 缺口 | 一句话 | 直接挡住 |
 |---|---|---|
@@ -50,7 +50,8 @@
 **挡住了什么**
 
 - **一切「多处可见的同一对象」**。唯一的例外是**堆句柄**
-  （`dict[V]`、`TableModel`、`FileTable`、`Vec` 都是 `struct X*`）。
+  （`dict[V]` 直接是 C 指针；`TableModel`、`FileTable`、`Vec`
+  则是携带堆指针的值结构体，不是所有句柄都同一种 C 表示）。
   想让对象可共享，唯一的办法就是把它做成句柄——于是每个容器的
   「是不是同一个东西」语义都不一致。
 - **别名悬垂**。这不是理论问题：v0.39.2 的 `0xC0000374` 崩溃
@@ -206,13 +207,13 @@ one namespace**」，即使写 `import { helper, Vec } from ...` 也注明
 加上 `stdlib.ax` 的 `vec_` / `err_` / `out_` / `str_`。
 **46 个规划模块 × 每个几十个函数**，靠手写前缀维持，是一条会越来越紧的绳子。
 
-**要动哪里**　`src/parser.rs` 的 import 形式、`src/lib.rs`（保留模块身份）、
+**当时预估的改动面（历史，不是当前待办）**　`src/parser.rs` 的 import 形式、`src/lib.rs`（保留模块身份）、
 `src/typecheck.rs`（名字解析加命名空间层）、`src/codegen_c.rs`
 （C 符号改名以避免 clang 侧撞名——AGENTS.md 已有 keyword 表，
 命名空间前缀是同一机制的扩展）、`selfhost/load.ax` + typecheck + codegen 镜像。
 
 **代价　中～大**。**解锁　最大**：它是 46 个模块的地基。
-**这项排第一** —— 不是因为它解锁了某个具体的库，而是因为**不做它，
+**当时这项排第一** —— 不是因为它解锁了某个具体的库，而是因为**不做它，
 stdlib 每加一个模块都在给未来的自己挖坑**。
 
 **v0.43.0 的解法**　`src/resolve.rs` 在 AST 上做名字解析：每个模块算出自己
@@ -379,11 +380,10 @@ def main():
 归一化、插值、积分、坐标轴缩放都要考虑除零。数组索引也是无检查的
 （`docs/spec.md:60`），所以数值代码还要自己防越界。
 
-**要动哪里**　库层解决即可（语言不改）：在 `stdlib/math.ax` 里统一定下
-`fdiv` / `is_nan` / `is_inf`，别让每个库各写一遍。
-
-**代价　零**（这是**库层**的缺口，不是语言的）。这也是 §2/§5 里
-三个数值库的**最便宜前置**。
+**当前库层状态**：[`stdlib/math.ax`](../stdlib/math.ax) 已提供 `fdiv`、
+`NaN`/`Inf`/`NInf` 和 `is_nan`/`is_inf`/`is_fin`（测试见
+[`tests/math.rs`](../tests/math.rs)）。数值库应复用这些 helper；这项库层
+前置已完成，但原生 `/` 的除零契约没有改变，不表示语言新增了运行时检查。
 
 ### D4 没有 `inf` / `nan` 字面量
 
@@ -417,9 +417,9 @@ f-string 同样（`docs/spec.md:136`）。**没有格式说明符、没有 `%g`�
 - 任何科学计算输出
 - f-string 的 `{x:.2f}`（roadmap 第 5 条已列）
 
-**要动哪里**　`src/codegen_c.rs` 里 float→string 的发射，
-`selfhost/codegen.ax` 的 `j_fmt_f`（`stdlib/json.ax` 已经有
-一个手写的 `~%.15g`，**可以直接提升为通用实现**）。
+**要动哪里**　`src/codegen_c.rs` 与 `selfhost/codegen.ax` 的 float→string
+发射。可参考 `stdlib/json.ax` 的 `j_fmt_f`（手写 `~%.15g`），但它目前
+不是语言 print/f-string 的格式说明符支持。
 
 **代价　小。**
 
@@ -531,8 +531,8 @@ x86-64 上函数指针与数据指针同宽、同寄存器传递，所以把 ext
 
 ## 4. 补语言特性的一般成本模型
 
-Aoxn 是**自举语言**——编译器用自己写的。这让每条语言特性的成本高度可预测。
-一条特性必须同时出现在：
+Aoxn 是**自举语言**——编译器用自己写的。这让每条语言特性的成本需要考虑两套实现。
+下面是可能涉及的文件，不代表每次都必须同时修改：
 
 ```
 src/lexer.rs  src/parser.rs  src/ast.rs  src/typecheck.rs  src/codegen_c.rs
@@ -542,12 +542,17 @@ docs/spec.md  tests/pipeline.rs
 
 **代价 ≈ 上列文件里需要动的那几个。** 两个经验：
 
-1. **纯语法**（E1–E4、E6）只碰 lexer/parser/AST + 两处镜像 → **小**
-2. **发射层的改动**会连带 `selfhost/codegen.ax` —— 而 selfhost 镜像必须与
-   Rust 编译器**逐字节**产出同样的 C，否则固定点测试失败（AGENTS.md）。
-   凡是**产生新 C 文本**的特性，成本自动 ×2。
+1. 纯语法或脱糖可能复用既有 AST，但默认值、幂等特性也涉及检查/发射；
+   不能仅凭「语法糖」就认定只改 parser。
+2. 自举路径上使用的发射行为需要同步 `selfhost/codegen.ax`；未进入该路径
+   的新特性可以暂留 Rust-only，但必须记录 stage-2 的覆盖边界。
+3. `selfhost_driver_self_compiles` 比较两种构建方式下同一个 selfhost emitter
+   的 C/对象，不能证明它与 Rust emitter 逐字节相同。直接比较由
+   [`tests/c_emitter_parity.rs`](../tests/c_emitter_parity.rs) 在明确公共子集上
+   执行，已知差异另行固定；ABI 由 [`tests/c_abi.rs`](../tests/c_abi.rs) 验证。
 
-固定点测试是这项语言的自设护栏，也是它的税。
+两套 emitter 的维护通常会增加成本，但不是每项新语法自动 ×2。当前契约与
+已知差异见 [`c-compatibility.md`](c-compatibility.md)。
 
 ---
 
@@ -560,7 +565,7 @@ docs/spec.md  tests/pipeline.rs
 | **3** | **float 格式说明符 + `%g`**（D5） | 小 | 所有数值输出（现成实现已在 json.ax 里） |
 | **4** | **元组 / 多返回值**（B3） | 中 | 大量库的 API 形态；sret ABI 已存在 |
 | ~~**5**~~ | ~~**argv**（D1）~~ **v0.42.0 已闭合** | 小 | `argc()` / `arg(i)` 落地；sys / argparse 解除阻塞（pytest 还差运行器） |
-| **6** | **E1–E4、E6 一批语法糖** | 小 | 整个生态的可读性 |
+| **6** | **E6 推导式**（E1–E4 已在 v0.51.0/v0.51.2 落地） | 小 | 整个生态的可读性 |
 | **7** | `dict` 换哈希/排序数组（B2） | 中 | 会话、路由表、词表的规模 |
 | **8** | **`enum` / 可标记联合**（B1） | 大 | pandas、ORM —— 唯一出路 |
 | **9** | 运算符重载（C5） | 中 | numpy 语法、BigInt（**但会削弱可验证性，谨慎**） |
@@ -589,4 +594,4 @@ docs/spec.md  tests/pipeline.rs
 
 - [`stdlib-todo.md`](stdlib-todo.md) —— 46 个库的排期与可行性；本文档是它的「为什么」
 - [`spec.md`](spec.md) —— 语言规范；本文档标注的 roadmap 条目对应它的 1–9 条
-- [`selfhost.md`](selfhost.md) —— 自举现状；§4 的成本模型依赖于它
+- [`selfhost.md`](selfhost.md) —— 历史评估及当前源码/测试入口；§4 区分固定点与直接 parity

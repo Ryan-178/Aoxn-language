@@ -1,24 +1,29 @@
-﻿# Self-Hosting Feasibility Assessment
-> **v0.29.0 status note (2026-10-01):** self-hosting has long since passed the
-> fixed point this assessment planned for. Since v0.29.0 the self-hosted
-> compiler's codegen emits C text (mirroring `src/codegen_c.rs`) instead of
-> driving LLVM-C, and the fixed point compares the **generated C text and
-> object files** byte-for-byte between the Rust-built and the Aoxn-built
-> compilers — on every platform with clang, no LLVM library involved. The
-> authoritative, current description lives in
-> [wiki/Self-Hosting.md](../wiki/Self-Hosting.md); this document is preserved
-> as the original feasibility analysis.
+# Self-Hosting Feasibility Assessment
 
-> **v0.29.0 status note (2026-10-01):** self-hosting has long since passed the
-> fixed point this assessment planned for. Since v0.29.0 the self-hosted
-> compiler's codegen emits C text (mirroring `src/codegen_c.rs`) instead of
-> driving LLVM-C, and the fixed point compares the **generated C text and
-> object files** byte-for-byte between the Rust-built and the Aoxn-built
-> compilers — on every platform with clang, no LLVM library involved. The
-> authoritative, current description lives in
-> [wiki/Self-Hosting.md](../wiki/Self-Hosting.md); this document is preserved
-> as the original feasibility analysis.
+> **Historical assessment (v0.19-era), not the current implementation guide.**
+> The original analysis, estimates and LLVM-C experiment below are preserved
+> as historical evidence; paths such as `examples/ffi_llvm.ax` refer to that
+> tree, not files required by today's checkout. Since v0.29.0 both compiler
+> implementations emit C and use clang, with no LLVM-C library dependency.
+>
+> **Current evidence:** [`selfhost/driver.ax`](../selfhost/driver.ax) loads,
+> checks and emits C via [`selfhost/codegen.ax`](../selfhost/codegen.ax).
+> [`selfhost_driver_self_compiles`](../tests/pipeline.rs) builds a driver
+> with Rust and with Aoxn, then compares those drivers' generated C and
+> objects (masking only Windows COFF timestamps). Both drivers execute the
+> **selfhost emitter**: this is cross-stage reproducibility, not a direct
+> Rust-emitter/selfhost-emitter equivalence proof.
+> [`tests/c_emitter_parity.rs`](../tests/c_emitter_parity.rs) separately
+> compares complete C bytes from the two emitters on an explicit common
+> subset and pins known gaps separately. Neither test proves all-feature
+> equivalence. See [`c-compatibility.md`](c-compatibility.md) for the current
+> C/ABI contract and [`platform-support.md`](platform-support.md) for
+> Windows/Linux support. Stage-2 still lacks dict/None/function-pointer/
+> exception and argv support; the production CLI remains Rust.
+> The [wiki](../wiki/Self-Hosting.md) is frozen historical material, not the
+> authority for current status.
 
+## Original assessment
 
 > Can Aoxn be rewritten in Aoxn? Short answer: **yes — and stages 1–3 are
 > underway**: the Aoxn lexer, parser and type checker written in Aoxn live in

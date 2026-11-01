@@ -1,5 +1,17 @@
 # 调查报告：Aoxn 能否摆脱 LLVM 依赖
 
+> **历史边界与当前入口**：§0–§6 是 v0.27.0 时点的调查和方案，§7 保留
+> v0.27.1 原型实测及 v0.29.0 迁移记录；其中行号、测试总数、旧文件、
+> 环境变量和平台矩阵均属于对应版本，不是当前操作指南。L1 已完成，
+> L2/L3 未完成：当前仍依赖 clang 编译/链接，不能称为完全脱离 LLVM 家族工具。
+> 当前实现见 [`src/codegen_c.rs`](../src/codegen_c.rs)、
+> [`selfhost/codegen.ax`](../selfhost/codegen.ax) 和
+> [`selfhost/driver.ax`](../selfhost/driver.ax)；ABI 与已知差异见
+> [`c-compatibility.md`](c-compatibility.md)。当前平台与 CI 是 Windows/Linux，
+> macOS 不受支持，详见 [`platform-support.md`](platform-support.md) 和
+> [CI 配置](../.github/workflows/ci.yml)。wiki 自 v0.29.3 起冻结，
+> §5 当年的 wiki 同步计划不再适用。
+
 | | |
 |---|---|
 | 日期 | 2026-09-30 |
@@ -259,11 +271,13 @@ Phase 2（转默认 + 去 LLVM-C 库 + `selfhost/codegen.ax` 跟进 + 固定点�
    映射：struct→C struct、数组包单字段结构体、`__builtin_*` 运行时面），`selfhost/driver.ax` 改为
    写出 `<out>.obj.c` 并 `clang -O3 -w -c` 生成目标文件；`emit_ir`→`emit_c`、`gen_ir_text`→
    `gen_c_text`、`gen_dispose` 删除（无句柄可释放）。
-3. **固定点改 C 文本对比**：`selfhost_driver_self_compiles` 现在要求 stage-1（Rust 构建）与
-   stage-2（Aoxn 构建）编译器对同一程序产出**逐字节一致的 C 文本**（clang 对相同输入是确定性的，
-   目标文件随之也逐字节一致）。旧的 Windows-only 跳过条件（`LLVM-C.lib` 存在）删除——测试改为
-   在找不到 clang 时跳过，从此在所有 Tier-1/Tier-2 平台可跑（platform-support §7 的最后一项缺口
-   就此关闭）。
+3. **固定点改 C 文本对比**：`selfhost_driver_self_compiles` 比较同一个 Aoxn driver
+   经 Rust 编译和经 Aoxn 编译后执行所产出的 C 文本与对象；两条路径都执行
+   `selfhost/codegen.ax`，并非 Rust emitter 与 selfhost emitter 的直接比较。
+   C 文本逐字节比较，对象仅在 Windows 屏蔽 COFF 时间戳。测试在找不到 clang
+   时跳过；当前支持的平台边界见 [`platform-support.md`](platform-support.md)。
+   另有 [`tests/c_emitter_parity.rs`](../tests/c_emitter_parity.rs) 对明确公共子集
+   直接比较两个 emitter 的完整 C 字节，已知差异单独断言，不计为 parity 通过。
 4. **工具链面**：优化级别选择编译生成 C 的 clang `-O`（C 文本与级别无关，由
    `c_text_is_opt_level_independent` 测试固定）；CI 只装 clang（Windows 仍用 winget 的 LLVM 包
    提供其 clang，Linux `apt-get install clang`，macOS 用预装 Apple clang）。
