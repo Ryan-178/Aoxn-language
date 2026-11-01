@@ -159,6 +159,17 @@ advisory (glib, `RUSTSEC-2024-0429`) stays accepted in `ide/src-tauri/audit.toml
 with a dated re-check. No compiler suite re-ran for it: nothing in `src/`,
 `tests/`, the Aoxn sources or any `Cargo.lock` changed.
 
+**Linux CI, 2026-11-01**: one `aoxn-pkg` test was Windows-only in its expectation.
+The archive entry `demo/C:/Users/victim/…` is an absolute path on Windows and an
+ordinary directory named `C:` on POSIX, where extraction keeps it inside the
+destination — so the guard accepted what the test demanded it refuse. The test now
+derives its absolute spelling from `temp_dir()` and both hosts assert one rule; a
+second test pins the divergence (refused here, contained there, never escaping).
+The guard's own code is unchanged. Verified: **105/105 `aoxn-pkg` lib tests** on
+Windows and `cargo check --workspace --tests --target x86_64-unknown-linux-gnu`.
+Not run: the Linux test binary itself (no WSL or Docker on this machine) and the
+root `aoxn` suite, which this change does not touch. Details: `CHANGELOG.md`.
+
 Historical baseline **8f90aca** recorded 343 root + 104 package tests (447), with
 explicit clang 23.1.2 on Windows. This is a dated baseline, not a live count of
 the modified tree. The [performance report](docs/p2-compiler-performance.md)
@@ -315,6 +326,15 @@ cargo check --workspace --tests --target x86_64-unknown-linux-gnu
 与 `next start` 路由冒烟全部通过。唯一保留的 Rust 公告（glib
 `RUSTSEC-2024-0429`）连同本次复核仍记在 `ide/src-tauri/audit.toml`。
 本次未重跑编译器测试：src、tests、Aoxn 源码与任何 Cargo.lock 都未改动。
+
+**Linux CI 2026-11-01**：`aoxn-pkg` 有一项测试的预期只适用于 Windows。归档条目
+`demo/C:/Users/victim/…` 在 Windows 是绝对路径，在 POSIX 只是名叫 `C:` 的普通目录，
+解包会留在目标目录内——于是守卫放行的正是测试要求拒绝的。该测试改为从
+`temp_dir()` 导出绝对拼法，两个平台断言同一条规则；另一项测试钉住这次分歧（本机
+拒绝、他机内含，但都不逃逸）。守卫代码本身一字未改。已验证：Windows
+`aoxn-pkg` 库测试 **105/105**，`cargo check --workspace --tests --target
+x86_64-unknown-linux-gnu` 通过。未运行：本机无 WSL 与 Docker，Linux 测试二进制
+未执行；根 `aoxn` 测试不受影响也未重跑。详见 `CHANGELOG.md`。
 
 历史基线 **8f90aca** 在 Windows 显式 clang 23.1.2 下记录 343 根+104 包=447 项，
 不是修改后实时计数。[性能报告](docs/p2-compiler-performance.md)保留具体实验与失败：

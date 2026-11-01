@@ -287,8 +287,11 @@ registry snapshots, `clean` deletes everything.
   immune to tar/gzip quirks and re-packing.
 - **Transport digest** (`tarball_sha256`, v0.32.0) additionally lets the
   HTTP backend reject a corrupted transfer before it reaches the cache.
-- tarball extraction rejects `..` traversal entries (supply-chain hard
-  stop).
+- tarball extraction refuses any entry that would write outside its destination:
+  `..` traversal, a remainder that is absolute **on this host** (`C:/x` on
+  Windows, `/x` on POSIX — the guard follows the host because `Path::join` does),
+  and every hard link or symlink. A refused archive writes nothing at all: the
+  checks run before any directory or file is created (supply-chain hard stop).
 - typosquat guard on newly added packages.
 - `aoxn audit` checks the lockfile against an advisory database — the
   registry's own `advisories/`, or one configured globally.

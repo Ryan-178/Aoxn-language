@@ -159,6 +159,17 @@ unrelated quantities 鈥?so every real download failed with a bogus integrity
 error, and its test was green only because it had written the tarball digest
 into the manifest-hash field.
 
+**"Absolute" is a host property, and so is any test that hardcodes one spelling**:
+`C:/x` is absolute on Windows and an ordinary directory called `C:` on POSIX. The
+tarball guard follows the host because the call it guards — `dest.join(name)` —
+does; the host-INDEPENDENT property is containment (no entry writes outside its
+destination). Derive the spelling from `std::env::temp_dir()` when a test needs
+"an absolute path", and pin the divergent case in both directions. Two traps this
+cost: a literal `C:/…` in a test is a Windows-only test (it made the Linux CI run
+red), and `tmp.join("C:")` is NOT a containment probe on Windows — a bare drive
+letter there means "the current directory on that drive" and `exists()` answers
+true.
+
 **The requirements fingerprint is `"<owner-pkg>/<dep>" -> "<req>@<registry>"`**:
 the owner prefix stops two workspace members from overwriting each other's
 entry, and the value must never embed a filesystem path (an absolute dir in

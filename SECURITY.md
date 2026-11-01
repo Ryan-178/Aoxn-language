@@ -72,6 +72,10 @@ verification does not establish sandboxing or constitute a security audit.
   mismatches rebuild and verify. Broader exclusions or unverified reuse are flaws.
 - Extraction rejects escaping/absolute paths and links. Dependency/cache path
   components are validated. npm-import checks integrity and Aoxn metadata.
+  "Absolute" is host-defined (`C:/x` is a drive path on Windows, a directory
+  called `C:` on POSIX), and the guard follows the host because `Path::join`
+  does; the host-independent property is that no entry writes outside its
+  destination, pinned by tests on both spellings.
   HTTP registries are plain HTTP, not HTTPS; an untrusted index can replace data
   and hashes. Registry tiers are claims, not independent audits.
 - Parallel workers own forked registry state, unknown schemas fail, and prod
@@ -193,6 +197,9 @@ IDE/Web 的 JS/Tauri 为另一供应链边界。发射器/ABI 验证不是安全
 - checksum 锚定内容树，tarball_sha256 校验传输字节；旧索引缺摘要不豁免内容验证。
   热复用重算真实树，**只排除自身 index.ax shim**，不符则重建校验。
 - 解包拒绝逃逸/绝对路径/链接，校验依赖和缓存路径；npm-import 验完整性与元数据。
+  “绝对”由宿主定义（`C:/x` 在 Windows 是驱动器路径，在 POSIX 只是名为 `C:` 的
+  目录），守卫跟随宿主是因为 `Path::join` 跟随宿主；与宿主无关的性质是**任何条目
+  都不得写到目标目录之外**，两种拼法各有测试钉住。
   注册表 HTTP 为明文，恶意索引可同时替换数据和摘要；信任等级是声明而非审计。
 - 并行 worker 各有 registry state；未知 schema 失败；生产剪枝保留生产可达包。
 - 安装器限制在选定根、更新 PATH、自检后再确认二进制。默认不下载，InstallClang

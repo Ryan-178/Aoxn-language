@@ -65,6 +65,37 @@ minor bumps while pre-1.0: each minor version is a language milestone.
   correcting stale version/test totals, installer download behavior and the
   scope of what the self-host fixed point proves.
 
+### Package manager tests on Linux
+
+The Linux CI run failed one `aoxn-pkg` test, not one product behavior:
+`unpack_rejects_an_absolute_entry_path` fed the archive entry
+`demo/C:/Users/victim/outside-archive.txt` and demanded a rejection, but a drive
+specifier is absolute **only on Windows** — on POSIX that name is an ordinary
+directory called `C:`, `dest.join` keeps it inside the destination, and the guard
+accepted it. The escape the test documents was real on both hosts; the test was
+written with Windows path semantics and could not see the Linux spelling.
+
+- That test now derives its entry name from `std::env::temp_dir()`, so each host
+  asks itself whether the remainder is absolute and both must answer "refused,
+  with the `absolute` diagnostic". No platform branch in the assertion.
+- `a_windows_shaped_remainder_never_escapes_the_destination` pins the divergence:
+  refused on Windows, accepted-but-contained on POSIX, and in neither case
+  written at the path the entry names. The containment probe deliberately avoids
+  `tmp.join("C:")` — joining a bare drive letter on Windows yields that drive's
+  current directory, which exists and hides the check.
+- `check_contained`'s doc records why following the host is the correct rule: the
+  guard must refuse exactly the names `Path::join` would resolve outside `dest`,
+  and `join` is host-defined. What may not vary by host is containment.
+- `unpack_rejects_a_posix_absolute_remainder` no longer names `/etc/passwd`; it
+  uses its own probe path and asserts the named file stayed unwritten.
+
+No production logic changed — the guard's code is untouched, only its
+documentation. Verified: 105/105 `aoxn-pkg` lib tests on Windows (104 before, plus
+the divergence test) and `cargo check --workspace --tests --target
+x86_64-unknown-linux-gnu`. Not run: the Linux test binary itself — this machine
+has neither WSL nor Docker, so the POSIX arm is pinned from the CI log that
+reported the failure rather than a local run.
+
 ### Dependency security (IDE and web benchmark)
 
 Seven of the eight open dependency advisories are now closed; the eighth is

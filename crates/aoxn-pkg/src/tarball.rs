@@ -177,6 +177,17 @@ pub fn pack(pkg_dir: &Path, pkg_name: &str, out_path: &Path) -> Result<usize, Pk
 ///
 /// Components are inspected rather than the string, so a legitimate
 /// `a..b` is no longer rejected while `a/../b`, `/abs`, `C:\abs` and `` are.
+///
+/// The walk follows the HOST (`Path::is_absolute`, `Component::Prefix`)
+/// because the call it guards follows the host too: `dest.join(name)` discards
+/// `dest` for exactly the names THIS host roots a path with. `C:/x` is
+/// absolute on Windows and a directory called `C:` on POSIX, where `join`
+/// keeps it inside `dest` — so the classification is allowed to differ per
+/// host while the guarantee ("no entry writes outside `dest`") never may.
+/// Both halves are pinned: `unpack_rejects_an_absolute_entry_path` derives the
+/// absolute spelling from the running host, and
+/// `a_windows_shaped_remainder_never_escapes_the_destination` pins the name
+/// that only one host reads as absolute.
 fn check_contained(rel: &std::path::Path, entry_name: &str) -> Result<(), PkgError> {
     let bad = |why: &str| {
         Err(PkgError::Registry(format!(
@@ -453,34 +464,107 @@ mod tests {
     }
 
     use tar::EntryType as EntryKind;
+
+    /// An entry NAME, spelled the way this host spells an absolute path:
+    /// forward slashes (the archive's own separator) over a host-native root.
+    /// Windows gets `C:/Users/…/x`, POSIX gets `/tmp/…/x` — hardcoding either
+    /// one is a Windows-only or a Linux-only test.
+    fn absolute_entry(pkg: &str, abs: &Path) -> String {
+        format!("{pkg}/{}", abs.to_string_lossy().replace('\\', "/"))
+    }
+
+    /// Every file under `dir` — the probe for "a refused archive writes
+    /// nothing", since `unpack` creates `dest` before it reads a single entry.
+    fn tree(dir: &Path) -> Vec<PathBuf> {
+        let mut out = Vec::new();
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return out;
+        };
+        for e in entries.flatten() {
+            let p = e.path();
+            if p.is_dir() {
+                out.extend(tree(&p));
+            } else {
+                out.push(p);
+            }
+        }
+        out
+    }
+
     /// THE FIRST ESCAPE: an entry whose remainder is ABSOLUTE. `Path::join`
     /// with an absolute path discards the destination entirely, so
     /// `stripped.contains("..")` never got a chance to fire and the file
-    /// landed at the path it named. Reproduced on Windows with a drive
-    /// letter and on POSIX with a leading `/` (`demo//etc/passwd`).
+    /// landed at the path it named. Reproduced on Windows with a drive letter
+    /// and on POSIX with a leading `/` — which is why the spelling is DERIVED
+    /// from `temp_dir()` here instead of written down: the same literal cannot
+    /// be absolute on both hosts (see the next test).
     #[test]
     fn unpack_rejects_an_absolute_entry_path() {
         let tmp = temp_root("abs");
-        let outside = tmp.join("outside-archive.txt");
+        let victim = tmp.join("victim").join("outside-archive.txt");
         let tgz = tmp.join("evil.tar.gz");
-        raw_tar_gz(&tgz, &[("demo/C:/Users/victim/outside-archive.txt", EntryKind::Regular, None)]);
+        let entry = absolute_entry("demo", &victim);
+        raw_tar_gz(&tgz, &[(entry.as_str(), EntryKind::Regular, None)]);
         let dest = tmp.join("out");
         let err = unpack(&tgz, &dest, "demo").unwrap_err();
         assert!(format!("{err}").contains("absolute"), "got: {err}");
-        assert!(!outside.exists(), "the archive wrote outside the destination");
+        assert!(!victim.exists(), "the archive wrote where its name pointed");
+        assert!(tree(&dest).is_empty(), "a refused archive writes nothing");
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
-    /// A POSIX-shaped absolute remainder, checked on Windows too, because the
-    /// component walk is what rejects it and it must not depend on the host.
+    /// The other half of the rule, and the reason the test above could not
+    /// hardcode its entry name: `C:/…` is absolute on Windows and an ordinary
+    /// directory called `C:` on POSIX. The guard classifies with the host
+    /// because `Path::join` does, so what has to be host-independent is the
+    /// outcome that matters — nothing outside `dest`. The Linux CI run proved
+    /// the POSIX arm by ACCEPTING this archive (`unwrap_err()` panicked on an
+    /// `Ok` value), which is containment, not an escape.
+    #[test]
+    fn a_windows_shaped_remainder_never_escapes_the_destination() {
+        // The remainder as the ARCHIVE spells it, and its entry name.
+        let rel = "C:/Users/victim/outside-archive.txt";
+        let tmp = temp_root("drv");
+        let tgz = tmp.join("evil.tar.gz");
+        let entry = format!("demo/{rel}");
+        raw_tar_gz(&tgz, &[(entry.as_str(), EntryKind::Regular, None)]);
+        let dest = tmp.join("out");
+        let res = unpack(&tgz, &dest, "demo");
+        if cfg!(windows) {
+            let err = format!("{}", res.unwrap_err());
+            assert!(err.contains("absolute"), "got: {err}");
+            assert!(tree(&dest).is_empty(), "a refused archive writes nothing");
+        } else {
+            // POSIX has no drive prefix, so this is the relative name `C:` —
+            // accepted, and extracted INSIDE the destination.
+            res.unwrap();
+            let landed = dest.join(rel);
+            assert!(landed.exists(), "`{}` is not under dest", landed.display());
+        }
+        // NOT `tmp.join("C:")`: on Windows a bare drive letter is a *relative*
+        // path (the current directory on that drive), so joining one hides the
+        // very thing being probed. The archive's own target is what must stay
+        // unwritten.
+        assert!(!Path::new(rel).exists(), "the archive wrote where its name pointed");
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// A POSIX-shaped absolute remainder, and it is refused on BOTH hosts: a
+    /// leading `/` is a root component in `Path::components` everywhere, so
+    /// unlike the drive-letter spelling this one needs no host branch.
     #[test]
     fn unpack_rejects_a_posix_absolute_remainder() {
         let tmp = temp_root("posixabs");
         let tgz = tmp.join("evil.tar.gz");
-        raw_tar_gz(&tgz, &[("demo//etc/passwd", EntryKind::Regular, None)]);
+        raw_tar_gz(&tgz, &[("demo//etc/aoxn-pkg-probe.txt", EntryKind::Regular, None)]);
         let dest = tmp.join("out");
         let err = unpack(&tgz, &dest, "demo").unwrap_err();
         assert!(format!("{err}").contains("absolute"), "got: {err}");
+        assert!(
+            !Path::new("/etc/aoxn-pkg-probe.txt").exists(),
+            "the archive wrote where its name pointed"
+        );
+        assert!(tree(&dest).is_empty(), "a refused archive writes nothing");
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
