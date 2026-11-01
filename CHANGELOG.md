@@ -75,6 +75,13 @@ directory called `C:`, `dest.join` keeps it inside the destination, and the guar
 accepted it. The escape the test documents was real on both hosts; the test was
 written with Windows path semantics and could not see the Linux spelling.
 
+The test has been in the tree since v0.51.1: `5cb9588` is what made it visible,
+because that commit replaced the Linux job's bare `cargo test` (which in this
+non-virtual workspace runs only the root package) with an explicit
+`cargo test -p aoxn-pkg --locked` — the package manager's tests had never run on
+Linux in CI before. The same commit is why the runs at `5cb9588`, `ad8bcb4` and
+`0c17c9d` failed identically at "Test package manager" while Windows stayed green.
+
 - That test now derives its entry name from `std::env::temp_dir()`, so each host
   asks itself whether the remainder is absolute and both must answer "refused,
   with the `absolute` diagnostic". No platform branch in the assertion.
@@ -92,9 +99,14 @@ written with Windows path semantics and could not see the Linux spelling.
 No production logic changed — the guard's code is untouched, only its
 documentation. Verified: 105/105 `aoxn-pkg` lib tests on Windows (104 before, plus
 the divergence test) and `cargo check --workspace --tests --target
-x86_64-unknown-linux-gnu`. Not run: the Linux test binary itself — this machine
-has neither WSL nor Docker, so the POSIX arm is pinned from the CI log that
-reported the failure rather than a local run.
+x86_64-unknown-linux-gnu`. Not run locally: the Linux test binary itself — this
+machine has neither WSL nor Docker, so the POSIX arm was pinned from the CI log
+that reported the failure rather than a local execution.
+
+Hosted CI supplied that missing half: the run for `eace047` on `main` is green on
+**both** jobs, Linux included, and because the package-manager step no longer
+aborts, the Linux `Smoke test` and `X11 backend probe (Xvfb)` steps executed and
+passed for the first time since `5cb9588` turned the streak red.
 
 ### Dependency security (IDE and web benchmark)
 

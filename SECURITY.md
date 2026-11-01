@@ -147,6 +147,10 @@ The P2 maintenance follow-up reran the explicit locked compiler/package commands
 results and the Python checker tests are recorded in
 [repository maintenance evidence](docs/repository-audit.md). Hosted CI was not
 triggered; workflow syntax validation is local only.
+That is no longer the Linux picture: the 2026-11-01 tarball-test fix was landed on
+`main` and its hosted run passed on **both** jobs. Linux extraction containment is
+now executed by CI, not only cross-checked, and the steps the red run had blocked
+(`Smoke test`, X11 under Xvfb) ran again.
 
 ---
 
@@ -249,3 +253,6 @@ Windows 冒烟/发布逐条检查原生命令退出码，安装器下载仍为�
 [C 兼容证据](docs/c-compatibility.md)。不暗示新安全审计、IDE 验证、Linux 原生运行
 或完整安装器发布。P2维护后又执行显式locked编译器/包测试，结果与Python检查器
 测试见[仓库维护证据](docs/repository-audit.md)。未触发托管CI，workflow仅本地语法校验。
+2026-11-01 的 tarball 测试修复已落 main，其托管 CI **两个平台均通过**：Linux 解包
+内含性由 CI 实测而不只是交叉编译校验，曾被红跑的 `Smoke test` 与 Xvfb X11 探测也
+重新执行并通过。

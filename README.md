@@ -166,9 +166,12 @@ destination — so the guard accepted what the test demanded it refuse. The test
 derives its absolute spelling from `temp_dir()` and both hosts assert one rule; a
 second test pins the divergence (refused here, contained there, never escaping).
 The guard's own code is unchanged. Verified: **105/105 `aoxn-pkg` lib tests** on
-Windows and `cargo check --workspace --tests --target x86_64-unknown-linux-gnu`.
-Not run: the Linux test binary itself (no WSL or Docker on this machine) and the
-root `aoxn` suite, which this change does not touch. Details: `CHANGELOG.md`.
+Windows, `cargo check --workspace --tests --target x86_64-unknown-linux-gnu`, and
+the hosted CI run on `main` — **Windows and Linux both green**, where the Linux
+`Test package manager` step no longer aborts, so `Smoke test` and the X11 probe
+under Xvfb ran again for the first time since the streak turned red. The Linux
+test binary was not executed on this machine (no WSL or Docker); CI supplied that.
+Details: `CHANGELOG.md`.
 
 Historical baseline **8f90aca** recorded 343 root + 104 package tests (447), with
 explicit clang 23.1.2 on Windows. This is a dated baseline, not a live count of
@@ -333,8 +336,10 @@ cargo check --workspace --tests --target x86_64-unknown-linux-gnu
 `temp_dir()` 导出绝对拼法，两个平台断言同一条规则；另一项测试钉住这次分歧（本机
 拒绝、他机内含，但都不逃逸）。守卫代码本身一字未改。已验证：Windows
 `aoxn-pkg` 库测试 **105/105**，`cargo check --workspace --tests --target
-x86_64-unknown-linux-gnu` 通过。未运行：本机无 WSL 与 Docker，Linux 测试二进制
-未执行；根 `aoxn` 测试不受影响也未重跑。详见 `CHANGELOG.md`。
+x86_64-unknown-linux-gnu`，以及 main 上的托管 CI——**Windows 与 Linux 双双通过**；
+Linux 的 `Test package manager` 不再中断，`Smoke test` 与 Xvfb 下的 X11 探测因此
+重新执行并通过。本机无 WSL 与 Docker，Linux 测试二进制未本地执行，由 CI 补齐。
+详见 `CHANGELOG.md`。
 
 历史基线 **8f90aca** 在 Windows 显式 clang 23.1.2 下记录 343 根+104 包=447 项，
 不是修改后实时计数。[性能报告](docs/p2-compiler-performance.md)保留具体实验与失败：
