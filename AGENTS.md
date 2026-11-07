@@ -419,6 +419,9 @@ rejects fn-pointer parameters (threads go through
 | `"stdlib/hashlib"` | `sha256(data, len) -> hex`, `sha256_str`, the sha1/md5 twins, incremental `sha256_new/_update/_final` |
 | `"stdlib/hmac"` | `hmac_sha256/_sha1/_md5(key, msg) -> hex` |
 | `"stdlib/bisect"` / `"stdlib/heapq"` | `bisect_left/right`, `insort_left/right` (handles come back), `bisect_find`; `heap_push/_pop/_peek` (pop's value lands in `.res`) |
+| `"stdlib/csv"` | RFC 4180 parse/serialize: `csv_parse`/`csv_read_file` -> `CsvTable`, `csv_rows/cols/get/max_cols`, `csv_dumps` (CRLF) / `csv_dumps_lf`, `csv_row_text`, `csv_free`; errors are values (`err`/`msg`/`line`/`col`, no exceptions) |
+| `"stdlib/random"` | deterministic non-crypto MINSTD: `random_seed/next/below/range`, `random_float`, `random_float_next/range` (result in `.fval`); rejection sampling, error leaves state unchanged; no CSPRNG API |
+| `"stdlib/socket"` | minimal blocking IPv4 TCP: `socket_init`, `socket_connect`, `socket_listen`, `socket_accept`, `socket_send_bytes/str`, `socket_recv`, `socket_recv_all/line`, `socket_close`; `Sock{fd,err,msg}` values; Windows `-l ws2_32`, POSIX no extra lib; no DNS/UDP/IPv6/TLS/timeouts, no SO_REUSEADDR |
 | `"stdlib/ui_win"` (Windows: `-l user32 -l gdi32`) or `"stdlib/ui_x11"` (Linux) -- ONE import pulls the whole toolkit (`ui.ax` core + `ui_draw.ax` widget layer + the backend) | immediate-mode widget toolkit -- `docs/ui.md`, `examples/ui_gallery.ax` |
 | `"stdlib/net/http"` (Windows: `-l winhttp`) / `"stdlib/net/codec"` / `"stdlib/net/sse"` | HTTP transport, UTF-16/base64/url-encode helpers, SSE frames |
 | `"stdlib/openai/client"` / `"stdlib/anthropic/client"` (+ `blocks`, `tools`) | the two API SDKs (`oa_*` / `an_*`) -- `docs/openai-sdk.md`, `docs/anthropic-sdk.md` |
@@ -877,9 +880,10 @@ crates/aoxn-pkg       package manager crate (its own dependency set; see above)
     excludes the program path; `arg(i)` is 0-based and returns `""` out of
     range. **The `main(argc, argv)` wrapper and the argv globals are emitted
     ONLY when the program calls those two builtins** 鈥?every other program's C
-    text is byte-identical, which is why the self-host fixed point needs no
-    `selfhost/codegen.ax` mirror for argv (stage-2 does not know the builtins,
-    same status as the v0.40.0 features). `def main(argc: int)` is now a
+    text is byte-identical. **Historical v0.42.0 boundary:** argv needed no
+    `selfhost/codegen.ax` mirror for that fixed point because stage-2 did not
+    know the builtins then. The unreleased CLI batch now targets that mirror;
+    see the bounded scope under Self-hosting status. `def main(argc: int)` is a
     `type` error naming the builtins (it used to reach clang and surface as
     `internal`); `main` returns `int` or `void`, with the TS front end's
     `function main(): number` explicitly exempt.
@@ -936,9 +940,19 @@ crates/aoxn-pkg       package manager crate (its own dependency set; see above)
   casts between `int` and fn-ptr, `to_int(f)`); `None` + `T | None` is the
   only union form, `is None` / `is not None` narrow per branch (checker AND
   codegen keep the narrowed view), and print/operators reject a nullable
-  until narrowed. **The selfhost mirror has NONE of v0.40.0 yet** 鈥?
-  `selfhost/codegen.ax` emits no dict/None/fn-ptr/raise text, so the fixed
-  point only covers programs without them. Porting is future work.
+  until narrowed. **The selfhost mirror now covers all four v0.40.0 features**
+  (`None`/`T | None`/`dict[V]`/fn pointers/`raise`/`try`/`except`) with
+  byte-identical C on the parity corpus; see `docs/selfhost.md` for the
+  boundary (no namespace binding layer, no default parameters, no selective
+  imports, and `main` builtins are the v0.42.0 set). **`hint_expr` is
+  write-back on purpose**: it ALLOCATES type-arena entries, so it takes and
+  returns `Gen` with the result in `g.rt`. Returning only an int left the
+  caller's `t_*` Vec descriptors stale after a realloc (the v0.39.2 trap in a
+  new place), and `emit_let` also forgot to store `resolve_ty_node`'s CState
+  back into `g.c`; both crashed on an annotated array literal. Every
+  `resolve_ty_node` call site must assign the returned CState, and array
+  replication (`[x] * N`) must be part of the hint (`ival`) or the binding gets
+  an `ax_a_*_1` type while the expression is `_N`.
 - Arrays `[T; N]` and structs are first-class value types (copy on
   assignment/param/return). Indexing is unchecked (C-style); struct fields by
   name; construction requires every field by name (`Point(x=1, y=2)`).
@@ -1083,10 +1097,39 @@ crates/aoxn-pkg       package manager crate (its own dependency set; see above)
   (driver.ax) are the self-hosted `aoxn c`.
 - The Aoxn driver also compiles its own front end
   (`selfhost/driver_frontend_demo.ax`) and the whole `examples/` suite.
-  Next rung: porting `main.rs` CLI semantics. argv reached the LANGUAGE in
-  v0.42.0 (`argc()`/`arg(i)`), but stage-2 does not know those builtins (nor
-  assert/exit/dict/None/fn-ptr/raise) 鈥?the mirror is still on the pre-v0.40
-  subset, see the language rules above.
+  **Unreleased CLI batch:** the selfhost front end now ports `None` / `T | None`
+  (widen, branch narrowing, `is None` / `is not None`), `dict[V]` (heap handle,
+  annotation-only empty literal, reads/writes/del/`dict_has`/`len`/insertion
+  order), function pointers (values, annotations, indirect calls, `as` casts,
+  `to_int`, complete C declarators including fn-ptr returns) and
+  `raise`/`try`/`except` (pending-error slot, may-raise fixpoint, per-statement
+  hops, handler propagation, uncaught exit). The C matches the Rust emitter
+  byte-for-byte on the parity corpus (`tests/c_emitter_parity.rs`), while the
+  original `selfhost_driver_self_compiles` fixed point stays independent.
+  Parser/lexer positions are tracked for diagnostics: token columns are token
+  START columns (the earlier code recorded the end), and statements carry their
+  first token's position.
+  `selfhost/cli.ax` implements `help`/`version`/`check`/`c`/`build`/`run`/
+  `symbols`/`doctor`; `run` spawns the compiled program with an argv VECTOR
+  (Windows CRT `_spawnvp`, POSIX fork/execvp — never a shell), quotes Windows
+  arguments by CRT rules so empty/spaced/special arguments survive, and returns
+  the child's exit code. Options `-o`, `--O0..--O3`, `-l/-L`, `--cpu`,
+  `--backend c`, `--clang-arg`, `-g`, `--cc-warnings` and `--json` reach
+  codegen/link through argv; `AOXN_CLANG`/`AOXN_CPU`/`AOXN_CLANG_ARGS`/
+  `AOXN_CC_WARNINGS` defaults apply. A content-keyed run cache hashes the entry,
+  every transitive import, the compiler executable and every codegen option;
+  `AOXN_NO_CACHE` and `AOXN_CACHE_DIR` work. JSON diagnostics carry
+  stage/severity/code/file/line/col and W001 warnings. The loader resolves
+  `stdlib`/`stdlib/<module>` through `AOXN_STDLIB`/`AOXN_HOME/lib/stdlib`
+  (cwd `stdlib/` fallback).
+  **Still outside the selfhost CLI**: package-manager commands (explicitly
+  rejected, never forwarded to Rust), CSS assets / `--emit-assets` /
+  `--tailwind`, namespace/selective imports, build-command caching (run only),
+  and full doctor parity (no installed-root/examples rows, no arch in
+  `platform`, smoke compiles but does not capture child output). Imported
+  symbols are reported against the entry path because the loader has no file
+  registry. The Rust CLI remains the production entry point. See
+  `docs/selfhost.md` and `docs/c-compatibility.md`.
 - CRITICAL value-semantics discipline (the v0.11 segfault): a function
   taking `p: PState`/`c: CState` by value MUST return the struct 鈥?local
   `p.n_tag = vec_push(...)` mutations are discarded by the caller. All
@@ -1440,6 +1483,28 @@ crates/aoxn-pkg       package manager crate (its own dependency set; see above)
 - **None of the new modules may be imported into `stdlib/stdlib.ax`** (the
   self-host critical path). All are plain Aoxn EXCEPT `hmac.ax` (fn-ptr 鈥?
   header-marked `selfhost 灏氫笉鍙紪璇慲, off the fixed-point path).
+- **CSV / random / socket (v0.56 unreleased)** are standalone modules, not on
+  the selfhost critical path, and all three are compiled and run by the
+  selfhost CLI in tests:
+  - `stdlib/csv.ax` is RFC 4180 parse/serialize with value errors
+    (`err`/`msg`/`line`/`col`). Quoted commas/newlines/`""`, CRLF/LF, blank
+    lines (empty row, like Python), empty/trailing fields and a final record
+    without a newline are covered; dialect parameters/streaming are not. The
+    Rust test compares both the field matrix and `csv_dumps` bytes against
+    Python's `csv` module when Python is available.
+  - `stdlib/random.ax` is deterministic non-cryptographic MINSTD. Rejection
+    sampling avoids modulo bias; invalid bounds return `error=1` WITHOUT
+    advancing the state; `random_float_next/range` return the state and put the
+    float in `.fval` (a float return cannot carry an error). There is no
+    CSPRNG API and no time seeding.
+  - `stdlib/socket.ax` is blocking IPv4 TCP only (literal addresses, no DNS).
+    Windows and POSIX calls are guarded INSIDE each function; Windows C `int`
+    returns go through `sk_i32`; partial sends loop, `recv_all` handles EOF;
+    default listeners do NOT set SO_REUSEADDR. Windows links `-l ws2_32`.
+    Loopback tests cover Aoxn server + Rust client and Rust server + Aoxn
+    client plus refused connections and bind conflicts. The Linux code path is
+    implemented with the same externs but has NOT been executed natively here;
+    treat the Windows run as the only runtime evidence until Linux CI runs it.
 - **A stdlib module that NAMES one platform's API and nothing else does not
   link on the other one** (v0.50.1 fixed exactly this in `time.ax` +
   `datetime.ax`: `clang: error: linker command failed` with `undefined
@@ -1669,6 +1734,29 @@ crates/aoxn-pkg       package manager crate (its own dependency set; see above)
 - `pnpm dev` runs the whole workbench in a browser against an in-memory
   fixture (`lib/bridge.ts`, tree derived by `lib/tree.ts`) 鈥?layout work
   without a 12-minute native rebuild.
+- **The UI is the ZCode v3.17.2 design system** (rework after v0.46.0):
+  Zai Light/Dark tokens in `ide/app/zcode-theme.css`, Tailwind 4 via
+  `ide/postcss.config.mjs`, and adapted shadcn/Radix primitives under
+  `ide/components/ui` + ZCode's conversation/file-tree shells under
+  `ide/components/ai-elements`. Attribution lives in
+  `ide/THIRD-PARTY-NOTICES.md`. The archived ZCode monorepo is
+  `.zcode-src/` (gitignored reference only) 鈥?do NOT add `@zcode/*` as
+  workspace dependencies, and do not make the build read `.zcode-src/`.
+  When copying another ZCode component, strip `.js` import suffixes and
+  replace `@/i18n`, `@/store` and `@/services` with the IDE's own state.
+- **The shell is ZCode-shaped**: title bar, activity rail, resizable
+  sidebar/editor/assistant split, bottom dock (Output / Terminal / Source
+  Control / Preview), status bar. The assistant pane talks to a
+  user-configured provider through `ide_ai_chat` (OpenAI-compatible or
+  Anthropic; key in the app config file, never the webview). The terminal is
+  `ide_terminal_exec` 鈥?a deliberate shell surface bounded only by its
+  initial cwd; see SECURITY.md before exposing it to any remote UI.
+- **Monaco's theme cannot read the Zai tokens directly**: the browser
+  serializes `color-mix()` as `lab()`/`oklab()` and Monaco throws "Illegal
+  value for token color". `ide/lib/monaco.ts` keeps concrete hex palettes
+  (`aoxn-zai-dark` / `aoxn-zai-light`); update them with the tokens.
+- New shortcuts: `Ctrl+\`` terminal, `Ctrl+Shift+G` source control,
+  `Ctrl+Shift+A` assistant.
 
 ## Known issues (deliberately unfixed 鈥?do not "drive by" fix)
 
@@ -1678,14 +1766,14 @@ crates/aoxn-pkg       package manager crate (its own dependency set; see above)
 
 ## Repo layout
 
-- `examples/*.ax` 鈥?demo programs (hello, fib, primes, vectors, strings, benchmarks, stdlib_demo, ui_demo, ui_gallery); since v0.30.0 they import the stdlib **by name** (`"stdlib"`, `"stdlib/ui_win"`), so the ones shipped in a release archive run from any directory 鈥?`selfhost/load.ax` does NOT do name resolution (repo-bound, relative paths only)
+- `examples/*.ax` 鈥?demo programs (hello, fib, primes, vectors, strings, benchmarks, stdlib_demo, ui_demo, ui_gallery, csv_demo, random_demo, socket_echo); since v0.30.0 they import the stdlib **by name** (`"stdlib"`, `"stdlib/ui_win"`), so the ones shipped in a release archive run from any directory. The selfhost loader resolves `stdlib`/`stdlib/<module>` through `AOXN_STDLIB` / `AOXN_HOME/lib/stdlib` (cwd `stdlib/` fallback); it still supports only whole-module (star) imports.
 - `web/` 鈥?web benchmark suite: HTTP/1.1 server written in Aoxn (FFI sockets)
   vs pnpm+Node.js+Next.js; see `web/README.md` + `docs/web-benchmark.md`
 - `stdlib/stdlib.ax` 鈥?the standard library core, written in Aoxn itself;
   `stdlib/ui.ax` + `stdlib/ui_win.ax` 鈥?the Qt-flavored immediate-mode UI
   toolkit v3 (layout engine, text selection/multi-line editing, menus,
   tree/table model+view, signal-slot events);
-  `stdlib/{math,time,datetime,calendar,pathlib,base64,hashlib,hmac,os,glob,json,bisect,heapq}.ax`
+  `stdlib/{math,time,datetime,calendar,pathlib,base64,hashlib,hmac,os,glob,json,bisect,heapq,csv,random,socket}.ax`
   鈥?the v0.44.0 module batch (`docs/stdlib.md` is its reference;
   `stdlib/net/` holds the SDK-shared transport, `stdlib/openai/` +
   `stdlib/anthropic/` the two SDKs)

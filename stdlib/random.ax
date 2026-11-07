@@ -1,0 +1,94 @@
+# Deterministic, non-cryptographic pseudorandom numbers (Park-Miller MINSTD,
+# multiplier 16807, modulus 2^31-1). Pure Aoxn integer arithmetic: no C
+# rand(), no time seeding, no signed-overflow reliance (Schrage's method keeps
+# every intermediate inside 32 bits). Same seed -> same sequence on every OS
+# and every process.
+#
+# NOT suitable for secrets, tokens, passwords or anything an attacker can
+# observe. There is deliberately NO "secure random" API in this module: a
+# time-based seed must not be passed off as entropy. Use the platform CSPRNG
+# from an FFI declaration if a program needs one.
+#
+# State is passed and returned by value (`r = random_next(r)`). Outputs span
+# 1..2147483646; seed 0 maps to 1.
+#
+# Python difference: random.seed/random.random expose a different (Mersenne
+# Twister) sequence; values here are stable for THIS algorithm, not equal to
+# Python's.
+
+struct Random:
+    state: int
+    value: int
+    error: int
+    fval: float
+
+def random_seed(seed: int) -> Random:
+    s = seed % 2147483647
+    if s < 0:
+        s = s + 2147483647
+    if s == 0:
+        s = 1
+    return Random(state=s, value=0, error=0, fval=0.0)
+
+# Schrage decomposition: 2147483647 = 127773 * 16807 + 2836, so
+# x = 16807*lo - 2836*hi stays inside signed 32 bits.
+def random_next(r: Random) -> Random:
+    hi = r.state / 127773
+    lo = r.state % 127773
+    x = 16807 * lo - 2836 * hi
+    if x <= 0:
+        x = x + 2147483647
+    r.state = x
+    r.value = x
+    r.error = 0
+    return r
+
+# Uniform integer in [0, bound). Invalid bounds return error=1 and do not
+# advance the state. Rejection avoids modulo bias over 0..2147483645.
+def random_below(r: Random, bound: int) -> Random:
+    if bound <= 0 or bound > 2147483646:
+        r.error = 1
+        return r
+    limit = 2147483646 - 2147483646 % bound
+    r = random_next(r)
+    n = r.value - 1
+    while n >= limit:
+        r = random_next(r)
+        n = r.value - 1
+    r.value = n % bound
+    return r
+
+# Uniform integer in [lo, hi] (both inclusive). hi < lo is an error.
+# Width is limited to 2147483646 (the generator domain).
+def random_range(r: Random, lo: int, hi: int) -> Random:
+    if hi < lo:
+        r.error = 1
+        return r
+    width = hi - lo + 1
+    if width <= 0 or width > 2147483646:
+        r.error = 1
+        return r
+    r = random_below(r, width)
+    if r.error == 0:
+        r.value = lo + r.value
+    return r
+
+# Uniform float in [0.0, 1.0). Call random_next first (or use random_float_next).
+def random_float(r: Random) -> float:
+    return to_float(r.value - 1) / 2147483646.0
+
+def random_float_next(r: Random) -> Random:
+    r = random_next(r)
+    r.fval = to_float(r.value - 1) / 2147483646.0
+    return r
+
+# Uniform float in [lo, hi). The result lands in `.fval`; an empty/inverted
+# range sets error=1 and leaves the state untouched.
+def random_float_range(r: Random, lo: float, hi: float) -> Random:
+    if hi <= lo:
+        r.error = 1
+        r.fval = lo
+        return r
+    r = random_float_next(r)
+    r.fval = lo + (hi - lo) * r.fval
+    return r

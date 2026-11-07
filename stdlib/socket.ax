@@ -1,0 +1,203 @@
+# Minimal blocking TCP sockets for Windows (Winsock2) and Linux (POSIX).
+#
+# Scope: IPv4 only, literal addresses only (NO DNS), blocking calls, plus
+# listen/accept/connect/send-all/recv/close. UDP, IPv6, timeouts, TLS and
+# non-blocking modes are NOT implemented. Python's socket module is far
+# larger; this is the subset the loopback tests and small tools need.
+#
+# Link flags: Windows needs `-l ws2_32`. Linux needs nothing beyond libc.
+#
+# Every platform call is guarded INSIDE the function that makes it
+# (`target_os()` folds before codegen), so a Windows object has no POSIX
+# symbols and vice versa. Windows C `int` returns arrive zero-extended in
+# i64, so `sk_i32` maps the -1 sentinel back. Default listeners do NOT set
+# SO_REUSEADDR: on Windows that option lets another process hijack a live
+# listener.
+import * from "./stdlib.ax"
+
+# sockaddr_in layout (16 bytes): family u16 | port u16 (big endian) |
+# address u32 (network order) | 8 zero bytes.
+extern def WSAStartup(version: int, data: int) -> int
+extern def WSAGetLastError() -> int
+extern def socket(af: int, ty: int, proto: int) -> int
+extern def bind(s: int, name: int, namelen: int) -> int
+extern def listen(s: int, backlog: int) -> int
+extern def accept(s: int, name: int, namelen: int) -> int
+extern def connect(s: int, name: int, namelen: int) -> int
+extern def recv(s: int, buf: int, n: int, flags: int) -> int
+extern def send(s: int, buf: int, n: int, flags: int) -> int
+extern def closesocket(s: int) -> int
+extern def inet_addr(host: string) -> int
+
+extern def close(fd: int) -> int
+extern def __errno_location() -> int
+
+struct Sock:
+    fd: int
+    err: int
+    msg: string
+
+def sk_ok(fd: int) -> Sock:
+    return Sock(fd=fd, err=0, msg="")
+
+def sk_err(msg: string, code: int) -> Sock:
+    return Sock(fd=-1, err=code, msg=msg)
+
+# a C 32-bit int return -1 arrives zero-extended
+def sk_i32(r: int) -> int:
+    if r == 4294967295:
+        return -1
+    return r
+
+def sk_lasterr() -> int:
+    if target_os() == "windows":
+        return WSAGetLastError()
+    p = __errno_location()
+    if p == 0:
+        return -1
+    return load_i64(p) & 4294967295
+
+def socket_init() -> int:
+    if target_os() == "windows":
+        data = malloc(512)
+        if data == 0:
+            return -1
+        return sk_i32(WSAStartup(514, data))
+    return 0
+
+def sk_addr(port: int, ip: int) -> int:
+    a = malloc(16)
+    fill_zero(a, 16)
+    store_u8(a, 0, 2)
+    store_u8(a, 1, 0)
+    store_u8(a, 2, port / 256)
+    store_u8(a, 3, port % 256)
+    store_i64(a + 4, ip)
+    return a
+
+def sk_valid_port(port: int) -> int:
+    if port <= 0 or port > 65535:
+        return 0
+    return 1
+
+def sk_tcp_socket() -> int:
+    fd = socket(2, 1, 0)
+    if target_os() == "windows":
+        if fd == -1 or fd == 4294967295:
+            return -1
+        return fd
+    if fd < 0:
+        return -1
+    return fd
+
+def sk_close_fd(fd: int):
+    if fd <= 0:
+        return
+    if target_os() == "windows":
+        closesocket(fd)
+    else:
+        close(fd)
+
+def socket_close(s: Sock):
+    if s.err == 0:
+        sk_close_fd(s.fd)
+
+# Connect to an IPv4 literal (`127.0.0.1`, `0.0.0.0`). DNS is not supported.
+def socket_connect(host: string, port: int) -> Sock:
+    if socket_init() != 0:
+        return sk_err("WSAStartup failed", sk_lasterr())
+    if sk_valid_port(port) == 0:
+        return sk_err("invalid port", -1)
+    ip = inet_addr(host)
+    if ip == 4294967295 or ip == -1:
+        return sk_err("invalid IPv4 address (DNS is not supported)", -1)
+    fd = sk_tcp_socket()
+    if fd == -1:
+        return sk_err("socket() failed", sk_lasterr())
+    a = sk_addr(port, ip)
+    rc = connect(fd, a, 16)
+    free(a)
+    if rc != 0:
+        code = sk_lasterr()
+        sk_close_fd(fd)
+        return sk_err("connect failed", code)
+    return sk_ok(fd)
+
+# Bind all interfaces on `port`. No SO_REUSEADDR is set (Windows hijack risk).
+def socket_listen(port: int, backlog: int) -> Sock:
+    if socket_init() != 0:
+        return sk_err("WSAStartup failed", sk_lasterr())
+    if sk_valid_port(port) == 0:
+        return sk_err("invalid port", -1)
+    fd = sk_tcp_socket()
+    if fd == -1:
+        return sk_err("socket() failed", sk_lasterr())
+    a = sk_addr(port, 0)
+    rc = bind(fd, a, 16)
+    free(a)
+    if rc != 0:
+        code = sk_lasterr()
+        sk_close_fd(fd)
+        return sk_err("bind failed (is the port in use?)", code)
+    if listen(fd, backlog) != 0:
+        code = sk_lasterr()
+        sk_close_fd(fd)
+        return sk_err("listen failed", code)
+    return sk_ok(fd)
+
+def socket_accept(ls: Sock) -> Sock:
+    if ls.err != 0:
+        return sk_err("accept on a closed listener", -1)
+    fd = accept(ls.fd, 0, 0)
+    if fd == -1 or fd == 4294967295:
+        return sk_err("accept failed", sk_lasterr())
+    return sk_ok(fd)
+
+# Send exactly n bytes from `ptr`; loops over partial writes.
+# Returns n, or -1 on error.
+def socket_send_bytes(fd: int, ptr: int, n: int) -> int:
+    sent = 0
+    while sent < n:
+        k = sk_i32(send(fd, ptr + sent, n - sent, 0))
+        if k <= 0:
+            return -1
+        sent = sent + k
+    return sent
+
+# Strings are NUL-terminated: a payload containing 0 needs the _bytes form.
+def socket_send_str(fd: int, data: string) -> int:
+    return socket_send_bytes(fd, as_ptr(data), len(data))
+
+# One recv: returns bytes read, 0 on orderly close, -1 on error.
+def socket_recv(fd: int, buf: int, cap: int) -> int:
+    return sk_i32(recv(fd, buf, cap, 0))
+
+# Read until n bytes, EOF, or error. Returns the byte count (may be < n).
+def socket_recv_all(fd: int, buf: int, n: int) -> int:
+    got = 0
+    while got < n:
+        k = socket_recv(fd, buf + got, n - got)
+        if k < 0:
+            return -1
+        if k == 0:
+            return got
+        got = got + k
+    return got
+
+# Receive a line (through '\n', not included) into buf; returns length or -1.
+# A convenience for request/response tests and tiny protocols.
+def socket_recv_line(fd: int, buf: int, cap: int) -> int:
+    got = 0
+    while got < cap - 1:
+        k = socket_recv(fd, buf + got, 1)
+        if k < 0:
+            return -1
+        if k == 0:
+            return got
+        c = load_u8(buf, got)
+        if c == 10:
+            store_u8(buf, got, 0)
+            return got
+        got = got + 1
+    store_u8(buf, got, 0)
+    return got

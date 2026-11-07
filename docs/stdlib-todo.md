@@ -21,9 +21,10 @@
 ### 0.1 `stdlib/stdlib.ax` 在自举关键路径上 —— 新模块必须独立成文件
 
 `selfhost/codegen.ax`、`selfhost/driver.ax`、`selfhost/lex_demo.ax` 等
-**全部** `import * from "../stdlib/stdlib.ax"`。而 v0.40.0 的
-dict / `None` / fn-ptr / `raise` 在 selfhost 镜像里尚未覆盖
-（`selfhost/codegen.ax` 发不出这些文本，见 AGENTS.md）。
+**全部** `import * from "../stdlib/stdlib.ax"`。自举镜像现在已覆盖
+v0.40.0 的 dict / `None` / fn-ptr / `raise`（见 AGENTS.md 与
+`docs/selfhost.md`），但命名空间绑定、默认参数和选择性导入仍在自举子集
+之外，所以这条规则**仍然成立**：自举编译器的依赖越少越稳。
 
 **规则**：新模块一律写成独立文件 `stdlib/<name>.ax`，以
 `import * from "stdlib/<name>"` 引入。**只有**当某个模块必须被自举编译器
@@ -174,7 +175,7 @@ v0.42.0 补上了 `assert(cond[, message])`：失败时打印
 | # | 模块 | 批次 | 可行性 | 备注 |
 |---|---|---|---|---|
 | 8 | `json` | P1 | ✅ **已提升 v0.44.0** | `stdlib/json.ax`（自 `stdlib/net/json.ax` 提升，SDK 同步改 import）+ 补上 `j_read_file`/`j_write_file`（err 2 = I/O 失败，1 = 解析错误）。 |
-| 9 | `csv` | P1 | ✅ | RFC 4180：引号转义、内嵌换行、`\r\n`。**没有 `\r` 字符串转义**（AGENTS.md：只有 `\n \t \\ \"`），CRLF 要用 `store_u8` 写字节 13。 |
+| 9 | `csv` | P1 | ✅ **已落地（unreleased）** | `stdlib/csv.ax`：RFC 4180 引号转义、内嵌换行、CRLF/LF、空行/空字段/尾部无换行；错误是值（err/msg/line/col）。**不含** Python 的全部 dialect 参数与流式 API。Python `csv` 差分测试见 `tests/csv.rs`。CRLF 直接写 `"\r\n"`（v0.42.0 起有 `\r` 转义）。 |
 | 10 | `pickle` | P3 | ⛔ **无反射** | 语言没有「遍历一个值的类型/字段」。可行替代是**显式注册**：程序自己声明要序列化的字段清单，`pickle_dump(recs)`。这样能往返，但和 Python pickle 格式不兼容 —— 若目标是「读 `.pkl` 文件」，**直接不做**。 |
 | 11 | `re` | P1 | ⚠️ 大工程 | 回溯匹配器（支持 `* + ? \| () [] {m,n} .`、字符类、非贪婪、锚点）+ 一个手写 DFA 编译步骤会太大。**先只做回溯版**，用 `Vec` 存回溯栈（两个 int 栈：位置、备选点）。预计 2–4k 行。锚定建议：跟一个「HTML/XML 标记提取」的真实用例，避免做成正则引擎而没人用。 |
 
@@ -192,7 +193,7 @@ v0.42.0 补上了 `assert(cond[, message])`：失败时打印
 | # | 模块 | 批次 | 可行性 | 备注 |
 |---|---|---|---|---|
 | 16 | `urllib` | P2 | ✅ **部分已有** | `stdlib/net/http.ax` 已经是一套 WinHTTP 传输（open/connect/send/receive/timeouts）。**P2 是把它泛化成 `stdlib/net.ax`** + 加 URL 解析（scheme/host/port/path/query 拆分 + percent-decode）。 |
-| 17 | `socket` | P1 | ✅ **已有** | `web/sock_win.ax`（ws2_32）已有 TCP/UDP 实测可用。**上提为 `stdlib/socket.ax`**，`web/` 改为 import 它。搬的时候带上两个坑：int 返回零扩展（`i32()` helper）、指针返回是全 64 位。 |
+| 17 | `socket` | P1 | ✅ **已落地（unreleased）** | `stdlib/socket.ax` 提供最小 blocking IPv4 TCP：init/connect/listen/accept/send-all/recv/close，错误是 `Sock{fd,err,msg}`。Windows 需 `-l ws2_32`，Linux 无附加库。**不含** DNS/UDP/IPv6/TLS/超时/非阻塞；默认监听不设 SO_REUSEADDR。Windows 实测双向回环；Linux 分支已实现但本轮未原生执行。`web/sock_win.ax` 暂未改为 import 它。 |
 
 ### 6. 多线程 / 多进程
 
@@ -224,7 +225,7 @@ v0.42.0 补上了 `assert(cond[, message])`：失败时打印
 | # | 模块 | 批次 | 可行性 | 备注 |
 |---|---|---|---|---|
 | 28 | `math` | P0 | ✅ **已落地 v0.44.0** | `stdlib.ax` 已有 `sqrt/floor/ceil/abs/min/max/clamp/gcd/lcm/isqrt/is_prime/hypot`。v0.44.0 已补（FFI + `pi()/e()`，Python 风格名字），并内置 §0.6 工具箱（小写 `nan`/`inf`/`copysign` 定义撞 UCRT 链接符号，故 `NaN()/Inf()/copysign_f`）。 |
-| 29 | `random` | P1 | ✅ | **不要用 `rand()`**：MSVC 的 `rand()` 实现固定，同一个种子在任何机器上给同一序列。要跨机器可复现就自己实现 **PCG32 / xoshiro**，外部熵从 `BCryptGenRandom` 或 `SystemFunction036` 取。 |
+| 29 | `random` | P1 | ✅ **已落地（unreleased）** | `stdlib/random.ax`：Park–Miller MINSTD（16807 / 2^31−1），拒绝采样消除取模偏差，错误不推进状态，跨进程可复现。**非密码学安全**；不提供系统熵 API（不用时间种子冒充）。不是 Python 的 Mersenne Twister 序列。 |
 | 30 | `typing` | P3 | ⚠️ 多数是 no-op | Aoxn **已经是静态类型 + 单态化**，`typing` 的运行时部分（`TypeVar`/`Generic`）在这里没有对应物。真正缺的是**别名与协议**：需要 `type X = Vec[int]` 形式的类型别名（spec roadmap 第 4 条「模块限定」的近邻）。**先别做**，文档里说明等价物即可。 |
 | 31 | `unittest` | P3 | ⚠️ 形态要改 | 需要「类」来组织 fixture、`with` 来管资源 —— 两者都还没有。可行形态：`test_suite` 注册表 + 一个 `run_tests()` 入口 + `assert_eq/assert_true/assert_raises` 自由函数。**当前阶段的真正测试基建是 `cargo test`（`tests/*.rs`）+ `run_pkg_tests.sh`**，这个模块的收益要重新评估。 |
 
@@ -330,9 +331,12 @@ stdlib/re.ax ──────► lxml(10), beautifulsoup4(9)
 
 第三方清单接在后面（依赖齐了才动）：
 
-7. **`stdlib/socket.ax` 上提 + `stdlib/net.ax`** —— `requests`(1) 和
-   `flask`(13) 都等它。
+7. ✅ **`stdlib/socket.ax` 上提**（unreleased，最小 blocking IPv4 TCP；Windows 实测，
+   Linux 分支未原生执行）—— `requests`(1) / `flask`(13) 的网络底座已出现，但
+   `stdlib/net.ax`（HTTP 客户端门面）仍未做，所以这两个第三方库**仍未实现**。
+   同一批还落地了 **`csv`**(#9) 与 **`random`**(#29)；CSV/random 不解决 `re`/HTML，
+   也不等于 numpy/pandas 的数据能力。
 8. **`stdlib/re.ax`** —— 和 `lxml`(10)、`beautifulsoup4`(9) 共用分词基础。
-9. **`flask`(13)** —— 第三方清单里 ROI 最高，零件已经齐了大半。
+9. **`flask`(13)** —— 第三方清单里 ROI 最高，零件已经齐了大半（还缺 `net.ax` 与 `re`）。
 10. ✅ **`stdlib/math.ax` 补 `fdiv` / `is_nan` / `is_inf`**（v0.44.0 已做）—— §0.6 说这是
     三个数值库的公共前置，**先做它，比做 numpy 更划算**。

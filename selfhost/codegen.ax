@@ -22,6 +22,90 @@ import * from "./lexer.ax"
 import * from "./parser.ax"
 import * from "./typecheck.ax"
 
+# Process execution uses an argv VECTOR, never a shell: user paths and clang
+# flags may contain spaces or shell metacharacters without being reparsed.
+# Windows CRT _spawnv waits and returns the exit status; POSIX forks/execs.
+extern def _spawnvp(mode: int, path: string, argv: int) -> int
+extern def fork() -> int
+extern def execvp(path: string, argv: int) -> int
+extern def waitpid(pid: int, status: int, options: int) -> int
+
+def run_arg_needs_quote(s: string) -> int:
+    if len(s) == 0:
+        return 1
+    i = 0
+    while i < len(s):
+        b = str_get(s, i)
+        if b == 32 or b == 9 or b == 34:
+            return 1
+        i = i + 1
+    return 0
+
+# Windows CRT quote rules (CommandLineToArgvW): quote when empty/space/quote,
+# double the backslashes that precede a quote, and double trailing
+# backslashes before the closing quote.
+def win_quote_arg(s: string) -> string:
+    if run_arg_needs_quote(s) == 0:
+        return s
+    out = "\""
+    bs = 0
+    i = 0
+    while i < len(s):
+        b = str_get(s, i)
+        if b == 92:
+            bs = bs + 1
+            out = out + "\\"
+        elif b == 34:
+            k = 0
+            while k < bs + 1:
+                out = out + "\\"
+                k = k + 1
+            out = out + "\""
+            bs = 0
+        else:
+            out = out + str_chr(b)
+            bs = 0
+        i = i + 1
+    k = 0
+    while k < bs:
+        out = out + "\\"
+        k = k + 1
+    return out + "\""
+
+def run_process(prog: string, args: Vec) -> int:
+    n = args.len
+    arr = malloc((n + 2) * 8)
+    if arr == 0:
+        return 127
+    if target_os() == "windows":
+        store_i64(arr, as_ptr(win_quote_arg(prog)))
+    else:
+        store_i64(arr, as_ptr(prog))
+    i = 0
+    while i < n:
+        a = as_string(vec_get(args, i))
+        if target_os() == "windows":
+            a = win_quote_arg(a)
+        store_i64(arr + (i + 1) * 8, as_ptr(a))
+        i = i + 1
+    store_i64(arr + (n + 1) * 8, 0)
+    if target_os() == "windows":
+        rc = _spawnvp(0, prog, arr)
+        free(arr)
+        if rc < 0:
+            return 127
+        return rc
+    pid = fork()
+    if pid == 0:
+        execvp(prog, arr)
+        exit(127)
+    status = malloc(8)
+    waitpid(pid, status, 0)
+    st = load_i64(status)
+    free(status)
+    free(arr)
+    return (st >> 8) % 256
+
 # ---- expression result kinds ----
 
 def RK_INT() -> int:
@@ -41,6 +125,16 @@ def RK_FLOAT() -> int:
 
 def RK_STRUCT() -> int:
     return 5
+
+def RK_NONE() -> int:
+    return 6
+
+# ---- branch narrowing result (mirror of the checker's narrow_target) ----
+struct Narrow:
+    ok: int
+    name: string
+    then_ty: int
+    else_ty: int
 
 # ---- generator state ----
 
@@ -75,11 +169,34 @@ struct Gen:
     tmpn: int
     tmpname: string       # last fresh_tmp name
     cur_fni: int
+    # v0.40.0 types: nullable/dict definitions registered on first use
+    opt_name: Vec         # type token (as_ptr)
+    opt_inner: Vec        # type-arena index
+    dict_name: Vec        # type token (as_ptr)
+    dict_inner: Vec       # type-arena index
+    nar_name: Vec         # branch-local narrowed locals
+    nar_ty: Vec
+    r_ok: int             # last lookup success flag
+    catch_labels: Vec     # active try handler labels (as_ptr)
+    rz_name: Vec          # functions that may raise (as_ptr)
+    rz_flag: Vec          # 1 per fni
+    sig_exit: Vec         # unwind label per fni (as_ptr, "" when not a raiser)
+    has_exc: int          # any raise/try exists in the program
     # usage flags for the optional runtime helper groups
     used_concat: int
     used_str_i: int
     used_str_f: int
     used_raw: int
+    used_exit: int
+    used_argv: int
+    used_err: int
+    # clang invocation options (v0.56: CLI parity). Defaults keep the old
+    # command shape: clang -O3 -w -c ...
+    opt_level: int
+    cc_warnings: int
+    cpu: string
+    clang_exe: string
+    extra_clang: Vec       # safe, already-validated clang flags (as_ptr)
     # assembled sections
     protos: Vec            # as_ptr string
     bodies: Vec            # as_ptr string
@@ -91,11 +208,22 @@ struct Gen:
     # error
     err: int
     errmsg: string
+    err_stage: string
+    err_line: int
+    err_col: int
+    err_raw: string
+    # W001 warnings carried from the checker
+    w_name: Vec
+    w_line: Vec
+    w_col: Vec
 
 def gerr(g: Gen, msg: string) -> Gen:
     if g.err == 0:
         g.err = 1
         g.errmsg = msg
+        if g.err_stage == "":
+            g.err_stage = "internal"
+        g.err_raw = msg
     return g
 
 def gen_new(c: CState) -> Gen:
@@ -123,10 +251,30 @@ def gen_new(c: CState) -> Gen:
         tmpn=0,
         tmpname="",
         cur_fni=-1,
+        opt_name=vec_new(),
+        opt_inner=vec_new(),
+        dict_name=vec_new(),
+        dict_inner=vec_new(),
+        nar_name=vec_new(),
+        nar_ty=vec_new(),
+        r_ok=0,
+        catch_labels=vec_new(),
+        rz_name=vec_new(),
+        rz_flag=vec_new(),
+        sig_exit=vec_new(),
+        has_exc=0,
         used_concat=0,
         used_str_i=0,
         used_str_f=0,
         used_raw=0,
+        used_exit=0,
+        used_argv=0,
+        used_err=0,
+        opt_level=3,
+        cc_warnings=0,
+        cpu="",
+        clang_exe="clang",
+        extra_clang=vec_new(),
         protos=vec_new(),
         bodies=vec_new(),
         types_text="",
@@ -135,6 +283,13 @@ def gen_new(c: CState) -> Gen:
         rt=-1,
         err=0,
         errmsg="",
+        err_stage="",
+        err_line=0,
+        err_col=0,
+        err_raw="",
+        w_name=vec_new(),
+        w_line=vec_new(),
+        w_col=vec_new(),
     )
     # one sig row per fni (concrete + extern + instances)
     i = 0
@@ -142,6 +297,14 @@ def gen_new(c: CState) -> Gen:
         g.sig_cname = vec_push(g.sig_cname, 0)
         g.sig_ret = vec_push(g.sig_ret, 0)
         g.sig_has = vec_push(g.sig_has, 0)
+        g.rz_flag = vec_push(g.rz_flag, 0)
+        g.sig_exit = vec_push(g.sig_exit, as_ptr(""))
+        i = i + 1
+    i = 0
+    while i < c.wn_name.len:
+        g.w_name = vec_push(g.w_name, vec_get(c.wn_name, i))
+        g.w_line = vec_push(g.w_line, vec_get(c.wn_line, i))
+        g.w_col = vec_push(g.w_col, vec_get(c.wn_col, i))
         i = i + 1
     # reserved must be complete before any c_ident renders a name
     kws = c_keywords()
@@ -156,14 +319,6 @@ def gen_new(c: CState) -> Gen:
         i = i + 1
     g.reserved = vec_push(g.reserved, as_ptr("main"))
     g.reserved = vec_push(g.reserved, as_ptr("aoxn_main"))
-    # extern names are reserved so user locals shadowing them get renamed
-    i = 0
-    while i < c.fn_name.len:
-        nm = as_string(vec_get(c.fn_name, i))
-        # an extern's node is the only one whose ival flags it; defer the
-        # name reservation to declare_sig (which has the node) so concrete
-        # fns named like a runtime symbol also get reserved
-        i = i + 1
     return g
 
 def c_keywords() -> [string; 37]:
@@ -240,6 +395,19 @@ def type_token(g: Gen, ty: int) -> string:
         return "s"
     if t == TY_VOID():
         return "v"
+    if t == TY_NONE():
+        return "z"
+    if t == TY_OPT():
+        return "o" + type_token(g, ty_elem(g.c, ty))
+    if t == TY_DICT():
+        return "d" + type_token(g, ty_elem(g.c, ty))
+    if t == TY_FN():
+        s = "fn" + type_token(g, ty_fn_ret(g.c, ty))
+        k = 0
+        while k < ty_fn_n(g.c, ty):
+            s = s + "_" + type_token(g, ty_fn_param(g.c, ty, k))
+            k = k + 1
+        return s
     if t == TY_STRUCT():
         return ty_sname(g.c, ty)
     if t == TY_ARRAY():
@@ -257,18 +425,54 @@ def typedef_idx(g: Gen, name: string) -> int:
         i = i + 1
     return -1
 
-# register an array type's typedef (and recurse into the element). Pure
-# value-type C needs the typedef present before any use.
+def opt_idx(g: Gen, name: string) -> int:
+    i = 0
+    while i < g.opt_name.len:
+        if as_string(vec_get(g.opt_name, i)) == name:
+            return i
+        i = i + 1
+    return -1
+
+def dict_idx(g: Gen, name: string) -> int:
+    i = 0
+    while i < g.dict_name.len:
+        if as_string(vec_get(g.dict_name, i)) == name:
+            return i
+        i = i + 1
+    return -1
+
+# register an aggregate type's definition (and recurse into dependencies)
 def reg_type(g: Gen, ty: int) -> Gen:
-    if ty_tag(g.c, ty) != TY_ARRAY():
+    t = ty_tag(g.c, ty)
+    if t == TY_ARRAY():
+        n = typedef_name(g, ty)
+        if typedef_idx(g, n) == -1:
+            g.td_name = vec_push(g.td_name, as_ptr(n))
+            g.td_elem = vec_push(g.td_elem, ty_elem(g.c, ty))
+            g.td_len = vec_push(g.td_len, ty_len(g.c, ty))
+        g = reg_type(g, ty_elem(g.c, ty))
         return g
-    n = typedef_name(g, ty)
-    if typedef_idx(g, n) != -1:
+    if t == TY_OPT():
+        n = "ax_opt_" + type_token(g, ty_elem(g.c, ty))
+        if opt_idx(g, n) == -1:
+            g.opt_name = vec_push(g.opt_name, as_ptr(n))
+            g.opt_inner = vec_push(g.opt_inner, ty_elem(g.c, ty))
+        return reg_type(g, ty_elem(g.c, ty))
+    if t == TY_DICT():
+        n = "ax_dict_" + type_token(g, ty_elem(g.c, ty))
+        if dict_idx(g, n) == -1:
+            g.dict_name = vec_push(g.dict_name, as_ptr(n))
+            g.dict_inner = vec_push(g.dict_inner, ty_elem(g.c, ty))
+        # a missing key raises through the error slot
+        g.used_err = 1
+        return reg_type(g, ty_elem(g.c, ty))
+    if t == TY_FN():
+        g = reg_type(g, ty_fn_ret(g.c, ty))
+        k = 0
+        while k < ty_fn_n(g.c, ty):
+            g = reg_type(g, ty_fn_param(g.c, ty, k))
+            k = k + 1
         return g
-    g.td_name = vec_push(g.td_name, as_ptr(n))
-    g.td_elem = vec_push(g.td_elem, ty_elem(g.c, ty))
-    g.td_len = vec_push(g.td_len, ty_len(g.c, ty))
-    g = reg_type(g, ty_elem(g.c, ty))
     return g
 
 # C type token for a value position (pure: assumes reg_type has run)
@@ -284,6 +488,24 @@ def c_type_name(g: Gen, ty: int) -> string:
         return "char*"
     if t == TY_VOID():
         return "void"
+    if t == TY_NONE():
+        return "long long"
+    if t == TY_OPT():
+        return "struct ax_opt_" + type_token(g, ty_elem(g.c, ty))
+    if t == TY_DICT():
+        return "struct ax_dict_" + type_token(g, ty_elem(g.c, ty)) + "*"
+    if t == TY_FN():
+        rt = c_type_name(g, ty_fn_ret(g.c, ty))
+        ps = ""
+        k = 0
+        if ty_fn_n(g.c, ty) == 0:
+            ps = "void"
+        while k < ty_fn_n(g.c, ty):
+            if k > 0:
+                ps = ps + ", "
+            ps = ps + c_type_name(g, ty_fn_param(g.c, ty, k))
+            k = k + 1
+        return rt + " (*)(" + ps + ")"
     if t == TY_STRUCT():
         return "struct " + c_ident(g, ty_sname(g.c, ty))
     if t == TY_ARRAY():
@@ -294,6 +516,18 @@ def c_type_name(g: Gen, ty: int) -> string:
 # so raw C declarators like `data[3]` survive; callers pass c_ident(name)
 # for real Aoxn identifiers
 def c_decl_name(g: Gen, ty: int, name: string) -> string:
+    if ty_tag(g.c, ty) == TY_FN():
+        rt = c_type_name(g, ty_fn_ret(g.c, ty))
+        ps = ""
+        k = 0
+        if ty_fn_n(g.c, ty) == 0:
+            ps = "void"
+        while k < ty_fn_n(g.c, ty):
+            if k > 0:
+                ps = ps + ", "
+            ps = ps + c_type_name(g, ty_fn_param(g.c, ty, k))
+            k = k + 1
+        return rt + " (*" + name + ")(" + ps + ")"
     return c_type_name(g, ty) + " " + name
 
 # ---- string literals ----
@@ -339,6 +573,94 @@ def local_tag(g: Gen, name: string) -> int:
     if i == -1:
         return -1
     return vec_get(g.loc_tag, i)
+
+def local_set_tag(g: Gen, name: string, ty: int) -> Gen:
+    i = g.loc_name.len - 1
+    while i >= 0:
+        if as_string(vec_get(g.loc_name, i)) == name:
+            vec_set(g.loc_tag, i, ty)
+            return g
+        i = i - 1
+    return g
+
+# ---- branch-local narrowing (mirror of the checker's nar_* map) ----
+def g_nar_find(g: Gen, name: string) -> int:
+    i = g.nar_name.len - 1
+    while i >= 0:
+        if as_string(vec_get(g.nar_name, i)) == name:
+            return i
+        i = i - 1
+    return -1
+
+def g_nar_get(g: Gen, name: string) -> Gen:
+    g.rt = -1
+    g.r_ok = 0
+    i = g_nar_find(g, name)
+    if i != -1:
+        g.rt = vec_get(g.nar_ty, i)
+        g.r_ok = 1
+    return g
+
+def g_nar_set(g: Gen, name: string, ty: int) -> Gen:
+    i = g_nar_find(g, name)
+    if i != -1:
+        vec_set(g.nar_ty, i, ty)
+        return g
+    g.nar_name = vec_push(g.nar_name, as_ptr(name))
+    g.nar_ty = vec_push(g.nar_ty, ty)
+    return g
+
+def g_nar_remove(g: Gen, name: string) -> Gen:
+    ns = vec_new()
+    ts = vec_new()
+    i = 0
+    while i < g.nar_name.len:
+        if as_string(vec_get(g.nar_name, i)) != name:
+            ns = vec_push(ns, vec_get(g.nar_name, i))
+            ts = vec_push(ts, vec_get(g.nar_ty, i))
+        i = i + 1
+    g.nar_name = ns
+    g.nar_ty = ts
+    return g
+
+def g_narrow_target(g: Gen, cond: int) -> Narrow:
+    no_hit = Narrow(ok=0, name="", then_ty=-1, else_ty=-1)
+    if node_tag(g.c.p, cond) != N_BINARY():
+        return no_hit
+    op = node_ival(g.c.p, cond)
+    if op != OP_IS() and op != OP_ISNOT():
+        return no_hit
+    lhs = node_child(g.c.p, cond)
+    rhs = node_next(g.c.p, lhs)
+    var = -1
+    if node_tag(g.c.p, rhs) == N_NONE():
+        var = lhs
+    elif node_tag(g.c.p, lhs) == N_NONE():
+        var = rhs
+    else:
+        return no_hit
+    if node_tag(g.c.p, var) != N_VAR():
+        return no_hit
+    name = node_sval(g.c.p, var)
+    idx = local_idx(g, name)
+    if idx == -1:
+        return no_hit
+    ty = local_tag(g, name)
+    if ty_tag(g.c, ty) != TY_OPT():
+        return no_hit
+    inner = ty_elem(g.c, ty)
+    if op == OP_ISNOT():
+        return Narrow(ok=1, name=name, then_ty=inner, else_ty=g.c.t_none)
+    return Narrow(ok=1, name=name, then_ty=g.c.t_none, else_ty=inner)
+
+# codegen's exit rule for narrowing: only `return` counts
+def c_block_returns_all(c: CState, block: int) -> int:
+    st = node_child(c.p, block)
+    while st != -1:
+        if node_tag(c.p, st) == N_RETURN():
+            return 1
+        st = node_next(c.p, st)
+    return 0
 
 # declare a binding in the function's declaration block on first use
 def declare(g: Gen, name: string, ty: int) -> Gen:
@@ -389,6 +711,8 @@ def tag_kind(tag: int) -> int:
         return RK_BOOL()
     if tag == TY_STR():
         return RK_STR()
+    if tag == TY_NONE():
+        return RK_NONE()
     return -1
 
 # type-arena index of a scalar value kind
@@ -402,6 +726,247 @@ def kind_ty(g: Gen, kind: int) -> int:
     if kind == RK_STR():
         return g.c.t_str
     return -1
+
+# the type of the last emitted expression
+def result_ty(g: Gen) -> int:
+    if g.rk == RK_STRUCT() or g.rk == RK_NONE() or g.rk == RK_VOID():
+        return g.rt
+    return kind_ty(g, g.rk)
+
+# zero value for the `.value` slot of a None carrier (mirrors zero_value)
+def zero_value(g: Gen, ty: int) -> string:
+    t = ty_tag(g.c, ty)
+    if t == TY_STRUCT():
+        return "(struct " + c_ident(g, ty_sname(g.c, ty)) + "){0}"
+    if t == TY_ARRAY():
+        return "(" + c_type_name(g, ty) + "){0}"
+    return "0"
+
+# emit `e` so it initializes a slot of type `want`: T widens into T | None
+# (tag set) and a None literal becomes the same carrier (tag clear)
+def emit_coerced(g: Gen, e: int, want: int) -> Gen:
+    g = emit_expr(g, e)
+    if g.err == 1:
+        return g
+    if ty_tag(g.c, want) == TY_OPT():
+        inner = ty_elem(g.c, want)
+        t = result_ty(g)
+        if t != -1 and ty_eq(g.c, t, inner) == 1:
+            nm = "ax_opt_" + type_token(g, inner)
+            g.text = "(struct " + nm + "){ .value = " + g.text + ", .has = 1 }"
+            g.rk = RK_STRUCT()
+            g.rt = want
+            return g
+        if t != -1 and ty_tag(g.c, t) == TY_NONE():
+            nm = "ax_opt_" + type_token(g, inner)
+            z = zero_value(g, inner)
+            g.text = "(struct " + nm + "){ .value = " + z + ", .has = 0 }"
+            g.rk = RK_STRUCT()
+            g.rt = want
+            return g
+    return g
+
+# static type of an expression (mirror of codegen_c::hint)
+def hint_expr(g: Gen, e: int) -> Gen:
+    # NOTE: this function ALLOCATES types, so it returns the Gen. Taking Gen
+    # by value and returning only an int left the caller with stale t_* Vec
+    # descriptors after a realloc (the v0.39.2 write-back trap).
+    g.rt = -1
+    if e == -1:
+        return g
+    t = node_tag(g.c.p, e)
+    if t == N_INT():
+        g.rt = g.c.t_int
+        return g
+    if t == N_FLOAT():
+        g.rt = g.c.t_float
+        return g
+    if t == N_BOOL():
+        g.rt = g.c.t_bool
+        return g
+    if t == N_STR():
+        g.rt = g.c.t_str
+        return g
+    if t == N_NONE():
+        g.rt = g.c.t_none
+        return g
+    if t == N_VAR():
+        name = node_sval(g.c.p, e)
+        idx = local_idx(g, name)
+        if idx != -1:
+            ty = local_tag(g, name)
+            if ty_tag(g.c, ty) == TY_OPT():
+                h = g_nar_get(g, name)
+                if h.r_ok == 1:
+                    g.rt = h.rt
+                    return g
+            g.rt = ty
+            return g
+        fni = sig_index(g.c, name)
+        if fni != -1:
+            params = vec_new()
+            np = vec_get(g.c.fn_nparam, fni)
+            k = 0
+            while k < np:
+                params = vec_push(params, sig_param_ty(g.c, fni, k))
+                k = k + 1
+            c2 = alloc_fn_ty(g.c, vec_get(g.c.fn_ret, fni), params)
+            g.c = c2
+            g.rt = c2.r_ty
+            return g
+        return g
+    if t == N_UNARY():
+        op = node_ival(g.c.p, e)
+        if op == OP_NOT():
+            g.rt = g.c.t_bool
+            return g
+        return hint_expr(g, node_child(g.c.p, e))
+    if t == N_BINARY():
+        op = node_ival(g.c.p, e)
+        if op == OP_EQ() or op == OP_NE() or op == OP_LT() or op == OP_LE() or op == OP_GT() or op == OP_GE() or op == OP_AND() or op == OP_OR() or op == OP_IS() or op == OP_ISNOT() or op == OP_IN() or op == OP_NOTIN():
+            g.rt = g.c.t_bool
+            return g
+        lhs = node_child(g.c.p, e)
+        g = hint_expr(g, lhs)
+        if g.rt != -1 and op == OP_ADD() and ty_tag(g.c, g.rt) == TY_STR():
+            g.rt = g.c.t_str
+        return g
+    if t == N_INDEX():
+        base = node_child(g.c.p, e)
+        g = hint_expr(g, base)
+        if g.rt == -1:
+            return g
+        bt = g.rt
+        if ty_tag(g.c, bt) == TY_ARRAY() or ty_tag(g.c, bt) == TY_DICT():
+            g.rt = ty_elem(g.c, bt)
+        elif ty_tag(g.c, bt) == TY_STR():
+            g.rt = g.c.t_str
+        else:
+            g.rt = -1
+        return g
+    if t == N_FIELDACCESS():
+        obj = node_child(g.c.p, e)
+        g = hint_expr(g, obj)
+        if g.rt == -1 or ty_tag(g.c, g.rt) != TY_STRUCT():
+            g.rt = -1
+            return g
+        g.rt = field_ty_idx(g.c, ty_sname(g.c, g.rt), node_sval(g.c.p, e))
+        return g
+    if t == N_ARRAYLIT():
+        rep = node_ival(g.c.p, e)
+        if rep != 0:
+            g = hint_expr(g, node_child(g.c.p, e))
+            if g.rt == -1:
+                return g
+            c2 = alloc_ty(g.c, TY_ARRAY(), g.rt, rep, "")
+            g.c = c2
+            g.rt = c2.r_ty
+            return g
+        first = node_child(g.c.p, e)
+        if first == -1:
+            return g
+        g = hint_expr(g, first)
+        if g.rt == -1:
+            return g
+        ft = g.rt
+        elem = ft
+        n = 1
+        saw_none = 0
+        if ty_tag(g.c, ft) == TY_NONE():
+            elem = -1
+            saw_none = 1
+        ch = node_next(g.c.p, first)
+        while ch != -1:
+            g = hint_expr(g, ch)
+            if g.rt == -1:
+                return g
+            vt = g.rt
+            if ty_tag(g.c, vt) == TY_NONE():
+                saw_none = 1
+            elif elem == -1:
+                elem = vt
+            elif ty_eq(g.c, vt, elem) == 0:
+                g.rt = -1
+                return g
+            n = n + 1
+            ch = node_next(g.c.p, ch)
+        if saw_none == 1:
+            if elem == -1:
+                elem = g.c.t_none
+            else:
+                c2 = alloc_ty(g.c, TY_OPT(), elem, 0, "")
+                g.c = c2
+                elem = c2.r_ty
+        c2 = alloc_ty(g.c, TY_ARRAY(), elem, n, "")
+        g.c = c2
+        g.rt = c2.r_ty
+        return g
+    if t == N_DICTLIT():
+        ent = node_child(g.c.p, e)
+        if ent == -1:
+            return g
+        val = -1
+        while ent != -1:
+            key = node_child(g.c.p, ent)
+            vnode = node_next(g.c.p, key)
+            g = hint_expr(g, vnode)
+            if g.rt == -1:
+                return g
+            if val == -1:
+                val = g.rt
+            elif ty_eq(g.c, g.rt, val) == 0:
+                g.rt = -1
+                return g
+            ent = node_next(g.c.p, ent)
+        c2 = alloc_ty(g.c, TY_DICT(), val, 0, "")
+        g.c = c2
+        g.rt = c2.r_ty
+        return g
+    if t == N_CAST():
+        tyn = node_next(g.c.p, node_child(g.c.p, e))
+        c2 = resolve_ty_node(g.c, tyn)
+        g.c = c2
+        if c2.err == 1:
+            return g
+        g.rt = c2.r_ty
+        return g
+    if t == N_CALL():
+        name = node_sval(g.c.p, e)
+        fni = -1
+        i = 0
+        while i < g.c.call_node.len:
+            if vec_get(g.c.call_node, i) == e:
+                fni = vec_get(g.c.call_fni, i)
+            i = i + 1
+        if fni != -1:
+            g.rt = vec_get(g.c.fn_ret, fni)
+            return g
+        fni = sig_index(g.c, name)
+        if fni != -1:
+            g.rt = vec_get(g.c.fn_ret, fni)
+            return g
+        if struct_known(g.c, name) == 1:
+            c2 = alloc_ty(g.c, TY_STRUCT(), 0, 0, name)
+            g.c = c2
+            g.rt = c2.r_ty
+            return g
+        if local_idx(g, name) != -1:
+            lty = local_tag(g, name)
+            if ty_tag(g.c, lty) == TY_FN():
+                g.rt = ty_fn_ret(g.c, lty)
+                return g
+        if name == "print" or name == "assert" or name == "exit" or name == "store_i64" or name == "store_f64" or name == "store_u8":
+            g.rt = g.c.t_void
+        elif name == "len" or name == "argc" or name == "load_i64" or name == "load_u8" or name == "as_ptr" or name == "to_int":
+            g.rt = g.c.t_int
+        elif name == "dict_has" or name == "dict_del":
+            g.rt = g.c.t_bool
+        elif name == "str" or name == "arg" or name == "target_os" or name == "as_string":
+            g.rt = g.c.t_str
+        elif name == "load_f64" or name == "to_float":
+            g.rt = g.c.t_float
+        return g
+    return g
 
 # ---- declarations ----
 
@@ -437,7 +1002,7 @@ def declare_sig(g: Gen, fni: int, node: int) -> Gen:
                 else:
                     params = params + c_type_name(g, pty)
                 k = k + 1
-        decl = c_type_name(g, ret_ty) + " " + name + "(" + params + ");"
+        decl = c_decl_name(g, ret_ty, name + "(" + params + ")") + ";"
         i = 0
         while i < g.ex_name.len:
             if as_string(vec_get(g.ex_name, i)) == name:
@@ -471,8 +1036,142 @@ def emit_block(g: Gen, block: int, indent: int) -> Gen:
     st = node_child(g.c.p, block)
     while st != -1 and g.err == 0:
         g = emit_stmt(g, st, indent)
+        if g.err == 1:
+            return g
+        # propagation check: a statement that called a raiser leaves the slot
+        # set; every frame hops to its nearest handler or its unwind exit
+        t = node_tag(g.c.p, st)
+        skip = 0
+        if t == N_TRY() or t == N_RAISE() or t == N_RETURN() or t == N_BLOCK():
+            skip = 1
+        if skip == 0:
+            target = ""
+            if g.catch_labels.len > 0:
+                target = as_string(vec_get(g.catch_labels, g.catch_labels.len - 1))
+            elif g.cur_fni != -1:
+                target = as_string(vec_get(g.sig_exit, g.cur_fni))
+            if target != "" and stmt_may_raise(g, st) == 1:
+                g = line(g, indent, "if (ax_err_pending) { goto " + target + "; }")
         st = node_next(g.c.p, st)
     return g
+
+def current_raise_target(g: Gen) -> string:
+    if g.catch_labels.len > 0:
+        return as_string(vec_get(g.catch_labels, g.catch_labels.len - 1))
+    if g.cur_fni != -1:
+        return as_string(vec_get(g.sig_exit, g.cur_fni))
+    return ""
+
+def stmt_may_raise(g: Gen, stmt: int) -> int:
+    t = node_tag(g.c.p, stmt)
+    if t == N_LET():
+        value = node_child(g.c.p, stmt)
+        if node_ival(g.c.p, stmt) == 1:
+            value = node_next(g.c.p, value)
+        return expr_may_raise(g, value)
+    if t == N_ASSIGN():
+        target = node_child(g.c.p, stmt)
+        return expr_may_raise(g, node_next(g.c.p, target))
+    if t == N_EXPRSTMT():
+        return expr_may_raise(g, node_child(g.c.p, stmt))
+    if t == N_IF() or t == N_WHILE():
+        return expr_may_raise(g, node_child(g.c.p, stmt))
+    if t == N_FOR():
+        a = node_child(g.c.p, stmt)
+        while a != -1:
+            if node_tag(g.c.p, a) == N_BLOCK():
+                return 0
+            if expr_may_raise(g, a) == 1:
+                return 1
+            a = node_next(g.c.p, a)
+        return 0
+    return 0
+
+def expr_may_raise(g: Gen, e: int) -> int:
+    if e == -1:
+        return 0
+    t = node_tag(g.c.p, e)
+    if t == N_CALL():
+        name = node_sval(g.c.p, e)
+        if name_may_raise(g, name) == 1:
+            return 1
+        if local_idx(g, name) != -1 and ty_tag(g.c, local_tag(g, name)) == TY_FN():
+            return 1
+        a = node_child(g.c.p, e)
+        while a != -1:
+            if expr_may_raise(g, node_child(g.c.p, a)) == 1:
+                return 1
+            a = node_next(g.c.p, a)
+        return 0
+    if t == N_BINARY():
+        lhs = node_child(g.c.p, e)
+        if expr_may_raise(g, lhs) == 1:
+            return 1
+        return expr_may_raise(g, node_next(g.c.p, lhs))
+    if t == N_UNARY() or t == N_CAST():
+        return expr_may_raise(g, node_child(g.c.p, e))
+    if t == N_INDEX():
+        base = node_child(g.c.p, e)
+        if expr_may_raise(g, base) == 1:
+            return 1
+        return expr_may_raise(g, node_next(g.c.p, base))
+    if t == N_FIELDACCESS():
+        return expr_may_raise(g, node_child(g.c.p, e))
+    if t == N_ARRAYLIT():
+        ch = node_child(g.c.p, e)
+        while ch != -1:
+            if expr_may_raise(g, ch) == 1:
+                return 1
+            ch = node_next(g.c.p, ch)
+        return 0
+    return 0
+
+def emit_raise(g: Gen, stmt: int, indent: int) -> Gen:
+    g.used_err = 1
+    target = current_raise_target(g)
+    if target == "":
+        return gerr(g, "codegen: raise without an unwind target")
+    g = emit_expr(g, node_child(g.c.p, stmt))
+    if g.err == 1:
+        return g
+    msg = g.text
+    g = line(g, indent, "ax_err_msg = " + msg + ";")
+    g = line(g, indent, "ax_err_pending = 1;")
+    return line(g, indent, "goto " + target + ";")
+
+def emit_try(g: Gen, stmt: int, indent: int) -> Gen:
+    g.used_err = 1
+    body = node_child(g.c.p, stmt)
+    handler = node_next(g.c.p, body)
+    n = g.tmpn
+    g.tmpn = g.tmpn + 1
+    catch = "ax_catch_" + str(n)
+    end = "ax_end_" + str(n)
+    g = line(g, indent, "ax_err_pending = 0;")
+    g.catch_labels = vec_push(g.catch_labels, as_ptr(catch))
+    g = emit_block(g, body, indent)
+    if g.err == 1:
+        return g
+    # pop the handler label
+    kept = vec_new()
+    i = 0
+    while i < g.catch_labels.len - 1:
+        kept = vec_push(kept, vec_get(g.catch_labels, i))
+        i = i + 1
+    g.catch_labels = kept
+    g = line(g, indent, "if (ax_err_pending) { goto " + catch + "; }")
+    g = line(g, indent, "goto " + end + ";")
+    g = line(g, indent, catch + ":;")
+    if node_ival(g.c.p, stmt) == 1:
+        name = node_sval(g.c.p, stmt)
+        g = declare(g, name, g.c.t_str)
+        g = line(g, indent, c_ident(g, name) + " = ax_err_msg; ax_err_pending = 0;")
+    else:
+        g = line(g, indent, "ax_err_msg = 0; ax_err_pending = 0;")
+    g = emit_block(g, handler, indent)
+    if g.err == 1:
+        return g
+    return line(g, indent, end + ":;")
 
 def emit_stmt(g: Gen, stmt: int, indent: int) -> Gen:
     if g.err == 1:
@@ -496,6 +1195,10 @@ def emit_stmt(g: Gen, stmt: int, indent: int) -> Gen:
         return emit_while(g, stmt, indent)
     if t == N_FOR():
         return emit_for(g, stmt, indent)
+    if t == N_RAISE():
+        return emit_raise(g, stmt, indent)
+    if t == N_TRY():
+        return emit_try(g, stmt, indent)
     if t == N_BREAK():
         return line(g, indent, "break;")
     if t == N_CONTINUE():
@@ -507,7 +1210,7 @@ def emit_stmt(g: Gen, stmt: int, indent: int) -> Gen:
 def emit_let(g: Gen, stmt: int, indent: int) -> Gen:
     name = node_sval(g.c.p, stmt)
     value = node_child(g.c.p, stmt)
-    ann = -1
+    ann_ty = -1
     if node_ival(g.c.p, stmt) == 1:
         tyn = value
         value = node_next(g.c.p, tyn)
@@ -515,48 +1218,164 @@ def emit_let(g: Gen, stmt: int, indent: int) -> Gen:
         if c2.err == 1:
             g.c = c2
             return gerr(g, c2.errmsg)
-        ann = c2.r_ty
-    g = emit_expr(g, value)
-    if g.err == 1:
-        return g
-    rhs = g.text
-    rk = g.rk
-    rt = g.rt
-    # bind type: rebind keeps the existing type; new binding takes the
-    # annotation or the inferred result kind/type
+        g.c = c2
+        ann_ty = c2.r_ty
+    # the binding type comes from a prior binding, else the annotation, else
+    # the initializer's static type
+    ty = -1
     existing = local_tag(g, name)
     if existing != -1:
         ty = existing
-    elif ann != -1:
-        ty = ann
-    elif rk == RK_STRUCT():
-        ty = rt
+    elif ann_ty != -1:
+        ty = ann_ty
     else:
-        ty = kind_ty(g, rk)
-    if ann != -1 and ty_eq(g.c, ann, ty) == 0:
-        return gerr(g, "codegen: annotation does not match the initializer")
+        g = hint_expr(g, value)
+        ty = g.rt
+    if ty == -1:
+        return gerr(g, "codegen: cannot infer the type of '" + name + "'")
+    g = reg_type(g, ty)
     g = declare(g, name, ty)
-    g = line(g, indent, c_ident(g, name) + " = " + rhs + ";")
+    if node_tag(g.c.p, value) == N_DICTLIT():
+        g = emit_dict_literal_into(g, value, ty, c_ident(g, name), indent)
+        if g.err == 1:
+            return g
+        if g_nar_find(g, name) != -1:
+            g = g_nar_remove(g, name)
+        return g
+    g = emit_coerced(g, value, ty)
+    if g.err == 1:
+        return g
+    g = line(g, indent, c_ident(g, name) + " = " + g.text + ";")
+    # re-narrow the view after a (re-)binding
+    if g_nar_find(g, name) != -1:
+        g = hint_expr(g, value)
+        hint = g.rt
+        keep = 0
+        if hint != -1:
+            if ty_tag(g.c, hint) == TY_NONE():
+                keep = 1
+            elif ty_tag(g.c, ty) == TY_OPT():
+                if ty_eq(g.c, ty_elem(g.c, ty), hint) == 1:
+                    keep = 1
+        if keep == 1:
+            g = g_nar_set(g, name, hint)
+        else:
+            g = g_nar_remove(g, name)
+    return g
+
+# lower a dict literal into an empty dict plus one set per entry
+def emit_dict_literal_into(g: Gen, lit: int, dty: int, into: string, indent: int) -> Gen:
+    if ty_tag(g.c, dty) != TY_DICT():
+        return gerr(g, "codegen: dict literal bound to a non-dict")
+    val_ty = ty_elem(g.c, dty)
+    tok = type_token(g, val_ty)
+    g = fresh_tmp(g)
+    tmp = g.tmpname
+    decl = c_decl_name(g, dty, tmp)
+    g.decls = vec_push(g.decls, as_ptr(decl + ";"))
+    g = line(g, indent, tmp + " = ax_dict_new_" + tok + "();")
+    ent = node_child(g.c.p, lit)
+    while ent != -1 and g.err == 0:
+        key = node_child(g.c.p, ent)
+        vnode = node_next(g.c.p, key)
+        g = emit_expr(g, key)
+        if g.err == 1:
+            return g
+        ktext = g.text
+        g = emit_coerced(g, vnode, val_ty)
+        if g.err == 1:
+            return g
+        vtext = g.text
+        g = line(g, indent, "ax_dict_set_" + tok + "(" + tmp + ", " + ktext + ", " + vtext + ");")
+        ent = node_next(g.c.p, ent)
+    if into != tmp:
+        g = line(g, indent, into + " = " + tmp + ";")
     return g
 
 def emit_assign(g: Gen, stmt: int, indent: int) -> Gen:
     target = node_child(g.c.p, stmt)
     value = node_next(g.c.p, target)
-    g = emit_lvalue(g, target)
-    if g.err == 1:
-        return g
-    lhs = g.text
-    g = emit_expr(g, value)
+    lty = -1
+    lhs = ""
+    if node_tag(g.c.p, target) == N_VAR():
+        name = node_sval(g.c.p, target)
+        ng = g_nar_get(g, name)
+        if ng.r_ok == 1:
+            lty = ng.rt
+            g = ng
+        else:
+            g = ng
+            lty = local_tag(g, name)
+            if lty == -1:
+                return gerr(g, "codegen: unknown local '" + name + "'")
+        lhs = c_ident(g, name)
+    elif node_tag(g.c.p, target) == N_INDEX():
+        base_e = node_child(g.c.p, target)
+        idx_e = node_next(g.c.p, base_e)
+        g = emit_lvalue_or_expr(g, base_e)
+        if g.err == 1:
+            return g
+        base = g.text
+        bty = g.rt
+        if ty_tag(g.c, bty) == TY_DICT():
+            val = ty_elem(g.c, bty)
+            tok = type_token(g, val)
+            g = emit_expr(g, idx_e)
+            if g.err == 1:
+                return g
+            ktext = g.text
+            g = emit_coerced(g, value, val)
+            if g.err == 1:
+                return g
+            g = line(g, indent, "ax_dict_set_" + tok + "(" + base + ", " + ktext + ", " + g.text + ");")
+            return g
+        if ty_tag(g.c, bty) != TY_ARRAY():
+            return gerr(g, "codegen: indexing a non-array value")
+        lty = ty_elem(g.c, bty)
+        g = emit_expr(g, idx_e)
+        if g.err == 1:
+            return g
+        lhs = base + ".data[" + g.text + "]"
+    else:
+        g = emit_lvalue(g, target)
+        if g.err == 1:
+            return g
+        lhs = g.text
+        lty = g.rt
+    g = emit_coerced(g, value, lty)
     if g.err == 1:
         return g
     g = line(g, indent, lhs + " = " + g.text + ";")
+    # re-narrow the view after a write
+    if node_tag(g.c.p, target) == N_VAR():
+        vname = node_sval(g.c.p, target)
+        if g_nar_find(g, vname) != -1:
+            g = hint_expr(g, value)
+            assigned = g.rt
+            keep = 0
+            if assigned != -1:
+                if ty_tag(g.c, assigned) == TY_NONE():
+                    keep = 1
+                elif ty_tag(g.c, lty) == TY_OPT():
+                    if ty_eq(g.c, ty_elem(g.c, lty), assigned) == 1:
+                        keep = 1
+            if keep == 1:
+                g = g_nar_set(g, vname, assigned)
+            else:
+                g = g_nar_remove(g, vname)
     return g
 
 def emit_return(g: Gen, stmt: int, indent: int) -> Gen:
     e = node_child(g.c.p, stmt)
     if e == -1:
         return line(g, indent, "return;")
-    g = emit_expr(g, e)
+    want = -1
+    if g.cur_fni != -1:
+        want = vec_get(g.sig_ret, g.cur_fni)
+    if want != -1:
+        g = emit_coerced(g, e, want)
+    else:
+        g = emit_expr(g, e)
     if g.err == 1:
         return g
     return line(g, indent, "return " + g.text + ";")
@@ -565,21 +1384,48 @@ def emit_if(g: Gen, stmt: int, indent: int) -> Gen:
     cond = node_child(g.c.p, stmt)
     then_b = node_next(g.c.p, cond)
     else_b = node_next(g.c.p, then_b)
+    nar = g_narrow_target(g, cond)
     g = emit_expr(g, cond)
     if g.err == 1:
         return g
     if g.rk != RK_BOOL():
         return gerr(g, "codegen: 'if' condition must be bool")
     g = line(g, indent, "if (" + g.text + ") {")
+    had = 0
+    saved = -1
+    if nar.ok == 1:
+        had = g_nar_find(g, nar.name) + 1
+        if had != 0:
+            h = g_nar_get(g, nar.name)
+            g = h
+            saved = h.rt
+        g = g_nar_set(g, nar.name, nar.then_ty)
     g = emit_block(g, then_b, indent + 1)
     if g.err == 1:
         return g
+    if nar.ok == 1:
+        if had != 0:
+            g = g_nar_set(g, nar.name, saved)
+        else:
+            g = g_nar_remove(g, nar.name)
     if else_b == -1:
-        return line(g, indent, "}")
+        g = line(g, indent, "}")
+        if nar.ok == 1 and c_block_returns_all(g.c, then_b) == 1:
+            g = g_nar_set(g, nar.name, nar.else_ty)
+        return g
     g = line(g, indent, "} else {")
+    if nar.ok == 1:
+        g = g_nar_set(g, nar.name, nar.else_ty)
     g = emit_block(g, else_b, indent + 1)
     if g.err == 1:
         return g
+    if nar.ok == 1:
+        if had != 0:
+            g = g_nar_set(g, nar.name, saved)
+        else:
+            g = g_nar_remove(g, nar.name)
+        if c_block_returns_all(g.c, then_b) == 1:
+            g = g_nar_set(g, nar.name, nar.else_ty)
     return line(g, indent, "}")
 
 def emit_while(g: Gen, stmt: int, indent: int) -> Gen:
@@ -658,8 +1504,30 @@ def emit_for_array(g: Gen, stmt: int, indent: int) -> Gen:
     g = emit_expr(g, arr_e)
     if g.err == 1:
         return g
+    if g.rk == RK_STRUCT() and ty_tag(g.c, g.rt) == TY_DICT():
+        # `for k in d` walks the key array in insertion order
+        dty = g.rt
+        g = fresh_tmp(g)
+        tmp = g.tmpname
+        decl = c_decl_name(g, dty, tmp)
+        g = line(g, indent, decl + " = " + g.text + ";")
+        g = declare(g, var, g.c.t_str)
+        g = fresh_tmp(g)
+        idx = g.tmpname
+        vi = c_ident(g, var)
+        g = line(g, indent, "{")
+        g = line(g, indent + 1, "for (long long " + idx + " = 0; " + idx + " < " + tmp + "->len; " + idx + "++) {")
+        g = line(g, indent + 2, vi + " = " + tmp + "->keys[" + idx + "];")
+        body = node_child(g.c.p, stmt)
+        while node_next(g.c.p, body) != -1:
+            body = node_next(g.c.p, body)
+        g = emit_block(g, body, indent + 2)
+        if g.err == 1:
+            return g
+        g = line(g, indent + 1, "}")
+        return line(g, indent, "}")
     if g.rk != RK_STRUCT() or ty_tag(g.c, g.rt) != TY_ARRAY():
-        return gerr(g, "codegen: 'for' can only iterate over arrays")
+        return gerr(g, "codegen: 'for' can only iterate over arrays or dicts")
     aty = g.rt
     base_text = g.text
     ety = ty_elem(g.c, aty)
@@ -705,16 +1573,55 @@ def emit_expr(g: Gen, e: int) -> Gen:
         g.text = c_string_lit(node_sval(g.c.p, e))
         g.rk = RK_STR()
         return g
+    if t == N_NONE():
+        g.text = "0LL"
+        g.rk = RK_NONE()
+        g.rt = g.c.t_none
+        return g
     if t == N_VAR():
         name = node_sval(g.c.p, e)
         if local_idx(g, name) == -1:
-            return gerr(g, "codegen: unknown local '" + name + "'")
+            # a bare function name in value position is its address
+            fni = sig_index(g.c, name)
+            if fni == -1:
+                return gerr(g, "codegen: unknown local '" + name + "'")
+            params = vec_new()
+            np = vec_get(g.c.fn_nparam, fni)
+            k = 0
+            while k < np:
+                params = vec_push(params, sig_param_ty(g.c, fni, k))
+                k = k + 1
+            c2 = alloc_fn_ty(g.c, vec_get(g.c.fn_ret, fni), params)
+            g.c = c2
+            g.text = as_string(vec_get(g.sig_cname, fni))
+            g.rt = c2.r_ty
+            g.rk = RK_STRUCT()
+            return g
+        ty = local_tag(g, name)
+        if ty_tag(g.c, ty) == TY_OPT():
+            h = g_nar_get(g, name)
+            if h.r_ok == 1:
+                if ty_tag(g.c, h.rt) == TY_NONE():
+                    g.text = "0LL"
+                    g.rk = RK_NONE()
+                    g.rt = g.c.t_none
+                    return g
+                g.text = c_ident(g, name) + ".value"
+                g.rt = h.rt
+                g.rk = tag_kind(ty_tag(g.c, h.rt))
+                if g.rk == -1:
+                    g.rk = RK_STRUCT()
+                return g
         g.text = c_ident(g, name)
-        g.rt = local_tag(g, name)
-        g.rk = tag_kind(ty_tag(g.c, g.rt))
+        g.rt = ty
+        g.rk = tag_kind(ty_tag(g.c, ty))
         if g.rk == -1:
             g.rk = RK_STRUCT()
         return g
+    if t == N_CAST():
+        return emit_cast(g, e)
+    if t == N_DICTLIT():
+        return gerr(g, "codegen: a dict literal is only supported as a binding initializer")
     if t == N_UNARY():
         op = node_ival(g.c.p, e)
         g = emit_expr(g, node_child(g.c.p, e))
@@ -749,10 +1656,141 @@ def emit_expr(g: Gen, e: int) -> Gen:
         return emit_call(g, e)
     return gerr(g, "codegen: unsupported expression (tag " + str(t) + ")")
 
+def emit_cast(g: Gen, e: int) -> Gen:
+    inner = node_child(g.c.p, e)
+    tyn = node_next(g.c.p, inner)
+    g = hint_expr(g, inner)
+    from = g.rt
+    c2 = resolve_ty_node(g.c, tyn)
+    g.c = c2
+    if c2.err == 1:
+        return gerr(g, c2.errmsg)
+    to = c2.r_ty
+    g = reg_type(g, to)
+    if from != -1 and ty_eq(g.c, from, to) == 1:
+        return emit_expr(g, inner)
+    ft = -1
+    if from != -1:
+        ft = ty_tag(g.c, from)
+    tt = ty_tag(g.c, to)
+    if ft == TY_INT() and tt == TY_FLOAT():
+        g = emit_expr(g, inner)
+        g.text = "(double)(" + g.text + ")"
+        g.rk = RK_FLOAT()
+        g.rt = to
+        return g
+    if ft == TY_FLOAT() and tt == TY_INT():
+        g = emit_expr(g, inner)
+        g.text = "(long long)(" + g.text + ")"
+        g.rk = RK_INT()
+        g.rt = to
+        return g
+    if ft == TY_INT() and tt == TY_BOOL():
+        g = emit_expr(g, inner)
+        g.text = "((" + g.text + ") != 0)"
+        g.rk = RK_BOOL()
+        g.rt = to
+        return g
+    if ft == TY_BOOL() and tt == TY_INT():
+        g = emit_expr(g, inner)
+        g.text = "(long long)(" + g.text + ")"
+        g.rk = RK_INT()
+        g.rt = to
+        return g
+    if ft == TY_FLOAT() and tt == TY_BOOL():
+        g = emit_expr(g, inner)
+        first = g.text
+        g = emit_expr(g, inner)
+        second = g.text
+        g = emit_expr(g, inner)
+        g.text = "((" + first + ") != 0 && (" + second + ") == (" + g.text + "))"
+        g.rk = RK_BOOL()
+        g.rt = to
+        return g
+    if ft == TY_INT() and tt == TY_FN():
+        rt = c_type_name(g, ty_fn_ret(g.c, to))
+        ps = ""
+        k = 0
+        if ty_fn_n(g.c, to) == 0:
+            ps = "void"
+        while k < ty_fn_n(g.c, to):
+            if k > 0:
+                ps = ps + ", "
+            ps = ps + c_type_name(g, ty_fn_param(g.c, to, k))
+            k = k + 1
+        g = emit_expr(g, inner)
+        g.text = "((" + rt + " (*)(" + ps + "))(" + g.text + "))"
+        g.rk = RK_STRUCT()
+        g.rt = to
+        return g
+    if ft == TY_FN() and tt == TY_INT():
+        g = emit_expr(g, inner)
+        g.text = "((long long)(" + g.text + "))"
+        g.rk = RK_INT()
+        g.rt = to
+        return g
+    return gerr(g, "codegen: invalid cast")
+
 def emit_binary(g: Gen, e: int) -> Gen:
     op = node_ival(g.c.p, e)
     lhs = node_child(g.c.p, e)
     rhs = node_next(g.c.p, lhs)
+    if op == OP_IS() or op == OP_ISNOT():
+        g = hint_expr(g, lhs)
+        hlt = g.rt
+        g = hint_expr(g, rhs)
+        hrt = g.rt
+        probe = lhs
+        absent = 0
+        if hlt != -1 and ty_tag(g.c, hlt) == TY_NONE():
+            probe = rhs
+            absent = 1
+        cmp = "=="
+        if op == OP_ISNOT():
+            cmp = "!="
+        probe_none = 0
+        if node_tag(g.c.p, probe) == N_NONE():
+            probe_none = 1
+        g.text = "("
+        out = "("
+        side = 0
+        while side < 2:
+            if side == 1:
+                out = out + " " + cmp + " "
+            this_absent = absent
+            if side == 1:
+                this_absent = 1 - absent
+            if this_absent == 1 or probe_none == 1:
+                out = out + "0LL"
+            else:
+                g = emit_expr(g, probe)
+                if g.err == 1:
+                    return g
+                out = out + g.text + ".has"
+            side = side + 1
+        g.text = out + ")"
+        g.rk = RK_BOOL()
+        return g
+    if op == OP_IN() or op == OP_NOTIN():
+        g = hint_expr(g, rhs)
+        hrt = g.rt
+        if hrt == -1 or ty_tag(g.c, hrt) != TY_DICT():
+            return gerr(g, "codegen: 'in' is only supported for dicts")
+        g = emit_expr(g, rhs)
+        if g.err == 1:
+            return g
+        ctext = g.text
+        g = emit_expr(g, lhs)
+        if g.err == 1:
+            return g
+        ntext = g.text
+        tok = type_token(g, ty_elem(g.c, hrt))
+        neg = ""
+        if op == OP_NOTIN():
+            neg = "!"
+        g.text = neg + "(ax_dict_find_" + tok + "(" + ctext + ", " + ntext + ") >= 0)"
+        g.rk = RK_BOOL()
+        return g
     if op == OP_AND() or op == OP_OR():
         g = emit_expr(g, lhs)
         if g.err == 1:
@@ -777,7 +1815,6 @@ def emit_binary(g: Gen, e: int) -> Gen:
         return g
     lt = g.text
     lk = g.rk
-    lrt = g.rt
     g = emit_expr(g, rhs)
     if g.err == 1:
         return g
@@ -878,6 +1915,18 @@ def emit_index_expr(g: Gen, e: int) -> Gen:
         return g
     base = g.text
     bty = g.rt
+    if ty_tag(g.c, bty) == TY_DICT():
+        val = ty_elem(g.c, bty)
+        g = emit_expr(g, idx_e)
+        if g.err == 1:
+            return g
+        tok = type_token(g, val)
+        g.text = "ax_dict_get_" + tok + "(" + base + ", " + g.text + ")"
+        g.rt = val
+        g.rk = tag_kind(ty_tag(g.c, val))
+        if g.rk == -1:
+            g.rk = RK_STRUCT()
+        return g
     if ty_tag(g.c, bty) != TY_ARRAY():
         return gerr(g, "codegen: indexing a non-array value")
     ety = ty_elem(g.c, bty)
@@ -955,34 +2004,24 @@ def emit_array_lit(g: Gen, e: int) -> Gen:
     first = node_child(g.c.p, e)
     if first == -1:
         return gerr(g, "codegen: empty array literal")
-    g = emit_expr(g, first)
-    if g.err == 1:
-        return g
-    ek = g.rk
-    ety = -1
-    if ek == RK_STRUCT():
-        ety = g.rt
-    else:
-        ety = kind_ty(g, ek)
-    n = 1
-    ch = node_next(g.c.p, first)
-    while ch != -1:
-        n = n + 1
-        ch = node_next(g.c.p, ch)
-    c2 = alloc_ty(g.c, TY_ARRAY(), ety, n, "")
-    g.c = c2
-    aty = c2.r_ty
+    g = hint_expr(g, e)
+    aty = g.rt
+    if aty == -1:
+        return gerr(g, "codegen: mixed element types in array literal")
+    ety = ty_elem(g.c, aty)
     g = reg_type(g, aty)
     ct = c_type_name(g, aty)
     text = "(" + ct + "){.data = {"
-    # first element already emitted
-    text = text + g.text
-    ch = node_next(g.c.p, first)
+    ch = first
+    comma = 0
     while ch != -1 and g.err == 0:
-        g = emit_expr(g, ch)
+        if comma == 1:
+            text = text + ", "
+        comma = 1
+        g = emit_coerced(g, ch, ety)
         if g.err == 1:
             return g
-        text = text + ", " + g.text
+        text = text + g.text
         ch = node_next(g.c.p, ch)
     text = text + "}}"
     g.text = text
@@ -993,16 +2032,21 @@ def emit_array_lit(g: Gen, e: int) -> Gen:
 # [e] * N: a per-site helper function fills an entry temp with a runtime loop
 def emit_array_rep(g: Gen, e: int, count: int) -> Gen:
     elem_e = node_child(g.c.p, e)
+    g = hint_expr(g, elem_e)
+    ety = g.rt
     g = emit_expr(g, elem_e)
     if g.err == 1:
         return g
     ev_text = g.text
-    ek = g.rk
-    ety = -1
-    if ek == RK_STRUCT():
-        ety = g.rt
-    else:
-        ety = kind_ty(g, ek)
+    if ety == -1:
+        ek = g.rk
+        ety = -1
+        if ek == RK_STRUCT():
+            ety = g.rt
+        else:
+            ety = kind_ty(g, ek)
+    if ety == -1:
+        return gerr(g, "codegen: cannot infer the repeated element type")
     c2 = alloc_ty(g.c, TY_ARRAY(), ety, count, "")
     g.c = c2
     aty = c2.r_ty
@@ -1034,6 +2078,112 @@ def emit_array_rep(g: Gen, e: int, count: int) -> Gen:
 
 def emit_call(g: Gen, e: int) -> Gen:
     name = node_sval(g.c.p, e)
+    if name == "argc":
+        g.used_argv = 1
+        g.text = "ax_argc"
+        g.rk = RK_INT()
+        return g
+    if name == "arg" or name == "exit" or name == "assert":
+        a = node_child(g.c.p, e)
+        g = emit_expr(g, node_child(g.c.p, a))
+        if g.err != 0:
+            return g
+        value = g.text
+        if name == "arg":
+            g.used_argv = 1
+            g.text = "ax_arg(" + value + ")"
+            g.rk = RK_STR()
+            return g
+        g.used_exit = 1
+        g.rk = RK_VOID()
+        if name == "exit":
+            g.text = "ax_exit(" + value + ")"
+            return g
+        text = "if (!(" + value + ")) { __builtin_printf(\"assertion failed at line " + str(vec_get(g.c.p.n_line, e))
+        a = node_next(g.c.p, a)
+        if a == -1:
+            text = text + "\\n\")"
+        else:
+            g = emit_expr(g, node_child(g.c.p, a))
+            if g.err != 0:
+                return g
+            text = text + ": %s\\n\", " + g.text + ")"
+        g.text = text + "; ax_exit(1); }"
+        g.rk = RK_VOID()
+        return g
+    if name == "dict_has" or name == "dict_del":
+        a1 = node_child(g.c.p, e)
+        a2 = node_next(g.c.p, a1)
+        if a1 == -1 or a2 == -1 or node_next(g.c.p, a2) != -1:
+            return gerr(g, "codegen: " + name + " expects (dict, key)")
+        g = hint_expr(g, node_child(g.c.p, a1))
+        dt = g.rt
+        if dt == -1 or ty_tag(g.c, dt) != TY_DICT():
+            return gerr(g, "codegen: " + name + " on a non-dict")
+        val = ty_elem(g.c, dt)
+        tok = type_token(g, val)
+        g = emit_expr(g, node_child(g.c.p, a1))
+        if g.err == 1:
+            return g
+        dtext = g.text
+        g = emit_expr(g, node_child(g.c.p, a2))
+        if g.err == 1:
+            return g
+        ktext = g.text
+        if name == "dict_has":
+            g.text = "(ax_dict_find_" + tok + "(" + dtext + ", " + ktext + ") >= 0)"
+        else:
+            g.text = "(ax_dict_del_" + tok + "(" + dtext + ", " + ktext + ") != 0)"
+        g.rk = RK_BOOL()
+        return g
+    if name == "to_int" or name == "to_float":
+        a = node_child(g.c.p, e)
+        inner = node_child(g.c.p, a)
+        g = hint_expr(g, inner)
+        from = g.rt
+        if from == -1:
+            return gerr(g, "codegen: cannot infer the type passed to " + name)
+        want = g.c.t_int
+        if name == "to_float":
+            want = g.c.t_float
+        if ty_eq(g.c, from, want) == 1:
+            return emit_expr(g, inner)
+        ft = ty_tag(g.c, from)
+        if ft == TY_FN() and name == "to_int":
+            g = emit_expr(g, inner)
+            if g.err == 1:
+                return g
+            g.text = "((long long)(" + g.text + "))"
+            g.rk = RK_INT()
+            g.rt = want
+            return g
+        if ft == TY_INT() and name == "to_float":
+            g = emit_expr(g, inner)
+            if g.err == 1:
+                return g
+            g.text = "(double)(" + g.text + ")"
+            g.rk = RK_FLOAT()
+            g.rt = want
+            return g
+        if ft == TY_FLOAT() and name == "to_int":
+            g = emit_expr(g, inner)
+            if g.err == 1:
+                return g
+            g.text = "(long long)(" + g.text + ")"
+            g.rk = RK_INT()
+            g.rt = want
+            return g
+        if ft == TY_BOOL() and name == "to_int":
+            g = emit_expr(g, inner)
+            if g.err == 1:
+                return g
+            g.text = "(long long)(" + g.text + ")"
+            g.rk = RK_INT()
+            g.rt = want
+            return g
+        if ft == TY_INT() and name == "to_int":
+            return emit_expr(g, inner)
+        return gerr(g, "codegen: invalid " + name + "() conversion")
     if name == "print":
         return emit_print(g, e)
     if name == "len":
@@ -1068,6 +2218,41 @@ def emit_call(g: Gen, e: int) -> Gen:
     if fni == -1:
         if struct_known(g.c, name) == 1:
             return emit_struct_lit(g, e, name)
+        # indirect call through a local function pointer
+        if local_idx(g, name) != -1 and ty_tag(g.c, local_tag(g, name)) == TY_FN():
+            fty = local_tag(g, name)
+            rt = c_type_name(g, ty_fn_ret(g.c, fty))
+            cast_args = ""
+            k = 0
+            if ty_fn_n(g.c, fty) == 0:
+                cast_args = "void"
+            while k < ty_fn_n(g.c, fty):
+                if k > 0:
+                    cast_args = cast_args + ", "
+                cast_args = cast_args + c_type_name(g, ty_fn_param(g.c, fty, k))
+                k = k + 1
+            g = reg_type(g, fty)
+            out = "((" + rt + " (*)(" + cast_args + "))" + c_ident(g, name) + ")("
+            a = node_child(g.c.p, e)
+            first = 1
+            k = 0
+            while a != -1 and g.err == 0:
+                if first == 0:
+                    out = out + ", "
+                first = 0
+                g = emit_coerced(g, node_child(g.c.p, a), ty_fn_param(g.c, fty, k))
+                if g.err == 1:
+                    return g
+                out = out + g.text
+                k = k + 1
+                a = node_next(g.c.p, a)
+            out = out + ")"
+            g.text = out
+            g.rt = ty_fn_ret(g.c, fty)
+            g.rk = tag_kind(ty_tag(g.c, g.rt))
+            if g.rk == -1:
+                g.rk = RK_STRUCT()
+            return g
         return gerr(g, "codegen: call to undefined function '" + name + "'")
     return emit_fn_call(g, e, fni)
 
@@ -1075,14 +2260,20 @@ def emit_fn_call(g: Gen, e: int, fni: int) -> Gen:
     text = as_string(vec_get(g.sig_cname, fni)) + "("
     a = node_child(g.c.p, e)
     first = 1
+    k = 0
+    np = vec_get(g.c.fn_nparam, fni)
     while a != -1 and g.err == 0:
         if first == 0:
             text = text + ", "
         first = 0
-        g = emit_expr(g, node_child(g.c.p, a))
+        if k < np:
+            g = emit_coerced(g, node_child(g.c.p, a), sig_param_ty(g.c, fni, k))
+        else:
+            g = emit_expr(g, node_child(g.c.p, a))
         if g.err == 1:
             return g
         text = text + g.text
+        k = k + 1
         a = node_next(g.c.p, a)
     text = text + ")"
     rty = vec_get(g.sig_ret, fni)
@@ -1097,7 +2288,9 @@ def emit_fn_call(g: Gen, e: int, fni: int) -> Gen:
         g.rk = RK_STR()
     elif rtag == TY_FLOAT():
         g.rk = RK_FLOAT()
-    elif rtag == TY_STRUCT() or rtag == TY_ARRAY():
+    elif rtag == TY_NONE():
+        g.rk = RK_NONE()
+    elif rtag == TY_STRUCT() or rtag == TY_ARRAY() or rtag == TY_OPT() or rtag == TY_DICT() or rtag == TY_FN():
         g.rk = RK_STRUCT()
     else:
         g.rk = RK_INT()
@@ -1167,7 +2360,11 @@ def emit_len(g: Gen, e: int) -> Gen:
         g.text = str(ty_len(g.c, g.rt)) + "LL"
         g.rk = RK_INT()
         return g
-    return gerr(g, "codegen: len supports strings and arrays")
+    if g.rk == RK_STRUCT() and ty_tag(g.c, g.rt) == TY_DICT():
+        g.text = "(" + g.text + ")->len"
+        g.rk = RK_INT()
+        return g
+    return gerr(g, "codegen: len supports strings, arrays and dicts")
 
 def emit_str(g: Gen, e: int) -> Gen:
     a = node_child(g.c.p, e)
@@ -1311,7 +2508,182 @@ def line(g: Gen, indent: int, text: string) -> Gen:
     g.out = g.out + pad + text + "\n"
     return g
 
-# ---- function bodies ----
+# ---- exception reachability (mirror of compute_fn_raises) ----
+
+struct RaiseScan:
+    direct: int
+    has: int
+    calls: Vec
+
+def rs_new() -> RaiseScan:
+    return RaiseScan(direct=0, has=0, calls=vec_new())
+
+def rs_merge(a: RaiseScan, b: RaiseScan) -> RaiseScan:
+    if b.direct == 1:
+        a.direct = 1
+    if b.has == 1:
+        a.has = 1
+    i = 0
+    while i < b.calls.len:
+        a.calls = vec_push(a.calls, vec_get(b.calls, i))
+        i = i + 1
+    return a
+
+def scan_raise_block(c: CState, block: int, in_try: int) -> RaiseScan:
+    r = rs_new()
+    st = node_child(c.p, block)
+    while st != -1:
+        r = rs_merge(r, scan_raise_stmt(c, st, in_try))
+        st = node_next(c.p, st)
+    return r
+
+def scan_raise_stmt(c: CState, stmt: int, in_try: int) -> RaiseScan:
+    t = node_tag(c.p, stmt)
+    r = rs_new()
+    if t == N_LET():
+        value = node_child(c.p, stmt)
+        if node_ival(c.p, stmt) == 1:
+            value = node_next(c.p, value)
+        return scan_raise_expr(c, value)
+    if t == N_ASSIGN():
+        target = node_child(c.p, stmt)
+        return scan_raise_expr(c, node_next(c.p, target))
+    if t == N_EXPRSTMT():
+        return scan_raise_expr(c, node_child(c.p, stmt))
+    if t == N_RETURN():
+        e = node_child(c.p, stmt)
+        if e == -1:
+            return r
+        return scan_raise_expr(c, e)
+    if t == N_RAISE():
+        r = scan_raise_expr(c, node_child(c.p, stmt))
+        r.has = 1
+        if in_try == 0:
+            r.direct = 1
+        return r
+    if t == N_TRY():
+        body = node_child(c.p, stmt)
+        handler = node_next(c.p, body)
+        # the body's raises land in the handler; only the handler's own
+        # raises and calls escape this function (mirror of scan_fn_body)
+        r.has = 1
+        h = scan_raise_block(c, handler, in_try)
+        r = rs_merge(r, h)
+        r.direct = h.direct
+        return r
+    if t == N_IF():
+        cond = node_child(c.p, stmt)
+        then_b = node_next(c.p, cond)
+        r = scan_raise_expr(c, cond)
+        r = rs_merge(r, scan_raise_block(c, then_b, in_try))
+        else_b = node_next(c.p, then_b)
+        if else_b != -1:
+            r = rs_merge(r, scan_raise_block(c, else_b, in_try))
+        return r
+    if t == N_WHILE():
+        cond = node_child(c.p, stmt)
+        body = node_next(c.p, cond)
+        r = scan_raise_expr(c, cond)
+        return rs_merge(r, scan_raise_block(c, body, in_try))
+    if t == N_FOR():
+        a = node_child(c.p, stmt)
+        while a != -1:
+            if node_tag(c.p, a) == N_BLOCK():
+                r = rs_merge(r, scan_raise_block(c, a, in_try))
+                a = -1
+            else:
+                r = rs_merge(r, scan_raise_expr(c, a))
+                a = node_next(c.p, a)
+        return r
+    return r
+
+def scan_raise_expr(c: CState, e: int) -> RaiseScan:
+    r = rs_new()
+    if e == -1:
+        return r
+    t = node_tag(c.p, e)
+    if t == N_CALL():
+        r.calls = vec_push(r.calls, as_ptr(node_sval(c.p, e)))
+        a = node_child(c.p, e)
+        while a != -1:
+            r = rs_merge(r, scan_raise_expr(c, node_child(c.p, a)))
+            a = node_next(c.p, a)
+        return r
+    if t == N_BINARY():
+        r = scan_raise_expr(c, node_child(c.p, e))
+        return rs_merge(r, scan_raise_expr(c, node_next(c.p, node_child(c.p, e))))
+    if t == N_UNARY() or t == N_CAST():
+        return scan_raise_expr(c, node_child(c.p, e))
+    if t == N_INDEX():
+        base = node_child(c.p, e)
+        r = scan_raise_expr(c, base)
+        return rs_merge(r, scan_raise_expr(c, node_next(c.p, base)))
+    if t == N_FIELDACCESS():
+        return scan_raise_expr(c, node_child(c.p, e))
+    if t == N_ARRAYLIT():
+        ch = node_child(c.p, e)
+        while ch != -1:
+            r = rs_merge(r, scan_raise_expr(c, ch))
+            ch = node_next(c.p, ch)
+        return r
+    return r
+
+def rz_has(g: Gen, name: string) -> int:
+    i = 0
+    while i < g.rz_name.len:
+        if as_string(vec_get(g.rz_name, i)) == name:
+            return 1
+        i = i + 1
+    return 0
+
+def name_may_raise(g: Gen, name: string) -> int:
+    i = 0
+    while i < g.rz_name.len:
+        base = as_string(vec_get(g.rz_name, i))
+        if name == base:
+            return 1
+        if starts_with(name, base + ".") == 1:
+            return 1
+        i = i + 1
+    return 0
+
+def compute_fn_raises(g: Gen) -> Gen:
+    g.rz_name = vec_new()
+    names = vec_new()
+    bodies = vec_new()
+    root = g.c.p.root
+    ch = node_child(g.c.p, root)
+    while ch != -1:
+        if node_tag(g.c.p, ch) == N_FN():
+            names = vec_push(names, as_ptr(node_sval(g.c.p, ch)))
+            body = node_child(g.c.p, ch)
+            while node_next(g.c.p, body) != -1:
+                body = node_next(g.c.p, body)
+            bodies = vec_push(bodies, body)
+            sc = scan_raise_block(g.c, body, 0)
+            if sc.has == 1:
+                g.has_exc = 1
+        ch = node_next(g.c.p, ch)
+    changed = 1
+    while changed == 1:
+        changed = 0
+        i = 0
+        while i < names.len:
+            nm = as_string(vec_get(names, i))
+            if rz_has(g, nm) == 0:
+                sc = scan_raise_block(g.c, vec_get(bodies, i), 0)
+                hit = sc.direct
+                if hit == 0:
+                    k = 0
+                    while k < sc.calls.len:
+                        if rz_has(g, as_string(vec_get(sc.calls, k))) == 1:
+                            hit = 1
+                        k = k + 1
+                if hit == 1:
+                    g.rz_name = vec_push(g.rz_name, as_ptr(nm))
+                    changed = 1
+            i = i + 1
+    return g
 
 def emit_fn(g: Gen, fni: int, node: int) -> Gen:
     g.cur_fni = fni
@@ -1319,13 +2691,21 @@ def emit_fn(g: Gen, fni: int, node: int) -> Gen:
     g.decls = vec_new()
     g.loc_name = vec_new()
     g.loc_tag = vec_new()
+    g.nar_name = vec_new()
+    g.nar_ty = vec_new()
+    g.catch_labels = vec_new()
     g.tmpn = 0
+    fn_name = as_string(vec_get(g.c.fn_name, fni))
     c_name = as_string(vec_get(g.sig_cname, fni))
     ret_ty = vec_get(g.sig_ret, fni)
     g = reg_type(g, ret_ty)
+    exit_label = ""
+    if name_may_raise(g, fn_name) == 1:
+        exit_label = "ax_exit_" + str(g.tmpn)
+        g.tmpn = g.tmpn + 1
+        vec_set(g.sig_exit, fni, as_ptr(exit_label))
     # walk params and body; params become locals (no decl line — they are in
-    # the signature) but their types may register typedefs. Names come from
-    # the N_PARAM children of the fn node, in declaration order.
+    # the signature) but their types may register typedefs.
     np = vec_get(g.c.fn_nparam, fni)
     body = -1
     pnames = vec_new()
@@ -1359,7 +2739,7 @@ def emit_fn(g: Gen, fni: int, node: int) -> Gen:
                 params = params + ", "
             params = params + c_decl_name(g, pty, c_ident(g, pname))
             j = j + 1
-    header = c_type_name(g, ret_ty) + " " + c_name + "(" + params + ")"
+    header = c_decl_name(g, ret_ty, c_name + "(" + params + ")")
     g.protos = vec_push(g.protos, as_ptr(header))
     text = header + " {\n"
     g = emit_block(g, body, 1)
@@ -1371,6 +2751,12 @@ def emit_fn(g: Gen, fni: int, node: int) -> Gen:
         text = text + "    " + as_string(vec_get(g.decls, i)) + "\n"
         i = i + 1
     text = text + g.out
+    if exit_label != "":
+        text = text + "    " + exit_label + ":;\n"
+        if ty_tag(g.c, ret_ty) == TY_VOID():
+            text = text + "    return;\n"
+        else:
+            text = text + "    return " + zero_value(g, ret_ty) + ";\n"
     text = text + "}\n"
     g.bodies = vec_push(g.bodies, as_ptr(text))
     return g
@@ -1437,25 +2823,80 @@ def ensure_struct(g: Gen, sname: string) -> Gen:
 def ensure_ty(g: Gen, ty: int) -> Gen:
     t = ty_tag(g.c, ty)
     if t == TY_STRUCT():
-        return ensure_struct(g, ty_sname(g.c, ty))
+        return ensure_root(g, "s:" + ty_sname(g.c, ty))
     if t == TY_ARRAY():
-        name = typedef_name(g, ty)
-        if td_done_has(g, name) == 1:
-            return g
-        g = ensure_ty(g, ty_elem(g.c, ty))
+        return ensure_root(g, "t:" + typedef_name(g, ty))
+    if t == TY_OPT():
+        return ensure_root(g, "o:ax_opt_" + type_token(g, ty_elem(g.c, ty)))
+    if t == TY_DICT():
+        return ensure_root(g, "d:ax_dict_" + type_token(g, ty_elem(g.c, ty)))
+    if t == TY_FN():
+        g = ensure_ty(g, ty_fn_ret(g.c, ty))
+        k = 0
+        while k < ty_fn_n(g.c, ty):
+            g = ensure_ty(g, ty_fn_param(g.c, ty, k))
+            k = k + 1
+        return g
+    return g
+
+# emit one type definition and its dependencies (mirrors visit_type_node);
+# the done set is keyed by the same "d:/o:/s:/t:" ids the Rust emitter uses
+def ensure_root(g: Gen, id: string) -> Gen:
+    if td_done_has(g, id) == 1:
+        return g
+    if starts_with(id, "d:") == 1:
+        name = str_sub(id, 2, len(id))
+        idx = dict_idx(g, name)
+        if idx == -1:
+            return gerr(g, "codegen: unregistered dict type '" + name + "'")
+        inner = vec_get(g.dict_inner, idx)
+        # mark first: recursive aggregates are rejected by the checker, and a
+        # repeated dependency must not recurse forever here
+        g.td_done = vec_push(g.td_done, as_ptr(id))
+        g = ensure_ty(g, inner)
         if g.err == 1:
             return g
-        # the typedef must be registered (reg_type ran during emission); if
-        # somehow it is not, register it now so the definition is consistent
-        if typedef_idx(g, name) == -1:
-            g.td_name = vec_push(g.td_name, as_ptr(name))
-            g.td_elem = vec_push(g.td_elem, ty_elem(g.c, ty))
-            g.td_len = vec_push(g.td_len, ty_len(g.c, ty))
+        vt = c_type_name(g, inner)
+        tok = type_token(g, inner)
+        missing = "return \"\";"
+        if ty_tag(g.c, inner) != TY_STR():
+            missing = vt + " zero; __builtin_memset(&zero, 0, sizeof(zero)); return zero;"
+        g.types_text = g.types_text + "struct " + name + " {\n    char** keys;\n    " + vt + "* vals;\n    long long len;\n    long long cap;\n};\n"
+        g.types_text = g.types_text + "static struct " + name + "* ax_dict_new_" + tok + "(void) {\n    struct " + name + "* d = (struct " + name + "*)__builtin_malloc(sizeof(struct " + name + "));\n    d->keys = 0; d->vals = 0; d->len = 0; d->cap = 0;\n    return d;\n}\n"
+        g.types_text = g.types_text + "                 static long long ax_dict_find_" + tok + "(struct " + name + "* d, char* k) {\n    for (long long i = 0; i < d->len; i++) {\n        if (!__builtin_strcmp(d->keys[i], k)) return i;\n    }\n    return -1;\n}\n"
+        g.types_text = g.types_text + "                 static void ax_dict_set_" + tok + "(struct " + name + "* d, char* k, " + vt + " v) {\n    long long i = ax_dict_find_" + tok + "(d, k);\n    if (i >= 0) { d->vals[i] = v; return; }\n    if (d->len == d->cap) {\n        long long ncap = d->cap ? d->cap * 2 : 4;\n        d->keys = (char**)__builtin_realloc(d->keys, (unsigned long long)ncap * (unsigned long long)sizeof(char*));\n        d->vals = (" + vt + "*)__builtin_realloc(d->vals, (unsigned long long)ncap * (unsigned long long)sizeof(" + vt + "));\n        d->cap = ncap;\n    }\n    d->keys[d->len] = k;\n    d->vals[d->len] = v;\n    d->len = d->len + 1;\n}\n"
+        g.types_text = g.types_text + "                 static " + vt + " ax_dict_get_" + tok + "(struct " + name + "* d, char* k) {\n    long long i = ax_dict_find_" + tok + "(d, k);\n    if (i < 0) {\n        ax_err_msg = \"dict key not found\";\n        ax_err_pending = 1;\n        " + missing + "\n    }\n    return d->vals[i];\n}\n"
+        g.types_text = g.types_text + "                 static char* ax_dict_del_" + tok + "(struct " + name + "* d, char* k) {\n    long long i = ax_dict_find_" + tok + "(d, k);\n    if (i < 0) return 0;\n    d->len = d->len - 1;\n    for (long long j = i; j < d->len; j++) { d->keys[j] = d->keys[j + 1]; d->vals[j] = d->vals[j + 1]; }\n    return k;\n}\n\n"
+        return g
+    if starts_with(id, "o:") == 1:
+        name = str_sub(id, 2, len(id))
+        idx = opt_idx(g, name)
+        if idx == -1:
+            return gerr(g, "codegen: unregistered nullable type '" + name + "'")
+        inner = vec_get(g.opt_inner, idx)
+        g.td_done = vec_push(g.td_done, as_ptr(id))
+        g = ensure_ty(g, inner)
+        if g.err == 1:
+            return g
+        decl = c_decl_name(g, inner, "value")
+        g.types_text = g.types_text + "struct " + name + " {\n    " + decl + ";\n    int has;\n};\n"
+        return g
+    if starts_with(id, "s:") == 1:
+        sname = str_sub(id, 2, len(id))
+        g.td_done = vec_push(g.td_done, as_ptr(id))
+        return ensure_struct(g, sname)
+    if starts_with(id, "t:") == 1:
+        name = str_sub(id, 2, len(id))
         idx = typedef_idx(g, name)
+        if idx == -1:
+            return gerr(g, "codegen: unregistered array typedef '" + name + "'")
         elem = vec_get(g.td_elem, idx)
         ln = vec_get(g.td_len, idx)
+        g.td_done = vec_push(g.td_done, as_ptr(id))
+        g = ensure_ty(g, elem)
+        if g.err == 1:
+            return g
         g.types_text = g.types_text + "typedef struct {\n    " + c_decl_name(g, elem, "data[" + str(ln) + "]") + ";\n} " + name + ";\n"
-        g.td_done = vec_push(g.td_done, as_ptr(name))
         return g
     return g
 
@@ -1486,27 +2927,47 @@ def type_defs_text(g: Gen) -> Gen:
         if as_string(vec_get(g.c.sf_name, j)) != "":
             g = reg_type(g, vec_get(g.c.sf_ty, j))
         j = j + 1
-    # struct roots sorted by source name, dependencies still emitted first
+    # roots sorted by the same "d:/o:/s:/t:" ids the Rust emitter sorts;
+    # dependencies still emitted first
+    ids = vec_new()
     names = struct_names(g)
-    struct_order = sorted_name_indices(names)
     i = 0
-    while i < struct_order.len and g.err == 0:
-        g = ensure_struct(g, as_string(vec_get(names, vec_get(struct_order, i))))
+    while i < names.len:
+        ids = vec_push(ids, as_ptr("s:" + as_string(vec_get(names, i))))
         i = i + 1
-    # typedef roots sorted by C name, dependencies still emitted first
-    order = sorted_name_indices(g.td_name)
+    i = 0
+    while i < g.td_name.len:
+        ids = vec_push(ids, as_ptr("t:" + as_string(vec_get(g.td_name, i))))
+        i = i + 1
+    i = 0
+    while i < g.opt_name.len:
+        ids = vec_push(ids, as_ptr("o:" + as_string(vec_get(g.opt_name, i))))
+        i = i + 1
+    i = 0
+    while i < g.dict_name.len:
+        ids = vec_push(ids, as_ptr("d:" + as_string(vec_get(g.dict_name, i))))
+        i = i + 1
+    order = sorted_name_indices(ids)
     i = 0
     while i < order.len and g.err == 0:
-        idx = vec_get(order, i)
-        name = as_string(vec_get(g.td_name, idx))
-        if td_done_has(g, name) == 0:
-            elem = vec_get(g.td_elem, idx)
-            ln = vec_get(g.td_len, idx)
-            g = ensure_ty(g, elem)
-            if g.err == 1:
-                return g
-            g.types_text = g.types_text + "typedef struct {\n    " + c_decl_name(g, elem, "data[" + str(ln) + "]") + ";\n} " + name + ";\n"
-            g.td_done = vec_push(g.td_done, as_ptr(name))
+        g = ensure_root(g, as_string(vec_get(ids, vec_get(order, i))))
+        i = i + 1
+    return g
+
+def reg_all_types(g: Gen) -> Gen:
+    j = 0
+    while j < g.c.sf_struct.len:
+        if as_string(vec_get(g.c.sf_name, j)) != "":
+            g = reg_type(g, vec_get(g.c.sf_ty, j))
+        j = j + 1
+    i = 0
+    while i < g.c.fn_name.len:
+        g = reg_type(g, vec_get(g.sig_ret, i))
+        np = vec_get(g.c.fn_nparam, i)
+        k = 0
+        while k < np:
+            g = reg_type(g, sig_param_ty(g.c, i, k))
+            k = k + 1
         i = i + 1
     return g
 
@@ -1531,6 +2992,10 @@ def gen_program(g: Gen) -> Gen:
         i = i + 1
     if g.err == 1:
         return g
+    g = compute_fn_raises(g)
+    if g.has_exc == 1:
+        g.used_err = 1
+    g = reg_all_types(g)
     main_fni = sig_index(c, "main")
     if main_fni == -1:
         return gerr(g, "codegen: program has no 'main'")
@@ -1565,6 +3030,10 @@ def assemble(g: Gen, main_fni: int) -> Gen:
         i = i + 1
     if g.ex_text.len > 0:
         s = s + "\n"
+    # the exception slot must exist before anything that reads or writes it,
+    # including the generated dict helpers
+    if g.used_err == 1:
+        s = s + "static long long ax_err_pending = 0;\nstatic char* ax_err_msg = 0;\n\n"
     g = type_defs_text(g)
     if g.err == 1:
         return g
@@ -1588,6 +3057,10 @@ def assemble(g: Gen, main_fni: int) -> Gen:
         i = i + 1
     if g.rep_text.len > 0:
         s = s + "\n"
+    if g.used_exit == 1:
+        s = s + "void exit(int);\nstatic void ax_exit(long long code) { exit((int)code); }\n\n"
+    if g.used_argv == 1:
+        s = s + "static long long ax_argc = 0;\nstatic char** ax_argv = 0;\nstatic const char* ax_arg(long long i) { return (i >= 0 && i < ax_argc) ? ax_argv[i + 1] : \"\"; }\n\n"
     i = 0
     while i < g.protos.len:
         s = s + as_string(vec_get(g.protos, i)) + ";\n"
@@ -1599,9 +3072,17 @@ def assemble(g: Gen, main_fni: int) -> Gen:
         i = i + 1
     main_ret = vec_get(g.sig_ret, main_fni)
     main_call = "    aoxn_main();\n    return 0;\n"
-    if ty_tag(g.c, main_ret) == TY_INT():
+    if g.used_err == 1:
+        if ty_tag(g.c, main_ret) == TY_INT():
+            main_call = "    long long r = aoxn_main();\n    if (ax_err_pending) {\n        __builtin_printf(\"Uncaught exception: %s\\n\", ax_err_msg);\n        return 1;\n    }\n    return (int)r;\n"
+        else:
+            main_call = "    aoxn_main();\n    if (ax_err_pending) {\n        __builtin_printf(\"Uncaught exception: %s\\n\", ax_err_msg);\n        return 1;\n    }\n    return 0;\n"
+    elif ty_tag(g.c, main_ret) == TY_INT():
         main_call = "    return (int)aoxn_main();\n"
-    s = s + "#ifdef _WIN32\nlong long _setmode(long long, long long);\n#endif\n\nint main(void) {\n#ifdef _WIN32\n    _setmode(1, 0x8000);\n#endif\n" + main_call + "}\n"
+    main_sig = "int main(void) {\n"
+    if g.used_argv == 1:
+        main_sig = "int main(int argc, char** argv) {\n    ax_argc = (long long)(argc - 1);\n    ax_argv = argv;\n"
+    s = s + "#ifdef _WIN32\nlong long _setmode(long long, long long);\n#endif\n\n" + main_sig + "#ifdef _WIN32\n    _setmode(1, 0x8000);\n#endif\n" + main_call + "}\n"
     g.text = s
     return g
 
@@ -1611,17 +3092,104 @@ def gen_c_text(g: Gen) -> string:
         return ""
     return g.text
 
+# Shell path contract shared with the driver. Empty/control-containing paths
+# are unsupported. cmd.exe expansion is not made safe by double quotes.
+def shell_path_safe(path: string) -> bool:
+    n = len(path)
+    if n == 0:
+        return False
+    if target_os() == "windows":
+        # A terminal backslash would escape the closing quote in the CRT argv
+        # parser. Output artifacts are files, so reject directory spellings.
+        if str_get(path, n - 1) == 92:
+            return False
+    i = 0
+    while i < n:
+        b = str_get(path, i)
+        if b < 32 or b == 127:
+            return False
+        if target_os() == "windows":
+            if b == 34 or b == 37 or b == 33 or b == 38 or b == 124 or b == 60 or b == 62 or b == 94:
+                return False
+        i = i + 1
+    return True
+
+# Callers must check shell_path_safe BEFORE writing files or spawning shells.
+# Prefix a leading dash so clang never interprets a path as an option.
+def shell_quote(path: string) -> string:
+    if not shell_path_safe(path):
+        return ""
+    safe = path
+    if str_get(safe, 0) == 45:
+        safe = "./" + safe
+    if target_os() == "windows":
+        return "\"" + safe + "\""
+    out = "'"
+    i = 0
+    n = len(safe)
+    while i < n:
+        b = str_get(safe, i)
+        if b == 39:
+            out = out + "'\"'\"'"
+        else:
+            out = out + str_chr(b)
+        i = i + 1
+    return out + "'"
+
+# A clang flag travels through `system`, so it must be shell-inert. The
+# allowlist is deliberately narrow: flags such as -g, -O2, -march=native,
+# -fsanitize=address, -fno-strict-aliasing and -I/some/dir pass; anything
+# carrying whitespace, quotes, `$`, backticks or redirection is rejected.
+def clang_arg_safe(a: string) -> bool:
+    n = len(a)
+    if n == 0:
+        return False
+    i = 0
+    while i < n:
+        c = str_get(a, i)
+        ok = 0
+        if (c >= 48 and c <= 57) or (c >= 65 and c <= 90) or (c >= 97 and c <= 122):
+            ok = 1
+        elif c == 45 or c == 95 or c == 46 or c == 61 or c == 44 or c == 47 or c == 58 or c == 43 or c == 91 or c == 93:
+            ok = 1
+        if ok == 0:
+            return False
+        i = i + 1
+    return True
+
 # write the generated C next to obj_path and compile it with `clang -c`.
 def gen_emit_object(g: Gen, obj_path: string) -> Gen:
     if g.err == 1:
         return g
     if g.text == "":
         return gerr(g, "codegen: no C text was generated")
+    if len(obj_path) == 0:
+        return gerr(g, "codegen: empty object path")
     c_path = obj_path + ".c"
     if not write_file(c_path, g.text):
         return gerr(g, "codegen: cannot write '" + c_path + "'")
-    cmd = "clang -O3 -w -c " + c_path + " -o " + obj_path
-    rc = system(cmd)
+    args = vec_new()
+    args = vec_push(args, as_ptr("-O" + str(g.opt_level)))
+    if g.cc_warnings == 0:
+        args = vec_push(args, as_ptr("-w"))
+    i = 0
+    while i < g.extra_clang.len:
+        a = as_string(vec_get(g.extra_clang, i))
+        if not clang_arg_safe(a):
+            return gerr(g, "codegen: unsupported clang argument '" + a + "'")
+        args = vec_push(args, as_ptr(a))
+        i = i + 1
+    if g.cpu != "":
+        flag = "-march=" + g.cpu
+        if not clang_arg_safe(flag):
+            return gerr(g, "codegen: unsupported cpu '" + g.cpu + "'")
+        args = vec_push(args, as_ptr(flag))
+    args = vec_push(args, as_ptr("-c"))
+    args = vec_push(args, as_ptr(c_path))
+    args = vec_push(args, as_ptr("-o"))
+    args = vec_push(args, as_ptr(obj_path))
+    rc = run_process(g.clang_exe, args)
     if rc != 0:
+        g.err_stage = "cc"
         return gerr(g, "codegen: clang failed on the generated C (kept at " + c_path + ", exit " + str(rc) + ")")
     return g

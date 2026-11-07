@@ -11,10 +11,11 @@ independent package manager has dependencies pinned in `Cargo.lock`.
 
 **Compiler 0.55.0; package-manager crate 0.42.0.** The latest versioned
 [changelog](CHANGELOG.md) entry fixes exponentiation precedence: `-2 ** 2` is
-`-4`. Unreleased work optimizes exception propagation, module-table access and
-struct-cycle checking, and strengthens direct C-emitter and ABI verification.
-This does not introduce C source compatibility or port newer features to the
-self-hosted compiler. See [C compatibility](docs/c-compatibility.md).
+`-4`. Unreleased work optimizes exception propagation/module/struct-cycle
+handling, ports None/dict/function-pointer/exception support into the
+self-hosted compiler, extends the Aoxn-written CLI (run/symbols/doctor/JSON/
+cache/options), and adds the CSV, random and socket stdlib modules. This does
+not introduce C source compatibility. See [C compatibility](docs/c-compatibility.md).
 
 ```python
 import * from "stdlib"
@@ -79,21 +80,43 @@ C, and `AOXN_TIME=1` reports lex/parse/resolve/typecheck/codegen/link phases.
 - The TypeScript front end is a supported subset, not full TS/JavaScript.
   Closures, objects and GC remain gaps; see the [TS plan](docs/ts-m1-spec.md).
 
-The self-hosted compiler implements a subset. Its stage fixed point compares
-self-hosted driver products across stages, including C/object bytes (masking
-Windows COFF timestamps). Direct Rust-vs-selfhost C comparison is a separate
-claim. Neither finite corpus proves all-feature equivalence. The self-hosted
-backend lacks dict/None/function-pointer/exception emission, default parameters
-and namespace binding. Read [C compatibility](docs/c-compatibility.md), the
-[spec](docs/spec.md), [language card](AGENTS.md) and [gaps](docs/language-gaps.md).
+The self-hosted compiler now covers the v0.40.0 surface — `None`/`T | None`,
+`dict[V]`, function pointers and `raise`/`try`/`except` — with C that matches
+the Rust emitter byte-for-byte on the tested common subset. Programs without
+those features keep their previous C. Its stage fixed point compares
+self-hosted driver products across stages (masking Windows COFF timestamps) and
+remains independent of the direct Rust-vs-selfhost emitter comparison; neither
+finite corpus proves all-feature equivalence.
+
+`selfhost/cli.ax` is a real Aoxn implementation of help, version, check, c,
+build, run, symbols and doctor. `run` passes an exact argv vector to the child
+(Windows CRT spawn, POSIX fork/exec — no shell), preserves empty/spaced/special
+arguments and returns the child exit code. `-o`, `--O0..--O3`, `-l/-L`, `--cpu`,
+`--backend c`, `--clang-arg`, `-g`, `--cc-warnings` and `--json` reach
+codegen/link; JSON reports (success and error) go to stderr; W001, a
+content-keyed run cache (`AOXN_NO_CACHE`/`AOXN_CACHE_DIR`) and
+`AOXN_STDLIB`/`AOXN_HOME` resolution are implemented.
+
+Still outside the selfhost CLI, and rejected rather than forwarded: package
+commands, CSS assets/`--emit-assets`/`--tailwind`, and namespace/selective
+imports. Build caching, full doctor rows, imported-symbol file attribution and
+exact diagnostic spans are incomplete; Linux-native execution was not run this
+round. The Rust CLI remains the production entry point. Read
+[C compatibility](docs/c-compatibility.md), the [spec](docs/spec.md),
+[language card](AGENTS.md) and [gaps](docs/language-gaps.md).
 
 ### Libraries and tools
 
 Explicitly imported [stdlib modules](docs/stdlib.md) include math, time,
-datetime, calendar, pathlib, base64, hashlib, hmac, os, glob, JSON, bisect and
-heapq. Core containers/I/O remain in `stdlib/stdlib.ax`. The [UI](docs/ui.md)
-shares widgets across Win32/GDI and Linux X11/Xft. The [OpenAI](docs/openai-sdk.md)
-and [Anthropic](docs/anthropic-sdk.md) SDKs share JSON/HTTP/SSE; WinHTTP transport
+datetime, calendar, pathlib, base64, hashlib, hmac, os, glob, JSON, bisect,
+heapq, CSV, random and socket. Core containers/I/O remain in
+`stdlib/stdlib.ax`. CSV is RFC 4180 with value errors, not the full Python
+dialect; random is deterministic MINSTD and explicitly NOT cryptographically
+secure; socket is blocking IPv4 TCP (no DNS/UDP/IPv6/TLS) with Windows
+`-l ws2_32`, and its Linux branch is implemented but not natively executed in
+this round. The [UI](docs/ui.md) shares widgets across Win32/GDI and Linux
+X11/Xft. The [OpenAI](docs/openai-sdk.md) and
+[Anthropic](docs/anthropic-sdk.md) SDKs share JSON/HTTP/SSE; WinHTTP transport
 is Windows-only.
 
 The [package manager](docs/pkg-manager.md) uses `aoxn.json`, `aoxn.lock` and
@@ -103,7 +126,9 @@ directories, git or read-only plain HTTP. npm-import requires Aoxn metadata,
 not arbitrary JS. Warm reuse rechecks content hashes, excluding only its own
 `index.ax` shim. [CSS assets](docs/css-assets.md) include CSS Modules,
 minification, URL handling and `--emit-assets`; built-in `--tailwind` is a subset.
-The [IDE](docs/ide.md) is a Tauri/Next.js/Monaco application, separately tested.
+The [IDE](docs/ide.md) is a Tauri/Next.js/Monaco application with a
+ZCode-derived Zai design system, assistant, terminal, source-control and
+preview panes; separately tested.
 
 ### Repository maintenance and CI scope
 
@@ -144,16 +169,16 @@ cargo test -p aoxn-pkg --locked
 cargo check --workspace --tests --target x86_64-unknown-linux-gnu
 ```
 
-Final Windows validation for the current tree: **349 root + 105 package = 454
-passed, 0 failed/ignored**. The separate required CI command also passed its four
-ABI and two parity targets; native ABI cases actually ran at O0/O3. Six
-common-subset inputs have identical C, while five known gaps are
-separately pinned, not counted as parity. The original fixed point and
-cross-process determinism tests passed. Linux Rust workspace/tests cross-check
-passed, not Linux native linking/runtime. An intermediate incorrect known-gap
-expectation failed and was corrected from actual full-C comparison; see
-[C compatibility](docs/c-compatibility.md) for evidence and reproduction.
-IDE tests and full installer packaging were not run.
+Final Windows validation for the current tree (2026-11-07, clang 23.1.2):
+**357 root + 105 package = 462 passed, 0 failed/ignored**; the complete log is
+`target/final-test.log`. Nineteen full-C comparison inputs, 22 rejection
+fixtures and three separately pinned known gaps are distinct categories, not
+parity successes. The four ABI tests (O0/O3), both parity targets, the original
+fixed point, both CLI stages, real socket loopback (Rust and selfhost builds),
+random cross-process vectors and the Python `csv` differential all ran.
+`cargo check --workspace --tests --target x86_64-unknown-linux-gnu` passed;
+Linux native linking/runtime was not executed. Reruns are not added to the
+counts. IDE tests and full installer packaging were not run for this batch.
 
 **Dependency security, 2026-11-01**: the two JS manifests were re-audited and
 upgraded — `ide` to `next` 16.4.3 plus dompurify 3.4.17, `web/next-app` to
@@ -163,6 +188,14 @@ vulnerabilities in either, with 62/62 IDE frontend tests, `pnpm typecheck`, both
 advisory (glib, `RUSTSEC-2024-0429`) stays accepted in `ide/src-tauri/audit.toml`
 with a dated re-check. No compiler suite re-ran for it: nothing in `src/`,
 `tests/`, the Aoxn sources or any `Cargo.lock` changed.
+
+**IDE rework, 2026-11-07**: the IDE moved to a ZCode v3.17.2-derived Zai
+design system and gained assistant, terminal, source-control and preview
+panes. Validation: `pnpm --dir ide typecheck`, **64/64 IDE frontend tests**,
+`pnpm build`, **43 IDE Rust tests** and `pnpm audit` (no known
+vulnerabilities) all pass; the git porcelain parser and preview MIME map
+have dedicated Rust tests. No compiler suite re-ran — no compiler source
+changed.
 
 **Linux CI, 2026-11-01**: one `aoxn-pkg` test was Windows-only in its expectation.
 The archive entry `demo/C:/Users/victim/…` is an absolute path on Windows and an
@@ -213,9 +246,9 @@ Aoxn 是使用 Python 风格缩进的静态类型原生语言。Rust 编译器�
 
 **编译器 0.55.0，包管理器 crate 0.42.0**；以清单和
 [CHANGELOG](CHANGELOG.md) 最新版本条目为准，0.55.0 修复 `-2 ** 2 == -4`。
-未发布工作包括异常传播、模块表、结构体环检查优化，以及直接 C 发射器比较和 ABI
-验证。不新增 C 源码兼容，也不把 Rust 新特性移植到自举编译器。见
-[C 兼容边界](docs/c-compatibility.md)。
+未发布工作优化异常传播/模块/结构体环检查，把 None/dict/函数指针/异常移植进自举、
+扩展 Aoxn 编写的 CLI（run/symbols/doctor/JSON/缓存/选项），并新增 CSV、random、
+socket 标准库模块。不新增 C 源码兼容。见 [C 兼容边界](docs/c-compatibility.md)。
 
 ```python
 import * from "stdlib"
@@ -271,17 +304,33 @@ AOXN_DUMP_C 打印 C，AOXN_TIME 输出各编译阶段耗时。
   内部聚合 ABI 不等于任意 C struct-by-value extern 兼容。
 - TS 前端为子集而非完整 TS/JS；对象、闭包、GC 仍有缺口，见[计划](docs/ts-m1-spec.md)。
 
-自举不动点比较自举驱动跨阶段 C/目标文件（屏蔽 Windows COFF 时间戳）；
-Rust-vs-selfhost 完整 C 比较是另一个验证，两者都不证明所有功能等价。
-自举仍缺 dict/None/函数指针/异常发射、默认参数与命名空间绑定。
-实际规则见[C 边界](docs/c-compatibility.md)、[规范](docs/spec.md)、
+自举现覆盖 v0.40.0 语言面：None/`T | None`、`dict[V]`、函数指针与
+raise/try/except；在已测试的共同子集上 C 与 Rust 发射器逐字节相同，不使用这些
+特性的程序 C 不变。跨阶段不动点与 Rust-vs-selfhost 直接比较仍是两项独立证据，
+有限语料都不证明全功能等价。
+
+selfhost/cli.ax 是真正的 Aoxn 实现，提供 help/version/check/c/build/run/
+symbols/doctor。run 以精确 argv 向量启动子进程（Windows CRT spawn、POSIX
+fork/exec，无 shell），保留空串/空格/特殊字符并返回子进程退出码。`-o`、
+`--O0..--O3`、`-l/-L`、`--cpu`、`--backend c`、`--clang-arg`、`-g`、
+`--cc-warnings`、`--json` 进入真实编译/链接；JSON 报告（成功/错误）走 stderr；
+W001、内容键 run 缓存（`AOXN_NO_CACHE`/`AOXN_CACHE_DIR`）与
+`AOXN_STDLIB`/`AOXN_HOME` 解析已实现。
+
+仍不在自举 CLI 内、且明确拒绝而非转发：包管理器命令、CSS 资源/
+`--emit-assets`/`--tailwind`、命名空间/选择性导入。build 缓存、完整 doctor 行、
+导入符号文件归属和精确诊断跨度仍不完整；本轮未执行 Linux 原生运行。生产 CLI 仍是
+Rust。见[C 边界](docs/c-compatibility.md)、[规范](docs/spec.md)、
 [语言卡](AGENTS.md)和[语言缺口](docs/language-gaps.md)。
 
 ### 库与工具
 
 [标准库](docs/stdlib.md)独立模块提供 math/time/datetime/calendar/pathlib/
-base64/hashlib/hmac/os/glob/json/bisect/heapq；核心容器与 I/O 在 stdlib/stdlib.ax。
-[UI](docs/ui.md)共享控件层，后端为 Win32/GDI 与 X11/Xft。
+base64/hashlib/hmac/os/glob/json/bisect/heapq/csv/random/socket；核心容器与 I/O
+在 stdlib/stdlib.ax。CSV 是 RFC 4180 + 值错误，不等于 Python 全部 dialect；
+random 是确定性 MINSTD，**明确非密码学安全**；socket 是 blocking IPv4 TCP
+（无 DNS/UDP/IPv6/TLS），Windows 需 `-l ws2_32`，Linux 分支已实现但本轮未原生
+运行。[UI](docs/ui.md)共享控件层，后端为 Win32/GDI 与 X11/Xft。
 [OpenAI](docs/openai-sdk.md)/[Anthropic](docs/anthropic-sdk.md) SDK 共享传输基础，
 WinHTTP 为 Windows-only。
 
@@ -290,7 +339,8 @@ init/add/remove/install/update/list/freeze/tree/why/audit/trust/publish/yank/cac
 npm-import 与直接别名；注册表为目录/git/只读明文 HTTP。npm-import 只收 Aoxn
 元数据，不支持任意 JS。热安装复用前重算内容哈希，仅排除自身 index.ax shim。
 [CSS](docs/css-assets.md)支持 Modules、压缩、URL、emit-assets，内建 Tailwind 是子集。
-[IDE](docs/ide.md)为独立测试的 Tauri/Next.js/Monaco 应用。
+[IDE](docs/ide.md)为独立测试的 Tauri/Next.js/Monaco 应用，界面采用
+ZCode 衍生的 Zai 设计系统，并带助手、终端、Git 与预览面板。
 
 ### 仓库维护与 CI 范围
 
@@ -325,12 +375,13 @@ cargo test -p aoxn-pkg --locked
 cargo check --workspace --tests --target x86_64-unknown-linux-gnu
 ```
 
-当前树 Windows 最终验证：**349根+105包=454项通过，0失败/忽略**。独立必跑 CI
-命令另完成4项 ABI、2项 parity，原生 ABI 实际执行 O0/O3。6个共同子集输入 C
-相同，5个已知缺口独立钉住，不混算为 parity。不动点和跨进程
-确定性通过，Linux Rust workspace/tests cross-check 通过，不证明 Linux 链接/运行。
-中间一项 known-gap 预期失败，经完整 C 实测纠正后最终全过，见
-[C 兼容证据](docs/c-compatibility.md)。未运行 IDE 或完整安装器打包。
+当前树 Windows 最终验证（2026-11-07，clang 23.1.2）：**357根+105包=462项通过，
+0失败/忽略**；完整日志 `target/final-test.log`。19个完整 C 比较输入、22个拒绝样例、
+3个独立 known gaps 分别计证，不混算为 parity。4项 ABI（O0/O3）、两项 parity、
+原不动点、两阶段 CLI、真实 socket 回环（Rust 与 selfhost 构建）、随机数跨进程向量
+与 Python `csv` 差分均执行。`cargo check --workspace --tests --target
+x86_64-unknown-linux-gnu` 通过，未执行 Linux 原生链接/运行；重跑不重复计数。
+本批未运行 IDE 测试或完整安装器打包。
 
 **依赖安全 2026-11-01**：两份 JS 清单重新审计并升级——`ide` 到 `next` 16.4.3
 加 dompurify 3.4.17，`web/next-app` 到 `next` 15.5.28，共关闭 7 项公告；两份清单
@@ -338,6 +389,12 @@ cargo check --workspace --tests --target x86_64-unknown-linux-gnu
 与 `next start` 路由冒烟全部通过。唯一保留的 Rust 公告（glib
 `RUSTSEC-2024-0429`）连同本次复核仍记在 `ide/src-tauri/audit.toml`。
 本次未重跑编译器测试：src、tests、Aoxn 源码与任何 Cargo.lock 都未改动。
+
+**IDE 重构 2026-11-07**：IDE 迁移到 ZCode v3.17.2 衍生的 Zai 设计系统，
+新增助手、终端、Git 与预览面板。验证：`pnpm --dir ide typecheck`、
+**IDE 前端 64/64**、`pnpm build`、**IDE Rust 43 项**、`pnpm audit`
+（无已知漏洞）全部通过；git porcelain 解析与预览 MIME 映射有独立 Rust 测试。
+未重跑编译器套件——未改动编译器源码。
 
 **Linux CI 2026-11-01**：`aoxn-pkg` 有一项测试的预期只适用于 Windows。归档条目
 `demo/C:/Users/victim/…` 在 Windows 是绝对路径，在 POSIX 只是名叫 `C:` 的普通目录，

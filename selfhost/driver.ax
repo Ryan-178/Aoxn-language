@@ -1,30 +1,91 @@
-# Aoxn self-hosted driver, written in Aoxn (self-hosting stage 4).
-#
-# Closes the loop: source file -> import-aware load -> strict type check ->
-# C-text codegen -> `clang -c` object -> clang link -> executable. All stages
-# are implemented in Aoxn (selfhost/*.ax); the driver only orchestrates them
-# and shells out to clang via the stdlib `system` binding.
-#
-# Since v0.29.0 the self-hosted compiler shares the Rust compiler's backend
-# shape: it emits ISO C99 text (codegen.ax) and lets clang produce the native
-# object, so the LLVM-C API is no longer part of the pipeline at all.
-#
-# Paths are taken as given and resolved against the current directory.
-
+# Import-aware self-hosted compiler driver. Public compile_file/emit_c APIs
+# remain usable by the bootstrap demos; the CLI shares their pipeline.
 import * from "../stdlib/stdlib.ax"
 import * from "./lexer.ax"
 import * from "./parser.ax"
 import * from "./typecheck.ax"
 import * from "./load.ax"
 import * from "./codegen.ax"
+
 struct DriverState:
     err: int
     errmsg: string
+    stage: string
+    line: int
+    col: int
+    raw: string
+    w_name: Vec
+    w_line: Vec
+    w_col: Vec
+
+# Options that change codegen/link. The CLI parses flags into this; the
+# environment provides the same defaults the Rust CLI documents.
+struct DriverOpts:
+    opt_level: int
+    cc_warnings: int
+    cpu: string
+    clang_exe: string
+    extra_clang: Vec
+    libs: Vec
+    libdirs: Vec
+
+def split_lines(s: string) -> Vec:
+    out = vec_new()
+    n = len(s)
+    i = 0
+    cur = ""
+    while i <= n:
+        b = 10
+        if i < n:
+            b = str_get(s, i)
+        if i == n or b == 10:
+            if cur != "":
+                out = vec_push(out, as_ptr(cur))
+            cur = ""
+        else:
+            cur = cur + str_chr(b)
+        i = i + 1
+    return out
+
+def driver_opts_default() -> DriverOpts:
+    clang = env_str("AOXN_CLANG", "clang")
+    cpu = env_str("AOXN_CPU", "")
+    ccw = 0
+    if env_str("AOXN_CC_WARNINGS", "") == "1":
+        ccw = 1
+    return DriverOpts(
+        opt_level=3,
+        cc_warnings=ccw,
+        cpu=cpu,
+        clang_exe=clang,
+        extra_clang=split_lines(env_str("AOXN_CLANG_ARGS", "")),
+        libs=vec_new(),
+        libdirs=vec_new(),
+    )
+
+def driver_apply_opts(g: Gen, opts: DriverOpts) -> Gen:
+    g.opt_level = opts.opt_level
+    g.cc_warnings = opts.cc_warnings
+    g.cpu = opts.cpu
+    g.clang_exe = opts.clang_exe
+    g.extra_clang = opts.extra_clang
+    return g
 
 def driver_err(d: DriverState, msg: string) -> DriverState:
     if d.err == 0:
         d.err = 1
         d.errmsg = msg
+        d.raw = msg
+    return d
+
+def driver_fail_gen(d: DriverState, g: Gen) -> DriverState:
+    if d.err == 0:
+        d.err = 1
+        d.errmsg = g.errmsg
+        d.stage = g.err_stage
+        d.line = g.err_line
+        d.col = g.err_col
+        d.raw = g.err_raw
     return d
 
 # platform artifact suffix: ".exe" on Windows, "" elsewhere
@@ -33,55 +94,113 @@ def exe_suffix() -> string:
         return ".exe"
     return ""
 
-def compile_file(src_path: string, obj_path: string, exe_path: string) -> DriverState:
-    d = DriverState(err=0, errmsg="")
-    ls = load_program(src_path)
-    if ls.err == 1:
-        return driver_err(d, ls.errmsg)
+# Frontend prefix shared by generation and library clients.
+def driver_check(src_path: string) -> CState:
     c = checker_state()
+    ls = load_program(src_path)
+    if ls.err != 0:
+        c.err = 1
+        c.errmsg = ls.errmsg
+        c.err_stage = ls.err_stage
+        c.err_line = ls.err_line
+        c.err_col = ls.err_col
+        c.err_raw = ls.err_raw
+        c.files = ls.files
+        return c
     c.p = ls.p
+    c.files = ls.files
     c = check_all(c)
-    if c.err == 1:
-        return driver_err(d, c.errmsg)
+    return c
+
+def driver_generate(src_path: string) -> Gen:
+    return driver_generate_opts(src_path, driver_opts_default())
+
+def driver_generate_opts(src_path: string, opts: DriverOpts) -> Gen:
+    c = driver_check(src_path)
     g = gen_new(c)
+    g = driver_apply_opts(g, opts)
+    if c.err != 0:
+        g.err_stage = c.err_stage
+        g.err_line = c.err_line
+        g.err_col = c.err_col
+        g.err_raw = c.err_raw
+        return gerr(g, c.errmsg)
     g = gen_program(g)
-    if g.err == 1:
-        return driver_err(d, g.errmsg)
-    g = gen_emit_object(g, obj_path)
-    if g.err == 1:
-        return driver_err(d, g.errmsg)
-    # /STACK is a Windows link.exe flag; POSIX main-thread stacks are 8MB
-    # already (RLIMIT_STACK on Linux, fixed on macOS).
+    if g.err == 0 and gen_c_text(g) == "":
+        g.err_stage = "internal"
+        return gerr(g, "codegen produced no C text")
+    return g
+
+# Quoting alone does not stop clang interpreting a leading '-' as an option.
+def driver_operand(path: string) -> string:
+    if len(path) > 0:
+        if load_u8(path, 0) == 45:
+            return "./" + path
+    return path
+
+def compile_file(src_path: string, obj_path: string, exe_path: string) -> DriverState:
+    return compile_file_opts(src_path, obj_path, exe_path, driver_opts_default())
+
+def compile_file_opts(src_path: string, obj_path: string, exe_path: string, opts: DriverOpts) -> DriverState:
+    d = DriverState(err=0, errmsg="", stage="", line=0, col=0, raw="", w_name=vec_new(), w_line=vec_new(), w_col=vec_new())
+    if len(obj_path) == 0 or len(exe_path) == 0:
+        return driver_err(d, "empty output path")
+    if normalize_path(src_path) == normalize_path(obj_path) or normalize_path(src_path) == normalize_path(exe_path) or normalize_path(src_path) == normalize_path(obj_path + ".c"):
+        d.stage = "io"
+        return driver_err(d, "output would overwrite the source")
+    g = driver_generate_opts(src_path, opts)
+    if g.err != 0:
+        return driver_fail_gen(d, g)
+    obj = driver_operand(obj_path)
+    exe = driver_operand(exe_path)
+    d.w_name = g.w_name
+    d.w_line = g.w_line
+    d.w_col = g.w_col
+    g = gen_emit_object(g, obj)
+    if g.err != 0:
+        return driver_fail_gen(d, g)
+    args = vec_new()
+    args = vec_push(args, as_ptr(obj))
+    args = vec_push(args, as_ptr("-o"))
+    args = vec_push(args, as_ptr(exe))
+    i = 0
+    while i < opts.extra_clang.len:
+        a = as_string(vec_get(opts.extra_clang, i))
+        if not clang_arg_safe(a):
+            d.stage = "io"
+            return driver_err(d, "unsupported clang argument '" + a + "'")
+        args = vec_push(args, as_ptr(a))
+        i = i + 1
+    i = 0
+    while i < opts.libdirs.len:
+        args = vec_push(args, as_ptr("-L"))
+        args = vec_push(args, vec_get(opts.libdirs, i))
+        i = i + 1
+    i = 0
+    while i < opts.libs.len:
+        name = as_string(vec_get(opts.libs, i))
+        if not clang_arg_safe("-l" + name):
+            d.stage = "io"
+            return driver_err(d, "unsupported library name '" + name + "'")
+        args = vec_push(args, as_ptr("-l" + name))
+        i = i + 1
     if target_os() == "windows":
-        cmd = "clang " + obj_path + " -o " + exe_path + " -Wl,/STACK:8388608"
+        args = vec_push(args, as_ptr("-Wl,/STACK:8388608"))
     else:
-        # -lm: C math (fmod/sqrt/...) is a separate library on POSIX (the CRT
-        # link covers it on Windows)
-        cmd = "clang " + obj_path + " -o " + exe_path + " -lm"
-    rc = system(cmd)
+        args = vec_push(args, as_ptr("-lm"))
+    rc = run_process(opts.clang_exe, args)
     if rc != 0:
-        return driver_err(d, "link failed (exit " + str(rc) + "): " + cmd)
+        d.stage = "link"
+        d.raw = "link failed (exit " + str(rc) + ")"
+        return driver_err(d, d.raw)
     return d
 
-# the self-hosted `aoxn c`: load -> check -> codegen, write the generated C
-# text to c_path (no object, no link)
+# File-output API retained for existing bootstrap and parity clients.
 def emit_c(src_path: string, c_path: string) -> DriverState:
-    d = DriverState(err=0, errmsg="")
-    ls = load_program(src_path)
-    if ls.err == 1:
-        return driver_err(d, ls.errmsg)
-    c = checker_state()
-    c.p = ls.p
-    c = check_all(c)
-    if c.err == 1:
-        return driver_err(d, c.errmsg)
-    g = gen_new(c)
-    g = gen_program(g)
-    if g.err == 1:
-        return driver_err(d, g.errmsg)
-    text = gen_c_text(g)
-    if text == "":
-        return driver_err(d, "codegen produced no C text")
-    if not write_file(c_path, text):
+    d = DriverState(err=0, errmsg="", stage="", line=0, col=0, raw="", w_name=vec_new(), w_line=vec_new(), w_col=vec_new())
+    g = driver_generate(src_path)
+    if g.err != 0:
+        return driver_fail_gen(d, g)
+    if not write_file(c_path, gen_c_text(g)):
         return driver_err(d, "cannot write '" + c_path + "'")
     return d

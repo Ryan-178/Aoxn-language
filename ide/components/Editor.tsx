@@ -18,13 +18,12 @@ import { useCallback, useEffect, useRef } from 'react'
 import type * as Monaco from 'monaco-editor'
 import type { Diagnostic } from '@/lib/diagnostics'
 import { LANG_AOXN, registerAoxn } from '@/lib/monaco'
-import { IconError } from './icons'
 
 const MonacoEditor = dynamic(
   () => import('@monaco-editor/react').then((m) => m.default),
   {
     ssr: false,
-    loading: () => <div className="editor__placeholder">Loading the editor…</div>,
+    loading: () => <div className="wb-placeholder">Loading the editor…</div>,
   },
 )
 
@@ -35,6 +34,8 @@ export interface EditorProps {
   diagnostics: Diagnostic[]
   /** A pending "reveal this line" instruction from the output panel. */
   jump?: { path: string; line: number; column: number; seq: number } | null
+  /** Zai Monaco theme: `aoxn-zai-dark` or `aoxn-zai-light`. */
+  theme?: string
   /** Called on every keystroke; the parent owns the dirty flag. */
   onChange(path: string, text: string): void
   onCursor(path: string, line: number, column: number): void
@@ -152,7 +153,7 @@ export function Editor(props: EditorProps) {
       path={path}
       language={languageFor(path)}
       value={text}
-      theme="aoxn-dark"
+      theme={props.theme ?? 'aoxn-zai-dark'}
       onChange={handleChange}
       // The Aoxn language and the aoxn-dark theme are registered HERE, in
       // beforeMount, which runs after Monaco is loaded but BEFORE the
@@ -219,15 +220,4 @@ export function languageFor(path: string): string {
   if (p.endsWith('.yml') || p.endsWith('.yaml')) return 'yaml'
   if (p.endsWith('.sh')) return 'shell'
   return 'plaintext'
-}
-
-/** The error count in the status bar; nothing when there is nothing wrong. */
-export function ErrorBadge({ count }: { count: number }) {
-  if (count === 0) return null
-  return (
-    <span className="status__item status__item--err">
-      <IconError />
-      <span>{count}</span>
-    </span>
-  )
 }

@@ -1164,7 +1164,7 @@ impl<'a> GenC<'a> {
 
 /// the element type of an array literal, mirroring the checker's join:
 /// `[1, None, 3]` is `[int | None; 3]` (v0.40.0)
-    fn array_elem_type(g: &mut GenC, elems: &[Expr]) -> Result<Type, String> {
+    fn array_elem_type(g: &GenC, elems: &[Expr]) -> Result<Type, String> {
         let first = g.hint(&elems[0])?;
         if elems.len() == 1 {
             return Ok(first);
@@ -2808,7 +2808,13 @@ if matches!(op, Is | IsNot) {
                 other => Err(format!("internal error: field access on {other} in type hint")),
             },
             Expr::ArrayLit { elems, .. } => {
-                let elem = self.hint(&elems[0])?;
+                if elems.is_empty() {
+                    return Err("internal error: empty array literal in type hint".into());
+                }
+                // the join, not the first element: `[1, None, 3]` is
+                // `[int | None; 3]`, and binding it to a variable used to
+                // panic here on the let-binding type-drift assertion
+                let elem = Self::array_elem_type(self, elems)?;
                 Ok(Type::Array { elem: Box::new(elem), len: elems.len() })
             }
             Expr::ArrayRep { elem, count, .. } => {

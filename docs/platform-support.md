@@ -64,7 +64,15 @@ see `docs/ui.md`).
   "no transport on this platform" error instead of failing to link.
 - **The installer / `aoxn-setup`** — one artifact, Windows packaging.
 - **The web benchmark suite's server** (`web/`) — its sockets speak
-  ws2_32; a POSIX socket module is future work, not a port.
+  ws2_32. `stdlib/socket.ax` now provides a portable blocking IPv4 TCP subset
+  (Winsock on Windows, POSIX on Linux) with per-function `target_os()` guards;
+  it has real Windows loopback evidence, while the Linux branch has not been
+  executed natively in this workspace. The web suite itself has not yet been
+  migrated to the portable module.
+- The selfhost CLI's process execution is argv-based on both platforms
+  (Windows CRT `_spawnvp` + CRT argument quoting, POSIX `fork`/`execvp`); it does
+  not use a shell. The selfhost CLI was exercised on Windows this round; no
+  Linux-native CLI result is claimed here.
 - **macOS** — no Cocoa backend is expressible (struct-by-value externs);
   nothing changed since the v0.30.0 removal.
 

@@ -25,10 +25,18 @@ earlier protective guidance.
 ### Trust boundaries
 
 Compiling or executing Aoxn is **not a sandbox**. Imports read files, asset
-commands write files, and clang produces native code. Rust invokes clang using
-argument vectors; the self-hosted driver also has a shell-based path. Isolate
-untrusted projects with OS/container controls over files, network and credentials.
-Type checking is not permission to execute untrusted output.
+commands write files, and clang produces native code. Both drivers invoke clang
+with argument vectors; the selfhost CLI's `run` spawns the compiled program with
+an argv vector (Windows CRT `_spawnvp`, POSIX `fork`/`execvp`), never a shell.
+Windows arguments are CRT-quoted so empty/spaced/special values survive; that is
+correctness, not sanitization. Package commands and CSS/Tailwind options are
+rejected rather than forwarded. The content-keyed run cache trusts files already
+present in a writable cache directory (a hostile cache can substitute an
+executable), PATH is not authenticated, output creation is not exclusive, and
+`stdlib/socket` performs real network I/O with the caller's permissions;
+`stdlib/random` is explicitly non-cryptographic. Isolate untrusted projects with
+OS/container controls over files, network and credentials. Type checking is not
+permission to execute untrusted output.
 
 `src/` has zero external Rust crate dependencies. Package-manager dependencies
 are pinned in Cargo.lock and do not depend on the compiler library. IDE and
@@ -47,7 +55,9 @@ verification does not establish sandboxing or constitute a security audit.
   untrusted users.
 - Direct Rust-vs-selfhost C parity and the self-host stage fixed point are
   different checks. Equal fixture outputs do not prove every feature equivalent.
-  Selfhost lacks several newer language features. See
+  The selfhost front end now covers None/`T | None`, `dict[V]`, function pointers
+  and raise/try/except, but still lacks default parameters, namespace bindings
+  and selective imports; parity is a tested common subset. See
   [C compatibility](docs/c-compatibility.md) for exact limits and validation.
 - ABI correctness requires a matching external declaration. Aoxn `int` maps to
   `long long`, bool to C `int`; neither implies arbitrary C `int`/`_Bool`
@@ -84,8 +94,15 @@ verification does not establish sandboxing or constitute a security audit.
   the compiler after self-test. Downloads are disabled by default; InstallClang
   is opt-in. Quarantine is OS policy; falsely reporting install success is a bug.
 - The IDE canonicalizes workspace paths, rejects link escapes/clobbering, recreates
-  outputs rather than following hard links and validates commands in Rust.
-  Hostile webviews must not acquire arbitrary shell/global command execution.
+  outputs rather than following hard links and validates commands in Rust. File
+  read/write/create and preview commands are bounded to the opened folder.
+  **The Terminal panel is a deliberate exception**: `ide_terminal_exec` runs a
+  user-typed command through the platform shell, with the initial cwd bounded to
+  the workspace. A compromised local webview can therefore execute commands as
+  the user, including commands that leave the folder. Treat the desktop webview
+  as trusted and do not expose this command to a remotely served UI without an
+  authorization layer. The assistant proxy (`ide_ai_chat`) keeps provider keys in
+  the Rust process; `ide_read_bytes` caps preview payloads at 16 MiB.
 - JSON/UTF/SSE/URL/headers/glob/base64/UI parsers must advance and respect buffers.
   Missing slab indices are guarded; realloc helpers return live handles; builder
   growth cannot shrink below live children. Empty/nonfinite/deep JSON terminates.
@@ -138,13 +155,15 @@ registry trust tiers do not sandbox or certify programs.
 The thirteen findings from the 2026-10-17 audit were fixed in 0.51.0/0.51.1;
 that is history, not absence of new defects. Baseline **8f90aca** recorded
 343 root + 104 package tests on Windows with explicit clang 23.1.2. Current-tree
-validation passed **349 root + 105 package tests (454), 0 failed/ignored** on
-Windows; the explicit required gate separately completed all four ABI and two
-parity targets. Native ABI cases ran at O0/O3; original fixed point and
-cross-process determinism passed. Linux Rust
-workspace/tests cross-check passed, not Linux native runtime. An intermediate
-wrong known-gap expectation failed and was corrected from direct C comparison;
-see [verification evidence](docs/c-compatibility.md). No fresh security audit,
+validation passed **357 root + 105 package tests (462), 0 failed/ignored** on
+Windows (2026-11-07, clang 23.1.2; complete log `target/final-test.log`); the
+explicit required gate separately completed all four ABI and two parity targets.
+Nineteen full-C inputs, 22 rejection fixtures and three known gaps are distinct
+categories. Native ABI cases ran at O0/O3; the original fixed point, both CLI
+stages, real socket loopback (Rust and selfhost builds), random cross-process
+vectors and the Python CSV differential passed. Linux Rust workspace/tests
+cross-check passed, not Linux native runtime. See
+[verification evidence](docs/c-compatibility.md). No fresh security audit,
 IDE validation, Linux native runtime or full installer release is implied.
 The P2 maintenance follow-up reran the explicit locked compiler/package commands;
 results and the Python checker tests are recorded in
@@ -176,8 +195,13 @@ aoxn doctor、最小输入、命令、预期/实际行为与影响。误编译�
 ### 信任边界
 
 编译/执行**不是沙箱**：导入读文件、资源命令写文件、clang 产出原生代码。
-Rust 使用参数向量，自举驱动还使用 shell。对不可信项目使用系统/容器文件、网络和
-凭据隔离；类型检查通过不代表可以安全执行。
+Rust 与自举驱动都用参数向量调用 clang；自举 CLI 的 run 也用 argv 向量启动编译产物
+（Windows CRT `_spawnvp`、POSIX `fork`/`execvp`），绝不经过 shell。Windows 参数按
+CRT 规则引用，保证空串/空格/特殊字符原样到达，这不是消毒。包管理器命令与
+CSS/Tailwind 选项明确拒绝而非转发。内容键 run 缓存信任可写缓存目录中已存在的文件
+（恶意缓存可替换可执行文件）；PATH 未经认证，输出不是独占创建；
+`stdlib/socket` 以调用者权限进行真实网络 I/O；`stdlib/random` 明确非密码学安全。
+对不可信项目使用系统/容器文件、网络和凭据隔离；类型检查通过不代表可以安全执行。
 
 src/ 无外部 Rust crate 依赖；包管理器独立依赖固定在 Cargo.lock，不依赖编译器库。
 IDE/Web 的 JS/Tauri 为另一供应链边界。发射器/ABI 验证不是安全审计，也不提供沙箱。
@@ -189,7 +213,9 @@ IDE/Web 的 JS/Tauri 为另一供应链边界。发射器/ABI 验证不是安全
 - 生成标识来自稳定源码/计数器/名字，不能用地址；hash 迭代不应改变 C。
   缓存包含编译器、选项、依赖；勿共享不可信可写缓存。
 - Rust-vs-selfhost 直接 C 比较和自举跨阶段不动点是不同检查；有限 fixture
-  不证明全特性等价，自举仍缺新功能，见[C 边界](docs/c-compatibility.md)。
+  不证明全特性等价。自举已覆盖 None/`T | None`、`dict[V]`、函数指针与
+  raise/try/except，但仍缺默认参数、命名空间绑定与选择性导入；parity 是已测试
+  的共同子集，见[C 边界](docs/c-compatibility.md)。
 - 外部 ABI 依赖正确声明。Aoxn int 对应 long long，bool 对应 C int，不能推为
   任意 C int/_Bool 兼容；固定参数 extern 不支持 C 可变参数。错误声明可能链接
   成功却产生 UB；已知签名 C helper 测试不能校验任意第三方声明。
@@ -212,7 +238,11 @@ IDE/Web 的 JS/Tauri 为另一供应链边界。发射器/ABI 验证不是安全
 - 安装器限制在选定根、更新 PATH、自检后再确认二进制。默认不下载，InstallClang
   显式启用；系统隔离不是编译器漏洞，假报成功是 bug。
 - IDE Rust 层限制工作区路径、防链接逃逸/覆盖、重建输出防硬链接，并验证命令。
-  恶意 webview 不能取得任意 shell/全局命令能力。
+  文件读写/创建与预览命令限制在已打开目录内。**终端面板是有意的例外**：
+  `ide_terminal_exec` 通过平台 shell 执行用户输入的命令，初始 cwd 限制在工作区，
+  但命令本身可离开该目录。因此本地 webview 必须视为可信；不要把该命令暴露给
+  远程提供的 UI，除非另有授权层。助手代理（`ide_ai_chat`）把供应商密钥留在
+  Rust 进程；`ide_read_bytes` 将预览载荷限制在 16 MiB。
 - JSON/UTF/SSE/URL/头/glob/base64/UI 解析必须推进且不越界；缺失 slab 索引守卫、
   realloc 活句柄写回、builder 不缩到 live count 以下；空/非有限/深 JSON 终止。
   WinHTTP 不静默跨重定向泄密、不把截断当成功。
@@ -251,11 +281,12 @@ Windows/Linux 另有独立步骤强制 C parity/ABI 目标使用 clang，提前�
 
 2026-10-17 审计13项已在0.51.0/0.51.1修复，不保证没有新缺陷。
 历史基线 **8f90aca** 在 Windows 显式 clang 23.1.2 记录343根+104包；当前树最终
-**349根+105包=454项通过，0失败/忽略**，独立必跑门禁另完成4项 ABI 与2项 parity，
-ABI 实际执行 O0/O3，不动点和跨进程确定性通过；Linux Rust workspace/tests
-cross-check 通过，不等于原生运行。
-中间 known-gap 错误预期曾失败，已据完整 C 比较纠正并最终全过，见
-[C 兼容证据](docs/c-compatibility.md)。不暗示新安全审计、IDE 验证、Linux 原生运行
+**357根+105包=462项通过，0失败/忽略**（2026-11-07，clang 23.1.2；完整日志
+`target/final-test.log`），独立必跑门禁另完成4项 ABI 与2项 parity。
+19个完整 C 输入、22个拒绝样例、3个 known gaps 分别计证；ABI 实际执行 O0/O3，
+原不动点、两阶段 CLI、真实 socket 回环（Rust 与 selfhost 构建）、随机数跨进程向量
+与 Python CSV 差分均通过；Linux Rust workspace/tests cross-check 通过，不等于原生运行。
+见[C 兼容证据](docs/c-compatibility.md)。不暗示新安全审计、IDE 验证、Linux 原生运行
 或完整安装器发布。P2维护后又执行显式locked编译器/包测试，结果与Python检查器
 测试见[仓库维护证据](docs/repository-audit.md)。未触发托管CI，workflow仅本地语法校验。
 2026-11-01 的 tarball 测试修复已落 main，其托管 CI **两个平台均通过**：Linux 解包

@@ -30,6 +30,9 @@ proof of equivalence for every program.
 | struct | Generated C struct | Aoxn copies by value; internal calls use explicit aggregate conventions |
 | `[T; N]` | C struct containing `T data[N]` | Length is in the Aoxn type; assignment copies the array |
 | `fn(...) -> ...` | C function pointer | Signature must match; not a closure or captured environment |
+| `T \| None` | `struct ax_opt_<T> { T value; int has; }` | Passing/returning follows the aggregate convention; `None` is a zero value with `has = 0` |
+| `dict[V]` | `struct ax_dict_<V>*` heap handle | Copies SHARE the map; never treat it as a by-value struct from C |
+| `None` value | `long long 0` before carrier coercion | Only meaningful inside an `ax_opt_*` carrier |
 | raw address | Integer handle, commonly `long long` | Caller owns width, lifetime, alignment and API contract obligations |
 
 Generated aggregate calling conventions are **internal Aoxn ABI**, not a promise
@@ -78,19 +81,35 @@ normalization, and retain the stage fixed-point test separately. A driver built
 by Rust that executes `selfhost/codegen.ax` is a real comparison of the two
 emitter implementations; it is not an additional stage-2 bootstrap proof.
 
-The self-hosted compiler remains a subset. Do not include unsupported syntax in
-an allegedly common-subset corpus or silently skip rejected cases. In particular,
-self-hosted emission does not cover dict, None/nullable narrowing, function
-pointers or exceptions. Default parameters and namespace bindings are not
-implemented there either. Selective imports are explicitly refused. Numeric
-conversion builtins and indexed augmented assignments also have known
-selfhost gaps; field augmented assignment is explicitly covered as matching.
-Embedded NUL escapes and noncanonical float spellings must not be assumed to
-produce identical C. Known-gap regression cases are not parity successes.
-Runtime argv,
-assert and exit builtins are not part of that subset. Use repo-relative wildcard
-imports and ASCII fixture paths; the self-hosted loader uses narrow `fopen` and
-does not implement installed package/name resolution.
+The self-hosted compiler is still a subset. Do not include unsupported syntax in
+an allegedly common-subset corpus or silently skip rejected cases. The current
+parity corpus now covers `None`/`T | None` (widening, `is`/`is not`, branch
+narrowing, mixed array literals), `dict[V]` (runtime helpers, aliasing, iteration,
+missing-key raise), function pointers (values, annotations, indirect calls,
+int↔fn casts, fn-pointer returns) and `raise`/`try`/`except` (pending slot,
+propagation checks, handler re-raise, uncaught exit). Each fixture's C is compared
+byte-for-byte and failure-message fixtures are checked separately. Default
+parameters, namespace bindings and selective imports remain unimplemented in the
+self-hosted front end; selective imports are explicitly refused. String indexing /
+slices and several v0.51-era numeric conveniences also remain outside the
+self-hosted subset unless a fixture proves otherwise. Embedded NUL escapes and
+noncanonical float spellings must not be assumed to produce identical C.
+Known-gap regression cases are not parity successes.
+`argc()`, `arg(i)`, `exit(code)` and `assert(cond[, message])` use the same
+argv-excluding count, zero-based access and conditional C wrapper as Rust; `main`
+stays restricted to no parameters and an `int` or `void` return.
+
+The selfhost CLI now implements `help`, `version`, `check`, `c`, `build`, `run`,
+`symbols` and `doctor`, with `run` using an argv vector and propagating the child
+exit code. Emitters and link/compile invocations use argv, not a shell, and
+Windows arguments receive CRT quoting. JSON reports (success and error) go to
+stderr; stdout is the C text, symbols, build path or child output. Package
+commands, CSS assets / `--emit-assets` / `--tailwind`, namespace/selective
+imports, build caching, the full doctor row set, and a Linux-native run this round
+remain known gaps; they are documented in `docs/selfhost.md` and are not parity
+successes. Use wildcard imports and ASCII fixture paths; the self-hosted loader
+still uses narrow `fopen`, and imported symbol file attribution is the entry path
+because it keeps no file registry.
 
 ## Reproducibility and verification rules
 
@@ -115,22 +134,24 @@ does not implement installed package/name resolution.
 
 ## Implemented regression coverage
 
-`tests/c_emitter_parity.rs` has a full-byte parity test over six inputs:
-field augmented assignment; reverse-order primitive extern declarations;
-recursive/control-flow code;
-struct/array/repetition helpers; strings, float values, `str(float)` and
-f-strings; and the existing pipeline stdlib/generic/Vec/nested-aggregate fixture.
-Selfhost now orders extern, struct roots and array typedef roots like the Rust
+`tests/c_emitter_parity.rs` has a full-byte parity test over nineteen comparison
+inputs: nullable widening/narrowing and mixed array literals, dict aliasing /
+iteration / missing-key helper text, function-pointer values and fn-pointer
+returns, raise/try/except propagation, numeric conversions, argv, exit,
+assertions, a shared-arena f-string growth regression; plus the original
+field-augmented-assignment, reverse-order extern, recursive/control-flow,
+struct/array/repetition, strings/float/f-string and stdlib/generic/Vec fixtures.
+Selfhost orders extern, struct roots and array typedef roots like the Rust
 emitter, while keeping dependency-first definitions and parallel table indices.
 The index ordering currently uses insertion sort; it makes no new scaling or
 performance claim.
 
-A separate known-gap test pins five current boundaries. Selfhost rejects
-`to_int`, `to_float` and indexed augmented assignment
-with exact diagnostics, exit status and no C output. Embedded NUL and
-noncanonical `3.2500` spelling produce precisely asserted C differences. These
-are not parity passes, ignored tests, or permissions for arbitrary drift. When
-fixed, promote the corresponding fixture into the parity corpus.
+A separate known-gap test pins three current boundaries. Selfhost rejects
+indexed augmented assignment with an exact diagnostic and no C output.
+Embedded NUL and noncanonical `3.2500` spelling produce precisely asserted C
+differences. These are not parity passes, ignored tests, or permissions for
+arbitrary drift. When fixed, promote the corresponding fixture into the parity
+corpus.
 
 `tests/c_abi.rs` adds four tests. Three native tests run at both O0 and O3:
 separately compiled C scalar helpers and 12 mixed arguments, internal struct/array
@@ -146,6 +167,31 @@ prototypes and definitions now feed the complete function declarator through
 Ordinary scalar declaration formatting is unchanged.
 
 ## Validation record
+
+Language/CLI/stdlib batch, 2026-11-07, Windows with clang 23.1.2:
+`cargo test -p aoxn` with `AOXN_TEST_REQUIRE_CLANG=1` passed **357/357**
+(complete log `target/final-test.log`); package tests through
+`bash run_pkg_tests.sh` passed **105/105** (462 combined, no failures or
+ignores). Nineteen full-C comparison inputs, 22 rejection cases and three
+known-gap cases are distinct categories. The original stage fixed point, all
+four ABI tests, both CLI stages, real socket loopback (Rust and selfhost
+builds), random cross-process vectors, the Python `csv` differential and the two
+stage CLI differential all ran. `cargo check --workspace --tests --target
+x86_64-unknown-linux-gnu` passed; no Linux native runtime, IDE or installer
+release verification is implied. Reruns are not added to the counts.
+
+The earlier CLI increment record (2026-11-06) remains historical evidence for
+that bounded surface:
+`cargo test -p aoxn --locked --no-fail-fast` with
+`AOXN_TEST_REQUIRE_CLANG=1` passed **350/350**; package tests through
+`bash run_pkg_tests.sh --locked` passed **105/105** (455 combined, no failures or
+ignores). All four ABI tests, both parity targets, the original stage fixed
+point and the new argv-driven two-stage CLI test ran. Equal-C fixtures total 14;
+17 builtin rejection cases and five known gaps remain separate categories.
+Initial root runs exposed two f-string arena regressions caused by missing
+`n_line` subparser transfer; both were fixed before the successful full rerun.
+Python checker tests passed 11/11. Linux Rust workspace/test cross-check passed;
+no local Linux native runtime, IDE or installer release verification is implied.
 
 CI-gate follow-up, 2026-11-01: the exact explicit command
 `cargo test -p aoxn --locked --test c_emitter_parity --test c_abi` passed with

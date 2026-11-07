@@ -15,3 +15,9 @@
 # the sanitiser Monaco applies to pasted and loaded HTML.
 overrides:
   dompurify: 3.4.17
+  # ansi-to-react 6.2.6 pins linkify-it ^3.0.3, and both the 3.x line and
+  # linkify-it <=5.0.1 carry quadratic-complexity DoS advisories
+  # (GHSA-22p9-wv53-3rq4, GHSA-v245-v573-v5vm). 5.0.2 fixes both; the API
+  # ansi-to-react uses (`linkify().match`) is unchanged. The terminal output
+  # is local, but the lockfile is what a scanner reads.
+  linkify-it: 5.0.2

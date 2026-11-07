@@ -237,3 +237,76 @@ pub struct PkgManifestInfo {
     /// Names unpacked into `aox_modules/`.
     pub installed: Vec<String>,
 }
+/// One changed file in `git status --porcelain` order.
+#[derive(Debug, Clone, serde::Serialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct GitChange {
+    /// Path relative to the workspace root, with forward slashes.
+    pub path: String,
+    /// `modified` | `added` | `deleted` | `renamed` | `untracked` | `ignored`
+    /// | `conflicted`.
+    pub status: String,
+    /// True when the change is in the index (first porcelain column).
+    pub staged: bool,
+}
+
+/// `git status` for the open workspace.
+#[derive(Debug, Clone, serde::Serialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct GitStatus {
+    pub is_repo: bool,
+    #[serde(default)]
+    pub branch: String,
+    #[serde(default)]
+    pub changes: Vec<GitChange>,
+    /// Set when git exists but refused to answer (no repo, unsafe dir, …).
+    #[serde(default)]
+    pub error: Option<String>,
+}
+
+/// The two sides of a file diff. `binary` is true when either side is not
+/// valid UTF-8; the UI then shows a summary instead of a text diff.
+#[derive(Debug, Clone, serde::Serialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct GitFileDiff {
+    pub path: String,
+    #[serde(default)]
+    pub original: String,
+    #[serde(default)]
+    pub modified: String,
+    #[serde(default)]
+    pub binary: bool,
+}
+
+/// A file's bytes for the preview pane. Base64 keeps the JSON transport
+/// simple and works for every image type the webview can render.
+#[derive(Debug, Clone, serde::Serialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct FileBytes {
+    pub path: String,
+    #[serde(default)]
+    pub base64: String,
+    #[serde(default)]
+    pub size: u64,
+    #[serde(default)]
+    pub mime: String,
+}
+
+/// One message in an OpenAI-compatible chat request.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct ChatMessage {
+    pub role: String,
+    pub content: String,
+}
+
+/// The assistant's answer, or the transport/API error that replaced it.
+#[derive(Debug, Clone, serde::Serialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct ChatReply {
+    #[serde(default)]
+    pub content: String,
+    #[serde(default)]
+    pub error: Option<String>,
+    #[serde(default)]
+    pub model: String,
+}

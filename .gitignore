@@ -29,6 +29,12 @@ tmp/
 # that matter live in .gitignore above, which this file syncs FROM.
 /.zcodeignore
 
+# ZCode upstream source, extracted locally as the donation source for the
+# IDE rework. It is ~217 MB / 18k files of a separate monorepo; only the
+# adapted copies under ide/ are tracked, never this reference tree.
+/.zcode-src/
+/ZCode-main.zip
+
 # The Smart App Control stamp run_pkg_tests.sh writes into crates/aoxn-pkg/
 # so each test build gets a fresh binary hash. It is a throwaway artifact by
 # construction — the script rewrites it on every run and restores nothing, so

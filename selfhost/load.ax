@@ -13,6 +13,48 @@ import * from "../stdlib/stdlib.ax"
 import * from "./lexer.ax"
 import * from "./parser.ax"
 import * from "./typecheck.ax"
+
+# environment lookup shared with the driver's option defaults
+extern def getenv(name: string) -> string
+
+def env_str(name: string, dflt: string) -> string:
+    v = getenv(name)
+    if as_ptr(v) == 0:
+        return dflt
+    return v
+
+def spec_prefix(s: string, p: string) -> int:
+    if len(s) < len(p):
+        return 0
+    i = 0
+    while i < len(p):
+        if str_get(s, i) != str_get(p, i):
+            return 0
+        i = i + 1
+    return 1
+
+# `stdlib` / `stdlib/<module>` resolve against AOXN_STDLIB, then
+# $AOXN_HOME/lib/stdlib, then the repository-relative `stdlib/` directory.
+def stdlib_dir() -> string:
+    d = env_str("AOXN_STDLIB", "")
+    if d != "":
+        return d
+    h = env_str("AOXN_HOME", "")
+    if h != "":
+        return h + "/lib/stdlib"
+    return "stdlib"
+
+def resolve_specifier(spec: string) -> string:
+    if spec == "stdlib":
+        return stdlib_dir() + "/stdlib.ax"
+    if spec_prefix(spec, "stdlib/") == 1:
+        rest = str_slice(spec, 7, len(spec) - 7)
+        if len(rest) < 4:
+            return stdlib_dir() + "/" + rest + ".ax"
+        if str_slice(rest, len(rest) - 3, 3) != ".ax":
+            return stdlib_dir() + "/" + rest + ".ax"
+        return stdlib_dir() + "/" + rest
+    return spec
 struct LoadState:
     p: PState
     root: int
@@ -20,6 +62,11 @@ struct LoadState:
     stack: Vec
     err: int
     errmsg: string
+    err_stage: string
+    err_line: int
+    err_col: int
+    err_file: string
+    err_raw: string
     n_imports: int
 
 def load_new() -> LoadState:
@@ -30,6 +77,11 @@ def load_new() -> LoadState:
         stack=vec_new(),
         err=0,
         errmsg="",
+        err_stage="",
+        err_line=0,
+        err_col=0,
+        err_file="",
+        err_raw="",
         n_imports=0,
     )
     ls.p = new_node(ls.p, N_BLOCK(), "program", 0)
@@ -41,6 +93,22 @@ def load_err(ls: LoadState, msg: string) -> LoadState:
     if ls.err == 0:
         ls.err = 1
         ls.errmsg = msg
+        ls.err_stage = "io"
+        ls.err_line = 0
+        ls.err_col = 0
+        ls.err_file = ""
+        ls.err_raw = msg
+    return ls
+
+def load_err_at(ls: LoadState, stage: string, file: string, line: int, col: int, raw: string, msg: string) -> LoadState:
+    if ls.err == 0:
+        ls.err = 1
+        ls.errmsg = msg
+        ls.err_stage = stage
+        ls.err_line = line
+        ls.err_col = col
+        ls.err_file = file
+        ls.err_raw = raw
     return ls
 
 def path_in(v: Vec, path: string) -> int:
@@ -115,11 +183,17 @@ def lex_error_msg(st: LexState) -> string:
         return tk_sval(st, n - 1)
     return "lexical error"
 
+def resolve_import(importer: string, spec: string) -> string:
+    if spec == "stdlib" or spec_prefix(spec, "stdlib/") == 1:
+        # stdlib paths are cwd- or env-rooted, never importer-relative
+        return normalize_path(resolve_specifier(spec))
+    return join_path(dir_of(importer), spec)
+
 def load_file(ls: LoadState, path: string) -> LoadState:
     if ls.err == 1:
         return ls
     if path_in(ls.stack, path) == 1:
-        return load_err(ls, "circular import involving '" + path + "'")
+        return load_err_at(ls, "io", path, 0, 0, "circular import involving '" + path + "'", "circular import involving '" + path + "'")
     if path_in(ls.files, path) == 1:
         return ls
     ls.files = vec_push(ls.files, as_ptr(path))
@@ -127,16 +201,16 @@ def load_file(ls: LoadState, path: string) -> LoadState:
     ls.n_imports = ls.n_imports + 1
     src = read_file(path)
     if src == "":
-        return load_err(ls, "cannot open '" + path + "'")
+        return load_err_at(ls, "io", path, 0, 0, "cannot open '" + path + "'", "cannot open '" + path + "'")
     lx = lex_all(lex_state_new(src))
     if lx.error == 1:
-        return load_err(ls, path + ": " + lex_error_msg(lx))
+        return load_err_at(ls, "lex", path, lx.err_line, lx.err_col, lex_error_msg(lx), path + ": " + lex_error_msg(lx))
     ls.p.st = lx
     ls.p.idx = 0
     ls.p.err = 0
     ls.p = parse_program(ls.p)
     if ls.p.err == 1:
-        return load_err(ls, path + ": " + ls.p.errmsg)
+        return load_err_at(ls, "parse", path, ls.p.err_line, ls.p.err_col, ls.p.errmsg, path + ": " + ls.p.errmsg)
     file_root = ls.p.root
     ch = node_child(ls.p, file_root)
     while ch != -1 and ls.err == 0:
@@ -146,7 +220,7 @@ def load_file(ls: LoadState, path: string) -> LoadState:
             if imp == -1:
                 return load_err(ls, path + ": malformed import")
             rel = node_sval(ls.p, imp)
-            ls = load_file(ls, join_path(dir_of(path), rel))
+            ls = load_file(ls, resolve_import(path, rel))
         else:
             # detach from the per-file chain before splicing into the
             # global program root (append_child does not reset `next`)

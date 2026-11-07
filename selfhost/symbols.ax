@@ -1,0 +1,290 @@
+# Symbol table export for the self-hosted CLI (`symbols`), mirroring
+# src/symbols.rs: top-level defs and structs of the entry file and every
+# imported module, with signatures and source positions. No checking and no
+# clang — this is what an editor outline asks for on every save.
+#
+# Limitation carried from the self-hosted loader: imported files are merged
+# into one arena without a file registry, so every symbol is reported against
+# the ENTRY path (the Rust CLI reports the file that declared it).
+import * from "../stdlib/stdlib.ax"
+import * from "./lexer.ax"
+import * from "./parser.ax"
+import * from "./typecheck.ax"
+import * from "./load.ax"
+
+def sym_ty_name(p: PState, n: int) -> string:
+    if n == -1:
+        return "void"
+    t = node_tag(p, n)
+    if t == N_TYINT():
+        return "int"
+    if t == N_TYFLOAT():
+        return "float"
+    if t == N_TYBOOL():
+        return "bool"
+    if t == N_TYSTRING():
+        return "string"
+    if t == N_TYVOID():
+        return "void"
+    if t == N_TYNONE():
+        return "None"
+    if t == N_TYOPT():
+        return sym_ty_name(p, node_child(p, n)) + " | None"
+    if t == N_TYDICT():
+        return "dict[" + sym_ty_name(p, node_child(p, n)) + "]"
+    if t == N_TYARRAY():
+        ln = node_ival(p, n)
+        ls = str(ln)
+        if ln == -1:
+            ls = node_sval(p, n)
+        return "[" + sym_ty_name(p, node_child(p, n)) + "; " + ls + "]"
+    if t == N_TYFN():
+        nparams = node_ival(p, n)
+        s = "fn("
+        kid = node_child(p, n)
+        k = 0
+        while kid != -1:
+            if k >= nparams:
+                break
+            if k > 0:
+                s = s + ", "
+            s = s + sym_ty_name(p, kid)
+            k = k + 1
+            kid = node_next(p, kid)
+        ret = "void"
+        if kid != -1:
+            ret = sym_ty_name(p, kid)
+        return s + ") -> " + ret
+    return node_sval(p, n)
+
+def sym_ret_node(p: PState, fn: int) -> int:
+    last = -1
+    kid = node_child(p, fn)
+    while kid != -1:
+        last = kid
+        kid = node_next(p, kid)
+    if last == -1:
+        return -1
+    if node_tag(p, last) != N_BLOCK():
+        return last
+    ret = -1
+    kid = node_child(p, fn)
+    while kid != -1:
+        if node_next(p, kid) == last:
+            ret = kid
+        kid = node_next(p, kid)
+    return ret
+
+def sym_tparams(p: PState, fn: int) -> string:
+    kid = node_child(p, fn)
+    while kid != -1:
+        if node_tag(p, kid) == N_TYPEPARAMS():
+            s = ""
+            tp = node_child(p, kid)
+            while tp != -1:
+                if s != "":
+                    s = s + ", "
+                s = s + node_sval(p, tp)
+                tp = node_next(p, tp)
+            return "[" + s + "]"
+        kid = node_next(p, kid)
+    return ""
+
+def sym_fn_sig(p: PState, fn: int) -> string:
+    prefix = "def "
+    if node_tag(p, fn) == N_EXTERN():
+        prefix = "extern def "
+    s = prefix + node_sval(p, fn) + sym_tparams(p, fn) + "("
+    kid = node_child(p, fn)
+    first = 1
+    while kid != -1:
+        if node_tag(p, kid) == N_PARAM():
+            if first == 0:
+                s = s + ", "
+            first = 0
+            s = s + node_sval(p, kid) + ": " + sym_ty_name(p, node_child(p, kid))
+        kid = node_next(p, kid)
+    s = s + ")"
+    ret = sym_ret_node(p, fn)
+    if ret != -1:
+        if node_tag(p, ret) != N_TYVOID():
+            s = s + " -> " + sym_ty_name(p, ret)
+    return s
+
+def sym_struct_sig(p: PState, st: int) -> string:
+    s = "struct " + node_sval(p, st) + " {"
+    kid = node_child(p, st)
+    first = 1
+    while kid != -1:
+        if node_tag(p, kid) == N_FIELD():
+            if first == 0:
+                s = s + ","
+            first = 0
+            s = s + " " + node_sval(p, kid) + ": " + sym_ty_name(p, node_child(p, kid))
+        kid = node_next(p, kid)
+    return s + " }"
+
+def sym_count(p: PState) -> int:
+    n = 0
+    ch = node_child(p, p.root)
+    while ch != -1:
+        t = node_tag(p, ch)
+        if t == N_FN() or t == N_EXTERN() or t == N_STRUCT():
+            n = n + 1
+        ch = node_next(p, ch)
+    return n
+
+def sym_max(a: int, b: int) -> int:
+    if a > b:
+        return a
+    return b
+
+def sym_pad(s: string, w: int) -> string:
+    out = s
+    while len(out) < w:
+        out = out + " "
+    return out
+
+# `symbols` text output: aligned kind/name/signature columns, then file:line:col
+def symbols_text(path: string) -> string:
+    ls = load_program(path)
+    if ls.err != 0:
+        return "error: " + ls.errmsg + "\n"
+    p = ls.p
+    if sym_count(p) == 0:
+        return "no top-level declarations\n"
+    kindw = 0
+    namew = 0
+    ch = node_child(p, p.root)
+    while ch != -1:
+        t = node_tag(p, ch)
+        if t == N_FN() or t == N_EXTERN():
+            kindw = sym_max(kindw, len("function"))
+            namew = sym_max(namew, len(node_sval(p, ch)))
+        elif t == N_STRUCT():
+            kindw = sym_max(kindw, len("struct"))
+            namew = sym_max(namew, len(node_sval(p, ch)))
+        ch = node_next(p, ch)
+    out = ""
+    ch = node_child(p, p.root)
+    while ch != -1:
+        t = node_tag(p, ch)
+        kind = ""
+        sig = ""
+        if t == N_FN() or t == N_EXTERN():
+            kind = "function"
+            sig = sym_fn_sig(p, ch)
+        elif t == N_STRUCT():
+            kind = "struct"
+            sig = sym_struct_sig(p, ch)
+        if kind != "":
+            out = out + sym_pad(kind, kindw) + "  " + sym_pad(node_sval(p, ch), namew) + "  " + sym_pad(sig, 38)
+            out = out + "  " + path + ":" + str(vec_get(p.n_line, ch)) + ":" + str(vec_get(p.n_col, ch)) + "\n"
+        ch = node_next(p, ch)
+    return out
+
+def sym_chr(b: int) -> string:
+    buf = malloc(2)
+    store_u8(buf, 0, b)
+    store_u8(buf, 1, 0)
+    return as_string(buf)
+
+# JSON string escaping (the same five escapes plus raw control-byte skipping)
+def sym_json_str(s: string) -> string:
+    out = "\""
+    i = 0
+    while i < len(s):
+        b = str_get(s, i)
+        if b == 34:
+            out = out + "\\\""
+        elif b == 92:
+            out = out + "\\\\"
+        elif b == 10:
+            out = out + "\\n"
+        elif b == 13:
+            out = out + "\\r"
+        elif b == 9:
+            out = out + "\\t"
+        elif b < 32:
+            out = out + " "
+        else:
+            out = out + sym_chr(b)
+        i = i + 1
+    return out + "\""
+
+def sym_params_json(p: PState, fn: int) -> string:
+    out = "["
+    kid = node_child(p, fn)
+    first = 1
+    while kid != -1:
+        if node_tag(p, kid) == N_PARAM():
+            if first == 0:
+                out = out + ","
+            first = 0
+            out = out + "{\"name\":" + sym_json_str(node_sval(p, kid)) + ",\"type\":" + sym_json_str(sym_ty_name(p, node_child(p, kid))) + "}"
+        kid = node_next(p, kid)
+    return out + "]"
+
+def sym_fields_json(p: PState, st: int) -> string:
+    out = "["
+    kid = node_child(p, st)
+    first = 1
+    while kid != -1:
+        if node_tag(p, kid) == N_FIELD():
+            if first == 0:
+                out = out + ","
+            first = 0
+            out = out + "{\"name\":" + sym_json_str(node_sval(p, kid)) + ",\"type\":" + sym_json_str(sym_ty_name(p, node_child(p, kid))) + "}"
+        kid = node_next(p, kid)
+    return out + "]"
+
+def symbols_json(path: string) -> string:
+    ls = load_program(path)
+    if ls.err != 0:
+        return "error: " + ls.errmsg + "\n"
+    p = ls.p
+    out = "{\"symbols\":["
+    ch = node_child(p, p.root)
+    first = 1
+    while ch != -1:
+        t = node_tag(p, ch)
+        kind = ""
+        sig = ""
+        ret = ""
+        is_extern = 0
+        params = "[]"
+        fields = "[]"
+        if t == N_FN() or t == N_EXTERN():
+            kind = "function"
+            sig = sym_fn_sig(p, ch)
+            rn = sym_ret_node(p, ch)
+            ret = "void"
+            if rn != -1:
+                ret = sym_ty_name(p, rn)
+            if t == N_EXTERN():
+                is_extern = 1
+            params = sym_params_json(p, ch)
+        elif t == N_STRUCT():
+            kind = "struct"
+            sig = sym_struct_sig(p, ch)
+            fields = sym_fields_json(p, ch)
+        if kind != "":
+            if first == 0:
+                out = out + ","
+            first = 0
+            out = out + "{\"kind\":" + sym_json_str(kind)
+            out = out + ",\"name\":" + sym_json_str(node_sval(p, ch))
+            out = out + ",\"signature\":" + sym_json_str(sig)
+            out = out + ",\"file\":" + sym_json_str(path)
+            out = out + ",\"line\":" + str(vec_get(p.n_line, ch))
+            out = out + ",\"column\":" + str(vec_get(p.n_col, ch))
+            out = out + ",\"end_line\":" + str(vec_get(p.n_line, ch))
+            out = out + ",\"ret\":" + sym_json_str(ret)
+            if is_extern == 1:
+                out = out + ",\"extern\":true"
+            else:
+                out = out + ",\"extern\":false"
+            out = out + ",\"params\":" + params
+            out = out + ",\"fields\":" + fields + "}"
+        ch = node_next(p, ch)
+    return out + "]}"

@@ -124,6 +124,50 @@ export interface ToolchainInfo {
   version: string
 }
 
+/** Mirror of `model::GitChange`. */
+export interface GitChange {
+  path: string
+  status: 'modified' | 'added' | 'deleted' | 'renamed' | 'untracked' | 'ignored' | 'conflicted'
+  staged: boolean
+}
+
+/** Mirror of `model::GitStatus`. */
+export interface GitStatus {
+  isRepo: boolean
+  branch: string
+  changes: GitChange[]
+  error: string | null
+}
+
+/** Mirror of `model::GitFileDiff`. */
+export interface GitFileDiff {
+  path: string
+  original: string
+  modified: string
+  binary: boolean
+}
+
+/** Mirror of `model::FileBytes` — a preview payload as a data URL. */
+export interface FileBytes {
+  path: string
+  base64: string
+  size: number
+  mime: string
+}
+
+/** Mirror of `model::ChatMessage`. */
+export interface ChatMessage {
+  role: 'system' | 'user' | 'assistant'
+  content: string
+}
+
+/** Mirror of `model::ChatReply`. */
+export interface ChatReply {
+  content: string
+  error: string | null
+  model: string
+}
+
 /** True when running inside the Tauri webview. */
 export const isNative = (): boolean =>
   typeof window !== 'undefined' &&
@@ -409,6 +453,90 @@ const FIXTURE_PKG_REPORT: PkgReport = {
   outdated: [{ name: 'stdlib-demo', locked: '1.4.0', newest: '1.6.0', note: '' }],
   error: null,
 }
+
+// ---- git / preview / terminal / assistant ----
+
+/** Image/PDF bytes for the preview pane. */
+export const readBytes = (path: string): Promise<FileBytes> =>
+  call(
+    'ide_read_bytes',
+    { path },
+    () => ({
+      path,
+      base64: '',
+      size: 0,
+      mime: 'application/octet-stream',
+    }),
+  )
+
+/** The workspace's git status. A non-repository is a normal answer. */
+export const gitStatus = (): Promise<GitStatus> =>
+  call('ide_git_status', undefined, () => ({
+    isRepo: false,
+    branch: '',
+    changes: [],
+    error: null,
+  }))
+
+/** The HEAD and working-tree sides of one file. */
+export const gitDiff = (path: string): Promise<GitFileDiff> =>
+  call('ide_git_diff', { path }, () => ({
+    path,
+    original: '',
+    modified: FIXTURE[path] ?? '',
+    binary: false,
+  }))
+
+/**
+ * Run one shell command in the workspace. The browser preview has no shell;
+ * it answers a short, honest explanation and the same exit code a missing
+ * command would.
+ */
+export const terminalExec = (command: string, cwd?: string): Promise<ExecResult> =>
+  call('ide_terminal_exec', { command, cwd: cwd ?? null }, () => ({
+    code: -1,
+    output:
+      `$ ${command}\n` +
+      'The browser preview has no shell behind it.\n' +
+      'Run `pnpm ide:dev` (or the packaged app) for a real terminal.\n',
+    durationMs: 0,
+    diags: [],
+  }))
+
+/** One provider chat completion, proxied by the Rust backend. */
+export const aiChat = (
+  baseUrl: string,
+  apiKey: string,
+  model: string,
+  messages: ChatMessage[],
+  provider: 'openai' | 'anthropic' = 'openai',
+): Promise<ChatReply> =>
+  call(
+    'ide_ai_chat',
+    { provider, baseUrl, apiKey, model, messages },
+    () => ({
+      content: '',
+      error:
+        'The assistant needs the desktop app: the browser preview has no Rust proxy for provider APIs.',
+      model,
+    }),
+  )
+
+/** Read the small JSON settings file the backend owns. */
+export const configRead = (): Promise<Record<string, unknown>> =>
+  call('ide_config_read', undefined, () => {
+    try {
+      return JSON.parse(localStorage.getItem('aoxn-ide-config') ?? '{}') as Record<string, unknown>
+    } catch {
+      return {}
+    }
+  })
+
+/** Write the small JSON settings file. */
+export const configWrite = (value: Record<string, unknown>): Promise<void> =>
+  call('ide_config_write', { json: JSON.stringify(value) }, () => {
+    localStorage.setItem('aoxn-ide-config', JSON.stringify(value))
+  })
 
 /** Open the native folder picker. Null when cancelled or in the browser. */
 export async function pickFolder(): Promise<string | null> {

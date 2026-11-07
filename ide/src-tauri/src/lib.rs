@@ -28,11 +28,15 @@ mod model;
 mod pkg;
 mod toolchain;
 
+use base64::Engine as _;
 use fsops::Workspace;
 use model::{
-    ExecResult, FileContents, PkgManifestInfo, PkgReport, SymbolTable, ToolchainInfo, TreeNode,
+    ChatMessage, ChatReply, ExecResult, FileBytes, FileContents, GitChange, GitFileDiff, GitStatus,
+    PkgManifestInfo, PkgReport, SymbolTable, ToolchainInfo, TreeNode,
 };
+use std::process::Command;
 use std::sync::Mutex;
+use std::time::Instant;
 use tauri::{Manager, State};
 
 /// The open folder, if any. `None` until the user picks one.
@@ -288,6 +292,406 @@ fn ide_symbols(path: String, state: State<AppState>) -> Result<SymbolTable, Stri
     toolchain::symbols_json(&path)
 }
 
+// ---- preview ----
+
+/// A file's bytes for the preview pane.
+///
+/// Text files keep using `ide_read`; this exists for images, PDFs and other
+/// binary previews the webview can render from a data URL. The size cap keeps
+/// a 2 GB log from turning into a 2.7 GB JSON string in the IPC channel.
+#[tauri::command]
+fn ide_read_bytes(path: String, state: State<AppState>) -> Result<FileBytes, String> {
+    const MAX_PREVIEW_BYTES: u64 = 16 * 1024 * 1024;
+    let ws = workspace(&state)?;
+    let resolved = ws.resolve(&path)?;
+    let meta = std::fs::metadata(&resolved).map_err(|e| format!("cannot stat '{path}': {e}"))?;
+    if meta.len() > MAX_PREVIEW_BYTES {
+        return Err(format!(
+            "'{path}' is {} bytes; the preview limit is {MAX_PREVIEW_BYTES}",
+            meta.len()
+        ));
+    }
+    let bytes = std::fs::read(&resolved).map_err(|e| format!("cannot read '{path}': {e}"))?;
+    Ok(FileBytes {
+        path,
+        base64: base64::engine::general_purpose::STANDARD.encode(&bytes),
+        size: meta.len(),
+        mime: mime_for(&resolved),
+    })
+}
+
+fn mime_for(path: &std::path::Path) -> String {
+    let ext = path
+        .extension()
+        .map(|e| e.to_string_lossy().to_ascii_lowercase())
+        .unwrap_or_default();
+    let mime = match ext.as_str() {
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "gif" => "image/gif",
+        "webp" => "image/webp",
+        "svg" => "image/svg+xml",
+        "ico" => "image/x-icon",
+        "bmp" => "image/bmp",
+        "avif" => "image/avif",
+        "pdf" => "application/pdf",
+        _ => "application/octet-stream",
+    };
+    mime.to_string()
+}
+
+// ---- git ----
+
+/// Run git in the workspace root. No user-supplied flags reach this, so the
+/// command surface stays a set of read-only queries.
+fn run_git(root: &std::path::Path, args: &[&str]) -> Result<std::process::Output, String> {
+    Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args(args)
+        .output()
+        .map_err(|e| format!("git is not available: {e}"))
+}
+
+/// `git status` for the open workspace, parsed into rows the file tree and
+/// the Git pane can render. A non-repository answers `isRepo: false` rather
+/// than failing: most Aoxn folders are not repositories yet.
+#[tauri::command]
+fn ide_git_status(state: State<AppState>) -> Result<GitStatus, String> {
+    let ws = workspace(&state)?;
+    let probe = run_git(ws.root(), &["rev-parse", "--is-inside-work-tree"])?;
+    if !probe.status.success() {
+        return Ok(GitStatus {
+            is_repo: false,
+            branch: String::new(),
+            changes: Vec::new(),
+            error: None,
+        });
+    }
+    let branch = run_git(ws.root(), &["rev-parse", "--abbrev-ref", "HEAD"])
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .unwrap_or_default();
+
+    let out = run_git(
+        ws.root(),
+        &["status", "--porcelain=v1", "-z", "--untracked-files=all"],
+    )?;
+    if !out.status.success() {
+        return Ok(GitStatus {
+            is_repo: true,
+            branch,
+            changes: Vec::new(),
+            error: Some(String::from_utf8_lossy(&out.stderr).trim().to_string()),
+        });
+    }
+
+    Ok(GitStatus {
+        is_repo: true,
+        branch,
+        changes: parse_git_status(&out.stdout),
+        error: None,
+    })
+}
+
+/// Parse `git status --porcelain=v1 -z` into rows.
+///
+/// The NUL framing matters: a rename carries its old path as a SECOND NUL
+/// field, so a naive line split invents a change nobody made. Pure and
+/// byte-oriented so the test can pin that entry shape without a repository.
+fn parse_git_status(stdout: &[u8]) -> Vec<GitChange> {
+    let text = String::from_utf8_lossy(stdout);
+    let mut entries = text.split('\0').filter(|entry| !entry.is_empty());
+    let mut changes = Vec::new();
+    while let Some(entry) = entries.next() {
+        if entry.len() < 4 {
+            continue;
+        }
+        let bytes = entry.as_bytes();
+        let x = bytes[0] as char;
+        let y = bytes[1] as char;
+        let path = entry[3..].to_string();
+        if x == 'R' || x == 'C' || y == 'R' || y == 'C' {
+            let _ = entries.next();
+        }
+        let status = if x == '?' || y == '?' {
+            "untracked"
+        } else if x == 'U' || y == 'U' || (x == 'A' && y == 'A') || (x == 'D' && y == 'D') {
+            "conflicted"
+        } else if x == 'R' || y == 'R' {
+            "renamed"
+        } else if x == 'A' || y == 'A' {
+            "added"
+        } else if x == 'D' || y == 'D' {
+            "deleted"
+        } else if x == '!' {
+            "ignored"
+        } else {
+            "modified"
+        };
+        changes.push(GitChange {
+            path,
+            status: status.to_string(),
+            staged: x != ' ' && x != '?',
+        });
+    }
+    changes.sort_by(|a, b| a.path.cmp(&b.path));
+    changes
+}
+
+/// The HEAD version and the working-tree version of one file, for the
+/// editor's diff view. A missing HEAD side (a new file) or a missing working
+/// side (a deleted file) is normal and answers an empty string.
+#[tauri::command]
+fn ide_git_diff(path: String, state: State<AppState>) -> Result<GitFileDiff, String> {
+    let ws = workspace(&state)?;
+    let resolved = ws.resolve(&path)?;
+    let relative = resolved
+        .strip_prefix(ws.root())
+        .unwrap_or(&resolved)
+        .to_string_lossy()
+        .replace('\\', "/");
+
+    let original = run_git(ws.root(), &["show", &format!("HEAD:{relative}")])
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| o.stdout)
+        .unwrap_or_default();
+    let modified = std::fs::read(&resolved).unwrap_or_default();
+    let binary = std::str::from_utf8(&original).is_err() || std::str::from_utf8(&modified).is_err();
+    Ok(GitFileDiff {
+        path,
+        original: if binary {
+            String::new()
+        } else {
+            String::from_utf8_lossy(&original).into_owned()
+        },
+        modified: if binary {
+            String::new()
+        } else {
+            String::from_utf8_lossy(&modified).into_owned()
+        },
+        binary,
+    })
+}
+
+// ---- terminal ----
+
+/// Run one shell command in the workspace (or a folder inside it).
+///
+/// This is a deliberate widening of the original command surface, which had
+/// no shell at all. The command is user-typed and the working directory is
+/// bounded by `Workspace::resolve`, so the webview still cannot name a
+/// directory the user did not open. Output is captured in full; the UI is a
+/// command runner, not a persistent PTY, so `cd` must be passed in `cwd` by
+/// the frontend rather than remembered here.
+#[tauri::command]
+fn ide_terminal_exec(
+    command: String,
+    cwd: Option<String>,
+    state: State<AppState>,
+) -> Result<ExecResult, String> {
+    let ws = workspace(&state)?;
+    let dir = match cwd.filter(|c| !c.trim().is_empty()) {
+        Some(path) => ws.resolve(&path)?,
+        None => ws.root().to_path_buf(),
+    };
+    let started = Instant::now();
+    let output = if cfg!(windows) {
+        Command::new("cmd")
+            .arg("/C")
+            .arg(&command)
+            .current_dir(&dir)
+            .output()
+    } else {
+        Command::new("sh")
+            .arg("-lc")
+            .arg(&command)
+            .current_dir(&dir)
+            .output()
+    }
+    .map_err(|e| format!("cannot run command: {e}"))?;
+
+    let mut text = String::from_utf8_lossy(&output.stdout).into_owned();
+    text.push_str(&String::from_utf8_lossy(&output.stderr));
+    Ok(ExecResult {
+        code: output.status.code().unwrap_or(-1),
+        output: text,
+        duration_ms: started.elapsed().as_millis() as u64,
+        diags: Vec::new(),
+    })
+}
+
+// ---- assistant ----
+
+/// Proxy one OpenAI-compatible chat completion.
+///
+/// The webview cannot call provider APIs directly: OpenAI does not send CORS
+/// headers, and the packaged app's CSP only permits its own origin. Keeping
+/// the request in Rust also keeps the API key out of the DOM and out of any
+/// webview-readable store.
+#[tauri::command]
+async fn ide_ai_chat(
+    provider: String,
+    base_url: String,
+    api_key: String,
+    model: String,
+    messages: Vec<ChatMessage>,
+) -> Result<ChatReply, String> {
+    let base = base_url.trim().trim_end_matches('/');
+    if base.is_empty() {
+        return Ok(ChatReply {
+            content: String::new(),
+            error: Some("No API base URL is configured.".to_string()),
+            model,
+        });
+    }
+    let anthropic = provider.eq_ignore_ascii_case("anthropic");
+    let url = if anthropic {
+        if base.ends_with("/v1/messages") {
+            base.to_string()
+        } else if base.ends_with("/v1") {
+            format!("{base}/messages")
+        } else {
+            format!("{base}/v1/messages")
+        }
+    } else if base.ends_with("/chat/completions") {
+        base.to_string()
+    } else {
+        format!("{base}/chat/completions")
+    };
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(180))
+        .build()
+        .map_err(|e| format!("cannot build HTTP client: {e}"))?;
+
+    // Anthropic keeps the system prompt OUTSIDE `messages` and requires a
+    // max_tokens field; the OpenAI-compatible shape carries the system turn
+    // inline and defaults to streaming off.
+    let body = if anthropic {
+        let system = messages
+            .iter()
+            .filter(|message| message.role == "system")
+            .map(|message| message.content.as_str())
+            .collect::<Vec<_>>()
+            .join("\n\n");
+        let conversation: Vec<&ChatMessage> = messages
+            .iter()
+            .filter(|message| message.role != "system")
+            .collect();
+        serde_json::json!({
+            "model": model,
+            "max_tokens": 4096,
+            "system": system,
+            "messages": conversation,
+        })
+    } else {
+        serde_json::json!({
+            "model": model,
+            "messages": messages,
+            "stream": false,
+        })
+    };
+
+    let mut request = client.post(&url).json(&body);
+    if !api_key.trim().is_empty() {
+        request = if anthropic {
+            request
+                .header("x-api-key", api_key.trim())
+                .header("anthropic-version", "2023-06-01")
+        } else {
+            request.bearer_auth(api_key.trim())
+        };
+    } else if anthropic {
+        request = request.header("anthropic-version", "2023-06-01");
+    }
+
+    let response = request
+        .send()
+        .await
+        .map_err(|e| format!("request failed: {e}"))?;
+    let status = response.status();
+    let text = response
+        .text()
+        .await
+        .map_err(|e| format!("cannot read response: {e}"))?;
+    if !status.is_success() {
+        return Ok(ChatReply {
+            content: String::new(),
+            error: Some(format!("HTTP {}: {}", status.as_u16(), text.trim())),
+            model,
+        });
+    }
+    let value: serde_json::Value =
+        serde_json::from_str(&text).map_err(|e| format!("invalid JSON from provider: {e}"))?;
+    let content = if anthropic {
+        value["content"]
+            .as_array()
+            .map(|parts| {
+                parts
+                    .iter()
+                    .filter_map(|part| part["text"].as_str())
+                    .collect::<Vec<_>>()
+                    .join("")
+            })
+            .unwrap_or_default()
+    } else {
+        value["choices"][0]["message"]["content"]
+            .as_str()
+            .map(|s| s.to_string())
+            .or_else(|| {
+                value["choices"][0]["message"]["content"]
+                    .as_array()
+                    .map(|parts| {
+                        parts
+                            .iter()
+                            .filter_map(|part| part["text"].as_str())
+                            .collect::<Vec<_>>()
+                            .join("")
+                    })
+            })
+            .unwrap_or_default()
+    };
+    Ok(ChatReply {
+        content,
+        error: None,
+        model,
+    })
+}
+
+// ---- configuration ----
+
+fn config_path(app: &tauri::AppHandle) -> Result<std::path::PathBuf, String> {
+    let dir = app
+        .path()
+        .app_config_dir()
+        .map_err(|e| format!("cannot locate the app config directory: {e}"))?;
+    std::fs::create_dir_all(&dir).map_err(|e| format!("cannot create '{}': {e}", dir.display()))?;
+    Ok(dir.join("ide-config.json"))
+}
+
+/// The IDE's small JSON settings file (assistant endpoint/model, UI
+/// preferences). Missing answers `{}`; a malformed file is reported so the
+/// caller can fall back instead of silently resetting every setting.
+#[tauri::command]
+fn ide_config_read(app: tauri::AppHandle) -> Result<String, String> {
+    let path = config_path(&app)?;
+    match std::fs::read_to_string(&path) {
+        Ok(text) => Ok(text),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok("{}".to_string()),
+        Err(e) => Err(format!("cannot read '{}': {e}", path.display())),
+    }
+}
+
+#[tauri::command]
+fn ide_config_write(app: tauri::AppHandle, json: String) -> Result<(), String> {
+    let path = config_path(&app)?;
+    serde_json::from_str::<serde_json::Value>(&json)
+        .map_err(|e| format!("refusing to write invalid JSON: {e}"))?;
+    std::fs::write(&path, json).map_err(|e| format!("cannot write '{}': {e}", path.display()))
+}
+
 // ---- app ----
 
 /// Best guess at the folder to open on launch.
@@ -340,6 +744,13 @@ pub fn run() {
             ide_run,
             ide_build_and_run,
             ide_symbols,
+            ide_read_bytes,
+            ide_git_status,
+            ide_git_diff,
+            ide_terminal_exec,
+            ide_ai_chat,
+            ide_config_read,
+            ide_config_write,
         ])
         .setup(|app| {
             let root = initial_root();
@@ -385,6 +796,46 @@ mod tests {
         assert!(
             std::path::Path::new(&root).is_dir(),
             "fell back to '{root}', which is not a directory"
+        );
+    }
+
+    #[test]
+    fn parse_git_status_consumes_rename_old_paths() {
+        // -z framing: a rename field is followed by its old path. Without
+        // consuming it, the old path becomes a phantom change.
+        let raw = b"?? src/new.ax\0R  src/new_name.ax\0src/old_name.ax\0 M hello.ax\0A  src/added.ax\0";
+        let changes = parse_git_status(raw);
+        assert_eq!(changes.len(), 4, "{changes:?}");
+        assert_eq!(changes[0].path, "hello.ax");
+        assert_eq!(changes[0].status, "modified");
+        assert!(!changes[0].staged);
+        assert_eq!(changes[1].path, "src/added.ax");
+        assert_eq!(changes[1].status, "added");
+        assert!(changes[1].staged);
+        assert_eq!(changes[2].path, "src/new.ax");
+        assert_eq!(changes[2].status, "untracked");
+        assert!(!changes[2].staged);
+        assert_eq!(changes[3].path, "src/new_name.ax");
+        assert_eq!(changes[3].status, "renamed");
+        assert!(changes[3].staged);
+    }
+
+    #[test]
+    fn parse_git_status_reports_conflicts() {
+        let changes = parse_git_status(b"UU src/conflict.ax\0");
+        assert_eq!(changes.len(), 1);
+        assert_eq!(changes[0].status, "conflicted");
+    }
+
+    #[test]
+    fn preview_mime_types_cover_the_rendered_families() {
+        assert_eq!(mime_for(std::path::Path::new("a.PNG")), "image/png");
+        assert_eq!(mime_for(std::path::Path::new("a.jpg")), "image/jpeg");
+        assert_eq!(mime_for(std::path::Path::new("a.svg")), "image/svg+xml");
+        assert_eq!(mime_for(std::path::Path::new("a.pdf")), "application/pdf");
+        assert_eq!(
+            mime_for(std::path::Path::new("a.bin")),
+            "application/octet-stream"
         );
     }
 }

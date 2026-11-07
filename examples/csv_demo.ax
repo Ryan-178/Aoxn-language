@@ -1,0 +1,21 @@
+import * from "stdlib/csv.ax"
+
+def main() -> int:
+    src = "name,note\r\nAlice,\"likes, commas\"\r\nBob,\"line\nbreak\"\r\n"
+    t = csv_parse(src)
+    if t.err != 0:
+        print("parse error at " + str(t.line) + ":" + str(t.col) + ": " + t.msg)
+        return 1
+    print("rows: " + str(csv_rows(t)))
+    r = 0
+    while r < csv_rows(t):
+        c = 0
+        while c < csv_cols(t, r):
+            print("[" + str(r) + "," + str(c) + "] " + csv_get(t, r, c))
+            c = c + 1
+        r = r + 1
+    print("serialized:")
+    print(csv_dumps(t))
+    bad = csv_parse("a,\"unterminated")
+    print("bad err=" + str(bad.err) + " at " + str(bad.line) + ":" + str(bad.col))
+    return 0

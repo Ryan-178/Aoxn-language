@@ -60,21 +60,83 @@ const AOXN_BUILTINS = [
   'vecvec_get_data', 'vecvec_free',
 ]
 
-/** Read a CSS custom property off <html>, falling back to a sane value. */
-function cssVar(name: string, fallback: string): string {
-  if (typeof window === 'undefined') return fallback
-  let v = getComputedStyle(document.documentElement).getPropertyValue(name).trim()
-  // The CSS pipeline (Turbopack/lightningcss) minifies `#cccccc` down to
-  // `#ccc`, and Monaco's theme parser THROWS on the short form ("Illegal
-  // value for token color") — so every short hex is expanded back before
-  // it reaches defineTheme.
-  const short3 = /^#([0-9a-fA-F])([0-9a-fA-F])([0-9a-fA-F])$/.exec(v)
-  if (short3) v = `#${short3[1]}${short3[1]}${short3[2]}${short3[2]}${short3[3]}${short3[3]}`
-  const short4 = /^#([0-9a-fA-F])([0-9a-fA-F])([0-9a-fA-F])([0-9a-fA-F])$/.exec(v)
-  if (short4) {
-    v = `#${short4[1]}${short4[1]}${short4[2]}${short4[2]}${short4[3]}${short4[3]}${short4[4]}${short4[4]}`
+/**
+ * Monaco's theme parser only accepts concrete colour values (hex or
+ * `rgba()`), never the `color-mix()`/`lab()` results the Zai tokens resolve
+ * to in the DOM. These two palettes therefore mirror the design tokens at
+ * the values Monaco needs; keep them in step with `app/zcode-theme.css`.
+ */
+interface MonacoPalette {
+  base: 'vs' | 'vs-dark'
+  background: string
+  foreground: string
+  lineNumber: string
+  lineNumberActive: string
+  lineHighlight: string
+  selection: string
+  cursor: string
+  indentGuide: string
+  widget: string
+  widgetBorder: string
+  widgetSelected: string
+  syntax: {
+    comment: string
+    keyword: string
+    type: string
+    string: string
+    number: string
+    variable: string
+    operator: string
   }
-  return v || fallback
+}
+
+const MONACO_PALETTES: Record<string, MonacoPalette> = {
+  'aoxn-zai-dark': {
+    base: 'vs-dark',
+    background: '#161616',
+    foreground: '#d4d4d4',
+    lineNumber: '#747474',
+    lineNumberActive: '#d4d4d4',
+    lineHighlight: '#1f1f1f',
+    selection: '#1e3a5f',
+    cursor: '#f8f8f8',
+    indentGuide: '#2b2b2b',
+    widget: '#202020',
+    widgetBorder: '#333333',
+    widgetSelected: '#2b2b2b',
+    syntax: {
+      comment: '#6a9955',
+      keyword: '#c586c0',
+      type: '#4ec9b0',
+      string: '#ce9178',
+      number: '#b5cea8',
+      variable: '#9cdcfe',
+      operator: '#d4d4d4',
+    },
+  },
+  'aoxn-zai-light': {
+    base: 'vs',
+    background: '#f8f8f8',
+    foreground: '#333333',
+    lineNumber: '#999999',
+    lineNumberActive: '#333333',
+    lineHighlight: '#f0f0f0',
+    selection: '#cce4f7',
+    cursor: '#0d0d0d',
+    indentGuide: '#e5e5e5',
+    widget: '#ffffff',
+    widgetBorder: '#d9d9d9',
+    widgetSelected: '#e6e6e6',
+    syntax: {
+      comment: '#008000',
+      keyword: '#0000ff',
+      type: '#267f99',
+      string: '#a31515',
+      number: '#098658',
+      variable: '#001080',
+      operator: '#3b3b3b',
+    },
+  },
 }
 
 /**
@@ -87,7 +149,8 @@ export function registerAoxn(monaco: typeof Monaco): void {
   if (!monaco.languages.getLanguages().some((l) => l.id === LANG_AOXN)) {
     registerLanguage(monaco)
   }
-  registerTheme(monaco)
+  registerTheme(monaco, 'aoxn-zai-dark')
+  registerTheme(monaco, 'aoxn-zai-light')
 }
 
 function registerLanguage(monaco: typeof Monaco): void {
@@ -197,42 +260,43 @@ function registerLanguage(monaco: typeof Monaco): void {
  * change to `:root[data-theme='light']` in globals.css and nothing else —
  * Monaco follows.
  */
-export function registerTheme(monaco: typeof Monaco, themeName = 'aoxn-dark'): void {
-  const op = cssVar('--syn-operator', '#d4d4d4')
+export function registerTheme(monaco: typeof Monaco, themeName = 'aoxn-zai-dark'): void {
+  const palette = MONACO_PALETTES[themeName] ?? MONACO_PALETTES['aoxn-zai-dark']
+  const { syntax } = palette
   monaco.editor.defineTheme(themeName, {
-    base: 'vs-dark',
+    base: palette.base,
     inherit: true,
     rules: [
-      { token: 'comment', foreground: cssVar('--syn-comment', '#6a9955'), fontStyle: 'italic' },
-      { token: 'keyword', foreground: cssVar('--syn-keyword', '#c586c0') },
-      { token: 'type', foreground: cssVar('--syn-type', '#4ec9b0') },
-      { token: 'string', foreground: cssVar('--syn-string', '#ce9178') },
-      { token: 'string.escape', foreground: cssVar('--syn-number', '#b5cea8') },
-      { token: 'number', foreground: cssVar('--syn-number', '#b5cea8') },
-      { token: 'identifier', foreground: cssVar('--syn-variable', '#9cdcfe') },
-      { token: 'operator', foreground: op },
-      { token: 'delimiter', foreground: op },
-      { token: 'delimiter.bracket', foreground: op },
+      { token: 'comment', foreground: syntax.comment, fontStyle: 'italic' },
+      { token: 'keyword', foreground: syntax.keyword },
+      { token: 'type', foreground: syntax.type },
+      { token: 'string', foreground: syntax.string },
+      { token: 'string.escape', foreground: syntax.number },
+      { token: 'number', foreground: syntax.number },
+      { token: 'identifier', foreground: syntax.variable },
+      { token: 'operator', foreground: syntax.operator },
+      { token: 'delimiter', foreground: syntax.operator },
+      { token: 'delimiter.bracket', foreground: syntax.operator },
     ],
     colors: {
-      'editor.background': cssVar('--bg-editor', '#1e1e1e'),
-      'editor.foreground': cssVar('--fg', '#cccccc'),
-      'editorLineNumber.foreground': cssVar('--fg-faint', '#6e6e6e'),
-      'editorLineNumber.activeForeground': cssVar('--fg', '#cccccc'),
-      'editor.lineHighlightBackground': cssVar('--bg-hover', '#2a2d2e'),
-      'editor.selectionBackground': cssVar('--accent-soft', '#264f78'),
-      'editorCursor.foreground': cssVar('--fg', '#cccccc'),
-      'editorIndentGuide.background1': cssVar('--border', '#2b2b2b'),
-      'editorGutter.background': cssVar('--bg-editor', '#1e1e1e'),
-      'editorWidget.background': cssVar('--bg-panel', '#202020'),
-      'editorWidget.border': cssVar('--border-strong', '#3c3c3c'),
-      'editorSuggestWidget.background': cssVar('--bg-panel', '#202020'),
-      'editorSuggestWidget.selectedBackground': cssVar('--bg-active', '#37373d'),
-      'editorHoverWidget.background': cssVar('--bg-panel', '#202020'),
-      'editorHoverWidget.border': cssVar('--border-strong', '#3c3c3c'),
+      'editor.background': palette.background,
+      'editor.foreground': palette.foreground,
+      'editorLineNumber.foreground': palette.lineNumber,
+      'editorLineNumber.activeForeground': palette.lineNumberActive,
+      'editor.lineHighlightBackground': palette.lineHighlight,
+      'editor.selectionBackground': palette.selection,
+      'editorCursor.foreground': palette.cursor,
+      'editorIndentGuide.background1': palette.indentGuide,
+      'editorGutter.background': palette.background,
+      'editorWidget.background': palette.widget,
+      'editorWidget.border': palette.widgetBorder,
+      'editorSuggestWidget.background': palette.widget,
+      'editorSuggestWidget.selectedBackground': palette.widgetSelected,
+      'editorHoverWidget.background': palette.widget,
+      'editorHoverWidget.border': palette.widgetBorder,
       'scrollbarSlider.background': 'rgba(121,121,121,0.35)',
       'scrollbarSlider.hoverBackground': 'rgba(100,100,100,0.6)',
-      'editorOverviewRuler.border': cssVar('--bg-editor', '#1e1e1e'),
+      'editorOverviewRuler.border': palette.background,
     },
   })
   monaco.editor.setTheme(themeName)

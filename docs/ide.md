@@ -2,21 +2,45 @@
 
 The official editor for Aoxn, in `ide/`. A native desktop app: a Tauri 2
 shell around a Next.js + Monaco workbench, with the filesystem and process
-work done by a small Rust command layer.
+work done by a small Rust command layer. Since the ZCode rework the UI is
+built on the **ZCode v3.17.2 design system** (Apache-2.0): the Zai Light /
+Zai Dark tokens, the Tailwind 4 surface, the shadcn/Radix primitives, the
+file tree and the assistant conversation shell are adapted from ZCode's
+`packages/ui` source. The Aoxn-specific parts — the compiler, package
+manager, language service and workspace bridge — are unchanged in
+behaviour and remain the IDE's source of truth.
 
 ```
 ide/
-├─ app/            Next.js App Router entry (layout, page, global styles)
-├─ components/     Editor.tsx (Monaco), icons.tsx
+├─ app/            Next.js App Router entry, Workbench.tsx, globals.css,
+│                  zcode-theme.css (the Zai token blocks)
+├─ components/
+│   ├─ ui/         ZCode/shadcn primitives (button, input, dialog, tabs,
+│   │              resizable, select, tooltip, toast, …)
+│   ├─ ai-elements/ ZCode's conversation, file-tree, terminal and message
+│   │              layout; PromptInput; the Aoxn message renderer
+│   ├─ ChatPanel.tsx, TerminalPanel.tsx, GitPanel.tsx, PreviewPanel.tsx
+│   ├─ FileExplorer.tsx, DiffView.tsx, Editor.tsx (Monaco), icons.tsx
+│   └─ lib/utils.ts  the `cn` class merger (text-ui-* aware)
 ├─ lib/            bridge.ts (backend calls), diagnostics.ts (structured
 │                  first, text fallback), symbols.ts (outline, jump, search
-│                  ranking), monaco.ts, paths.ts (prompt validation),
-│                  pkg.ts (manifest + report), tree.ts (fixture tree)
+│                  ranking), monaco.ts (Zai Monaco themes), paths.ts,
+│                  pkg.ts, tree.ts, theme.ts
 ├─ test/           node:test suites: diagnostics, symbols, package report,
 │                  path validation, tree
 ├─ out/            the static export Tauri serves (build output, gitignored)
 └─ src-tauri/      Rust: fsops.rs, toolchain.rs, pkg.rs, model.rs, lib.rs
 ```
+
+The ZCode source itself is NOT vendored as a buildable workspace: the
+adapted files live under `ide/components/ui` and `ide/components/ai-elements`
+and import only React, `radix-ui`, `class-variance-authority`,
+`tailwind-merge`, `lucide-react` and the small set of layout/runtime
+packages in `ide/package.json`. Re-copying a component from
+`.zcode-src/ZCode-main/packages/ui/src` requires stripping its `.js`
+import suffixes and replacing ZCode's `@/i18n` / `@/store` / `@/services`
+hooks with the Aoxn IDE's own state (the file tree and conversation show
+the pattern).
 
 ## Building and running
 
@@ -53,6 +77,23 @@ pnpm typecheck             # tsc --noEmit
 
 ### Dependency pins, and one accepted advisory
 
+The ZCode rework added the design-system dependency set: `tailwindcss` and
+`@tailwindcss/postcss` (4.3.x), `radix-ui`, `class-variance-authority`,
+`tailwind-merge`, `lucide-react`, `react-resizable-panels`,
+`use-stick-to-bottom`, `ansi-to-react`, `react-markdown`, `remark-gfm`,
+`tailwind-scrollbar-hide` and `tw-animate-css`. The copied ZCode source is
+Apache-2.0; attribution is in `ide/THIRD-PARTY-NOTICES.md`. Re-run
+`pnpm --dir ide audit` after changing these.
+
+`ansi-to-react` 6.2.6 pins `linkify-it ^3.0.3`, and the 3.x line plus
+linkify-it ≤5.0.1 carry quadratic-complexity DoS advisories. The
+`ide/pnpm-workspace.yaml` override pins **5.0.2**; the `linkify().match` API
+ansi-to-react uses is unchanged, and `pnpm audit` is clean after the bump.
+Like the dompurify pin, this override lives in the workspace file so a bot
+lockfile regeneration cannot silently drop it.
+
+
+
 - **`next` is on 16.4.3.** The 16.3 line carried three advisories — two
   critical (the image-optimisation RCE via `sharp`, and `use cache` returning
   typed arrays) and the App Router Server-Action DoS — all patched at 16.4.1.
@@ -68,7 +109,7 @@ pnpm typecheck             # tsc --noEmit
   the incomplete `IN_PLACE` fix, and a skipped SMIL `attributeName=href`
   guard); 3.4.17 closes all three. They are DOM XSS in the sanitiser Monaco
   applies to pasted and loaded HTML. The override is a patch bump within the
-  same minor, and the editor's 62 frontend tests, `pnpm typecheck` and
+  same minor, and the editor's 64 frontend tests, `pnpm typecheck` and
   `pnpm build` pass on it.
 - **The override lives in `ide/pnpm-workspace.yaml`, not in the
   `pnpm.overrides` field of `ide/package.json`, and that is not a style
@@ -102,7 +143,34 @@ pnpm typecheck             # tsc --noEmit
   create entries from a prompt: the name is relative to the selected
   folder, nesting works in one step (`src/util.ax`), and a name that would
   escape the workspace or clobber an existing entry is refused in the
-  dialog, not by the filesystem. Creating a file opens it.
+  dialog, not by the filesystem. Creating a file opens it. The tree is
+  ZCode's `ai-elements/file-tree`: controlled expansion, directory chevrons,
+  file-type icons and the Zai sidebar surface.
+- **Assistant** (new) — a right-hand conversation pane built from ZCode's
+  `Conversation` / `Message` / `PromptInput` shell. The active file is
+  attached as context on every send. The provider is configurable
+  (OpenAI-compatible or Anthropic) and every request is proxied by the Rust
+  `ide_ai_chat` command, so the API key lives in the app config file and
+  never in the webview. The browser preview reports honestly that it has no
+  proxy; the desktop app is where the assistant works.
+- **Terminal** (new) — a command panel with ANSI output (`ansi-to-react`),
+  command history and a `cd`-aware cwd. The Rust `ide_terminal_exec`
+  command runs one shell command at a time in the workspace (or a folder
+  inside it); it is a command runner, not a persistent PTY.
+- **Source control** (new) — `git status --porcelain=v1 -z` for the open
+  workspace, grouped by file with staged/untracked/modified/renamed states.
+  Clicking a row opens a Monaco side-by-side diff against `HEAD`
+  (`ide_git_diff`). A folder that is not a repository is a normal empty
+  state, not an error.
+- **Preview** (new) — the bottom dock's Preview tab renders images, PDFs,
+  markdown and plain text from the selected file. Bytes come through
+  `ide_read_bytes` with a 16 MiB cap; text files reuse the editor's loaded
+  content.
+- **Themes** — Zai Dark and Zai Light, switched from the title bar and
+  remembered in `localStorage`. Monaco has a matching `aoxn-zai-dark` /
+  `aoxn-zai-light` theme; the syntax palette is the same family as the DOM
+  tokens, kept as concrete hex values because Monaco's parser does not
+  accept the `lab()`/`color-mix()` serializations the browser computes.
 - **Editor** — Monaco with an Aoxn grammar (`lib/monaco.ts`: keywords,
   types, builtins, `f""` interpolation, `#` comments). One model per open
   file, so undo is per-file and tab switching keeps position. The Aoxn
@@ -190,7 +258,10 @@ pnpm typecheck             # tsc --noEmit
 | `Ctrl+O` | open folder |
 | `Ctrl+S` | save |
 | `Ctrl+B` | toggle the sidebar |
-| `Ctrl+J` | toggle the output panel |
+| `Ctrl+J` | toggle the bottom panel |
+| `Ctrl` + `` ` `` | show the terminal |
+| `Ctrl+Shift+G` | show source control |
+| `Ctrl+Shift+A` | toggle the assistant |
 | `F5` / `F6` / `F7` | run / build / check |
 | `Ctrl`+click | go to definition |
 
@@ -205,6 +276,36 @@ pnpm typecheck             # tsc --noEmit
 A folder may also be passed as a command-line argument. The status bar
 reports when no compiler is found, which is the single most useful thing
 the IDE can say to a new user.
+
+The assistant's provider, base URL, model and API key live in the Tauri
+app config file (`ide-config.json` under the platform app-config
+directory), written by `ide_config_write`. They are not environment
+variables and they never enter `localStorage` in the desktop app.
+
+## Design system (ZCode v3.17.2)
+
+- `app/zcode-theme.css` is the ZCode token source: `@theme`, `.dark`,
+  `.theme-zai-light` and `.theme-zai-dark`, copied verbatim from
+  `packages/ui/src/styles.css`. `app/globals.css` imports Tailwind 4, the
+  theme, `tw-animate-css` and `tailwind-scrollbar-hide`, adds the
+  `data-open` / `data-vertical` / `data-active` custom variants ZCode's
+  shadcn primitives expect, and defines the workbench shell classes.
+- **Application UI uses `text-ui-*`, not Tailwind's `text-sm`/`text-xs`.**
+  That is ZCode's highest-priority design constraint; `components/lib/utils.ts`
+  registers the same scale in `tailwind-merge` so a size class and a colour
+  class never overwrite each other.
+- The copied primitives under `components/ui` come from ZCode's
+  `packages/ui/src/components/ui`. Their only edits are import-path
+  normalization (`.js` suffixes removed) and replacing ZCode i18n hooks in
+  `dialog`/`spinner`/`kbd` with local strings. The conversation and
+  file-tree shells under `components/ai-elements` follow the same rule.
+- `components/ai-elements/message.tsx` preserves ZCode's layout classes but
+  renders Markdown with `react-markdown` + `remark-gfm`; ZCode's full
+  Streamdown pipeline is not needed for the IDE's assistant.
+- The theme is toggled by `lib/theme.ts` (ported from ZCode's `useTheme`):
+  it applies `dark` plus `theme-zai-dark` / `theme-zai-light` to `<html>`.
+  Monaco cannot read the computed `lab()`/`color-mix()` values, so
+  `lib/monaco.ts` carries the two matching hex palettes.
 
 ## Why it is built this way
 
@@ -248,6 +349,17 @@ be data loss from a single misclick. There is no general read-any-path
 command and no shell plugin; `capabilities/default.json` grants only the
 window and the folder picker. The rules are in `fsops.rs` and covered by
 tests.
+
+**The terminal and the assistant are explicit widenings, not side doors.**
+`ide_terminal_exec` runs one command in a cwd that is itself passed through
+`Workspace::resolve`, so the shell cannot be pointed at a directory the
+user did not open; the command string is user-typed by definition. The
+assistant request is made in Rust, which keeps the API key out of the
+webview's network layer and sidesteps provider CORS. `ide_read_bytes`
+caps preview payloads at 16 MiB. Git commands are read-only queries
+against the workspace root. Keep those properties when adding a command:
+the frontend may name a resource, but the backend decides whether it is
+inside the boundary.
 
 **One spelling of every path.** `fs::canonicalize` returns `\\?\D:\...`
 verbatim paths on Windows; `fsops::pretty` strips that prefix before any

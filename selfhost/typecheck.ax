@@ -40,12 +40,31 @@ def TY_STRUCT() -> int:
 def TY_VAR() -> int:
     return 8
 
+# v0.40.0: None, T | None, dict[V], fn(...) -> T
+def TY_NONE() -> int:
+    return 9
+
+def TY_OPT() -> int:
+    return 10
+
+def TY_DICT() -> int:
+    return 11
+
+def TY_FN() -> int:
+    return 12
+
 # ---- checker state ----
 
 struct CState:
     p: PState
     err: int
     errmsg: string
+    err_stage: string
+    err_line: int
+    err_col: int
+    err_raw: string
+    cur_line: int
+    cur_col: int
     loop_depth: int
     cur_ret: int
     res_ok: int
@@ -56,11 +75,17 @@ struct CState:
     t_elem: Vec
     t_len: Vec
     t_sname: Vec
+    # function types: return type, parameter-list start into tf_ty, arity
+    t_fret: Vec
+    t_fstart: Vec
+    t_fn: Vec
+    tf_ty: Vec
     t_int: int
     t_float: int
     t_bool: int
     t_str: int
     t_void: int
+    t_none: int
     # flat function scope: name -> type index
     sc_name: Vec
     sc_ty: Vec
@@ -101,13 +126,51 @@ struct CState:
     q_node: Vec
     call_node: Vec
     call_fni: Vec
+    # exceptions and nullable narrowing (v0.40.0)
+    try_depth: int
+    nar_name: Vec
+    nar_ty: Vec
+    n_name: string
+    n_then: int
+    n_else: int
+    n_ok: int
+    # every file the loader included (for the CLI build cache)
+    files: Vec
+    # W001 bookkeeping: declarations/reads of the function being checked,
+    # and the program-wide warning list the CLI reports
+    wd_name: Vec
+    wd_line: Vec
+    wd_col: Vec
+    wr_name: Vec
+    wn_name: Vec
+    wn_line: Vec
+    wn_col: Vec
 
 def alloc_ty(c: CState, tag: int, elem: int, ln: int, sname: string) -> CState:
     c.t_tag = vec_push(c.t_tag, tag)
     c.t_elem = vec_push(c.t_elem, elem)
     c.t_len = vec_push(c.t_len, ln)
     c.t_sname = vec_push(c.t_sname, as_ptr(sname))
+    c.t_fret = vec_push(c.t_fret, -1)
+    c.t_fstart = vec_push(c.t_fstart, -1)
+    c.t_fn = vec_push(c.t_fn, 0)
     c.r_ty = c.t_tag.len - 1
+    c.res_ok = 1
+    return c
+
+# function type: params is a Vec of type-arena indices
+def alloc_fn_ty(c: CState, ret: int, params: Vec) -> CState:
+    c = alloc_ty(c, TY_FN(), 0, 0, "")
+    idx = c.r_ty
+    start = c.tf_ty.len
+    i = 0
+    while i < params.len:
+        c.tf_ty = vec_push(c.tf_ty, vec_get(params, i))
+        i = i + 1
+    vec_set(c.t_fret, idx, ret)
+    vec_set(c.t_fstart, idx, start)
+    vec_set(c.t_fn, idx, params.len)
+    c.r_ty = idx
     c.res_ok = 1
     return c
 
@@ -116,6 +179,12 @@ def checker_state() -> CState:
         p=parser_new(lex_state_new("")),
         err=0,
         errmsg="",
+        err_stage="",
+        err_line=0,
+        err_col=0,
+        err_raw="",
+        cur_line=0,
+        cur_col=0,
         loop_depth=0,
         cur_ret=-1,
         res_ok=1,
@@ -125,11 +194,16 @@ def checker_state() -> CState:
         t_elem=vec_new(),
         t_len=vec_new(),
         t_sname=vec_new(),
+        t_fret=vec_new(),
+        t_fstart=vec_new(),
+        t_fn=vec_new(),
+        tf_ty=vec_new(),
         t_int=0,
         t_float=0,
         t_bool=0,
         t_str=0,
         t_void=0,
+        t_none=0,
         sc_name=vec_new(),
         sc_ty=vec_new(),
         sf_struct=vec_new(),
@@ -162,6 +236,21 @@ def checker_state() -> CState:
         q_node=vec_new(),
         call_node=vec_new(),
         call_fni=vec_new(),
+        try_depth=0,
+        nar_name=vec_new(),
+        nar_ty=vec_new(),
+        n_name="",
+        n_then=-1,
+        n_else=-1,
+        n_ok=0,
+        files=vec_new(),
+        wd_name=vec_new(),
+        wd_line=vec_new(),
+        wd_col=vec_new(),
+        wr_name=vec_new(),
+        wn_name=vec_new(),
+        wn_line=vec_new(),
+        wn_col=vec_new(),
     )
     c = alloc_ty(c, TY_INT(), 0, 0, "")
     c.t_int = c.r_ty
@@ -173,6 +262,8 @@ def checker_state() -> CState:
     c.t_str = c.r_ty
     c = alloc_ty(c, TY_VOID(), 0, 0, "")
     c.t_void = c.r_ty
+    c = alloc_ty(c, TY_NONE(), 0, 0, "")
+    c.t_none = c.r_ty
     return c
 
 # checker over an already-parsed (possibly multi-file) parser state
@@ -186,6 +277,10 @@ def cerr(c: CState, msg: string) -> CState:
     if c.err == 0:
         c.err = 1
         c.errmsg = msg
+        c.err_stage = "type"
+        c.err_line = c.cur_line
+        c.err_col = c.cur_col
+        c.err_raw = msg
     return c
 
 def ty_tag(c: CState, ty: int) -> int:
@@ -210,6 +305,21 @@ def ty_eq(c: CState, a: int, b: int) -> int:
         if ty_len(c, a) != ty_len(c, b):
             return 0
         return ty_eq(c, ty_elem(c, a), ty_elem(c, b))
+    if t == TY_OPT() or t == TY_DICT():
+        return ty_eq(c, ty_elem(c, a), ty_elem(c, b))
+    if t == TY_FN():
+        if vec_get(c.t_fn, a) != vec_get(c.t_fn, b):
+            return 0
+        if ty_eq(c, vec_get(c.t_fret, a), vec_get(c.t_fret, b)) == 0:
+            return 0
+        i = 0
+        sa = vec_get(c.t_fstart, a)
+        sb = vec_get(c.t_fstart, b)
+        while i < vec_get(c.t_fn, a):
+            if ty_eq(c, vec_get(c.tf_ty, sa + i), vec_get(c.tf_ty, sb + i)) == 0:
+                return 0
+            i = i + 1
+        return 1
     if t == TY_STRUCT():
         if ty_sname(c, a) == ty_sname(c, b):
             return 1
@@ -218,7 +328,16 @@ def ty_eq(c: CState, a: int, b: int) -> int:
         if ty_sname(c, a) == ty_sname(c, b):
             return 1
         return 0
-    return 0
+    return 1
+
+def ty_fn_ret(c: CState, ty: int) -> int:
+    return vec_get(c.t_fret, ty)
+
+def ty_fn_n(c: CState, ty: int) -> int:
+    return vec_get(c.t_fn, ty)
+
+def ty_fn_param(c: CState, ty: int, k: int) -> int:
+    return vec_get(c.tf_ty, vec_get(c.t_fstart, ty) + k)
 
 def ty_display(c: CState, ty: int) -> string:
     t = ty_tag(c, ty)
@@ -232,9 +351,34 @@ def ty_display(c: CState, ty: int) -> string:
         return "string"
     if t == TY_VOID():
         return "void"
+    if t == TY_NONE():
+        return "None"
+    if t == TY_OPT():
+        return ty_display(c, ty_elem(c, ty)) + " | None"
+    if t == TY_DICT():
+        return "dict[" + ty_display(c, ty_elem(c, ty)) + "]"
+    if t == TY_FN():
+        s = "fn("
+        i = 0
+        while i < ty_fn_n(c, ty):
+            if i > 0:
+                s = s + ", "
+            s = s + ty_display(c, ty_fn_param(c, ty, i))
+            i = i + 1
+        return s + ") -> " + ty_display(c, ty_fn_ret(c, ty))
     if t == TY_ARRAY():
         return "[" + ty_display(c, ty_elem(c, ty)) + "; " + str(ty_len(c, ty)) + "]"
     return ty_sname(c, ty)
+
+# v0.40.0 widening: T -> T | None and None -> T | None; nothing else
+def assignable(c: CState, declared: int, actual: int) -> int:
+    if ty_eq(c, declared, actual) == 1:
+        return 1
+    if ty_tag(c, declared) == TY_OPT():
+        if ty_tag(c, actual) == TY_NONE():
+            return 1
+        return ty_eq(c, ty_elem(c, declared), actual)
+    return 0
 
 def is_printable(c: CState, ty: int) -> int:
     t = ty_tag(c, ty)
@@ -265,6 +409,90 @@ def scope_lookup(c: CState, name: string) -> CState:
             c.r_ty = vec_get(c.sc_ty, i)
             return c
         i = i - 1
+    return c
+
+# overwrite the latest binding of `name` (used by branch-local narrowing)
+def scope_set(c: CState, name: string, ty: int) -> CState:
+    i = c.sc_name.len - 1
+    while i >= 0:
+        if as_string(vec_get(c.sc_name, i)) == name:
+            vec_set(c.sc_ty, i, ty)
+            return c
+        i = i - 1
+    return c
+
+# ---- nullable narrowing bookkeeping (declared slot type) ----
+def nar_find(c: CState, name: string) -> int:
+    i = c.nar_name.len - 1
+    while i >= 0:
+        if as_string(vec_get(c.nar_name, i)) == name:
+            return i
+        i = i - 1
+    return -1
+
+def nar_get(c: CState, name: string) -> CState:
+    c.res_ok = 0
+    c.r_ty = -1
+    i = nar_find(c, name)
+    if i != -1:
+        c.res_ok = 1
+        c.r_ty = vec_get(c.nar_ty, i)
+    return c
+
+def nar_set(c: CState, name: string, ty: int) -> CState:
+    i = nar_find(c, name)
+    if i != -1:
+        vec_set(c.nar_ty, i, ty)
+        return c
+    c.nar_name = vec_push(c.nar_name, as_ptr(name))
+    c.nar_ty = vec_push(c.nar_ty, ty)
+    return c
+
+def warn_find(v: Vec, name: string) -> int:
+    i = 0
+    while i < v.len:
+        if as_string(vec_get(v, i)) == name:
+            return 1
+        i = i + 1
+    return 0
+
+def warn_decl(c: CState, name: string, line: int, col: int) -> CState:
+    c.wd_name = vec_push(c.wd_name, as_ptr(name))
+    c.wd_line = vec_push(c.wd_line, line)
+    c.wd_col = vec_push(c.wd_col, col)
+    return c
+
+def warn_read(c: CState, name: string) -> CState:
+    if warn_find(c.wr_name, name) == 0:
+        c.wr_name = vec_push(c.wr_name, as_ptr(name))
+    return c
+
+def warn_flush(c: CState) -> CState:
+    i = 0
+    while i < c.wd_name.len:
+        nm = as_string(vec_get(c.wd_name, i))
+        if warn_find(c.wr_name, nm) == 0:
+            c.wn_name = vec_push(c.wn_name, vec_get(c.wd_name, i))
+            c.wn_line = vec_push(c.wn_line, vec_get(c.wd_line, i))
+            c.wn_col = vec_push(c.wn_col, vec_get(c.wd_col, i))
+        i = i + 1
+    c.wd_name = vec_new()
+    c.wd_line = vec_new()
+    c.wd_col = vec_new()
+    c.wr_name = vec_new()
+    return c
+
+def nar_remove(c: CState, name: string) -> CState:
+    ns = vec_new()
+    ts = vec_new()
+    i = 0
+    while i < c.nar_name.len:
+        if as_string(vec_get(c.nar_name, i)) != name:
+            ns = vec_push(ns, vec_get(c.nar_name, i))
+            ts = vec_push(ts, vec_get(c.nar_ty, i))
+        i = i + 1
+    c.nar_name = ns
+    c.nar_ty = ts
     return c
 
 # ---- struct table ----
@@ -337,6 +565,43 @@ def resolve_ty_node(c: CState, ty: int) -> CState:
         c.r_ty = c.t_str
     elif t == N_TYVOID():
         c.r_ty = c.t_void
+    elif t == N_TYNONE():
+        c.r_ty = c.t_none
+    elif t == N_TYOPT():
+        c = resolve_ty_node(c, node_child(c.p, ty))
+        if c.err == 1:
+            return c
+        if ty_tag(c, c.r_ty) == TY_VOID():
+            return cerr(c, "void cannot be nullable")
+        inner = c.r_ty
+        c = alloc_ty(c, TY_OPT(), inner, 0, "")
+    elif t == N_TYDICT():
+        c = resolve_ty_node(c, node_child(c.p, ty))
+        if c.err == 1:
+            return c
+        if ty_tag(c, c.r_ty) == TY_VOID():
+            return cerr(c, "void cannot be a dict value type")
+        inner = c.r_ty
+        c = alloc_ty(c, TY_DICT(), inner, 0, "")
+    elif t == N_TYFN():
+        nparams = node_ival(c.p, ty)
+        params = vec_new()
+        kid = node_child(c.p, ty)
+        k = 0
+        ret = -1
+        while kid != -1:
+            c = resolve_ty_node(c, kid)
+            if c.err == 1:
+                return c
+            if k < nparams:
+                params = vec_push(params, c.r_ty)
+            else:
+                ret = c.r_ty
+            k = k + 1
+            kid = node_next(c.p, kid)
+        if ret == -1:
+            return cerr(c, "malformed function type")
+        c = alloc_fn_ty(c, ret, params)
     elif t == N_TYARRAY():
         ln = node_ival(c.p, ty)
         if ln == -1 and c.cur_tps.len == 0:
@@ -541,6 +806,8 @@ def collect_sigs(c: CState) -> CState:
 
 def collect_one_sig(c: CState, ch: int) -> CState:
     name = node_sval(c.p, ch)
+    c.cur_line = vec_get(c.p.n_line, ch)
+    c.cur_col = vec_get(c.p.n_col, ch)
     is_extern = node_ival(c.p, ch)
     is_generic = is_generic_fn(c, ch)
     if is_generic == 1:
@@ -647,32 +914,46 @@ def collect_one_sig(c: CState, ch: int) -> CState:
     if c.err == 1:
         return c
     vec_set(c.fn_ret, fni, c.r_ty)
+    if name == "main":
+        if np != 0:
+            return cerr(c, "'main' cannot take parameters; read the command line with argc() / arg(i)")
+        if ty_tag(c, c.r_ty) != TY_INT() and ty_tag(c, c.r_ty) != TY_VOID():
+            return cerr(c, "'main' must return int (the exit code) or void, found " + ty_display(c, c.r_ty))
     return c
 
 # ---- all-paths-return analysis ----
 
-def block_returns_all(c: CState, block: int) -> int:
+def block_returns_all(c: CState, block: int, try_depth: int) -> int:
     st = node_child(c.p, block)
     while st != -1:
-        if stmt_guarantees_return(c, st) == 1:
+        if stmt_guarantees_return(c, st, try_depth) == 1:
             return 1
         st = node_next(c.p, st)
     return 0
 
-def stmt_guarantees_return(c: CState, stmt: int) -> int:
+def stmt_guarantees_return(c: CState, stmt: int, try_depth: int) -> int:
     t = node_tag(c.p, stmt)
     if t == N_RETURN():
         return 1
+    if t == N_RAISE():
+        # inside a try body a raise lands in that try's handler
+        if try_depth == 0:
+            return 1
+        return 0
+    if t == N_TRY():
+        handler = node_child(c.p, stmt)
+        handler = node_next(c.p, handler)
+        return block_returns_all(c, handler, 0)
     if t == N_IF():
         then_b = node_child(c.p, stmt)
         then_b = node_next(c.p, then_b)
         c2 = c
         else_b = node_next(c.p, then_b)
-        if block_returns_all(c2, then_b) == 0:
+        if block_returns_all(c2, then_b, 0) == 0:
             return 0
         if else_b == -1:
             return 0
-        return block_returns_all(c2, else_b)
+        return block_returns_all(c2, else_b, 0)
     return 0
 
 # ---- statements ----
@@ -684,13 +965,16 @@ def check_block(c: CState, block: int) -> CState:
         if terminated == 1:
             return cerr(c, "unreachable statement after 'return'")
         c = check_stmt(c, st)
-        if stmt_guarantees_return(c, st) == 1:
+        if stmt_guarantees_return(c, st, c.try_depth) == 1:
             terminated = 1
         st = node_next(c.p, st)
     return c
 
 def check_stmt(c: CState, stmt: int) -> CState:
     t = node_tag(c.p, stmt)
+    if vec_get(c.p.n_line, stmt) > 0:
+        c.cur_line = vec_get(c.p.n_line, stmt)
+        c.cur_col = vec_get(c.p.n_col, stmt)
     if t == N_LET():
         name = node_sval(c.p, stmt)
         ann = -1
@@ -700,47 +984,85 @@ def check_stmt(c: CState, stmt: int) -> CState:
             value = node_next(c.p, ann)
         else:
             value = node_child(c.p, stmt)
-        c = check_expr(c, value)
-        if c.err == 1:
-            return c
-        vty = c.r_ty
-        if ty_tag(c, vty) == TY_VOID():
-            return cerr(c, "cannot bind a void expression to '" + name + "'")
-        c2 = scope_lookup(c, name)
-        if c2.res_ok == 1:
-            # re-assignment keeps the declared type
-            dy = c2.r_ty
-            c = c2
-            if ann != -1:
-                c = resolve_ty_node(c, ann)
-                if c.err == 1:
-                    return c
-                if ty_eq(c, c.r_ty, dy) == 0:
-                    return cerr(c, "cannot re-declare '" + name + "' as " + ty_display(c, c.r_ty) + ": it is already " + ty_display(c, dy))
-            if ty_eq(c, vty, dy) == 0:
-                return cerr(c, "cannot assign a value of type " + ty_display(c, vty) + " to '" + name + ": " + ty_display(c, dy) + "'")
-            return c
-        # first binding
+        ann_ty = -1
         if ann != -1:
             c = resolve_ty_node(c, ann)
             if c.err == 1:
                 return c
-            if ty_eq(c, c.r_ty, vty) == 0:
-                return cerr(c, "cannot initialize '" + name + ": " + ty_display(c, c.r_ty) + "' with an expression of type " + ty_display(c, vty))
+            ann_ty = c.r_ty
+        empty_dict = 0
+        if node_tag(c.p, value) == N_DICTLIT():
+            if node_child(c.p, value) == -1:
+                empty_dict = 1
+        vty = -1
+        if empty_dict == 1:
+            if ann_ty == -1 or ty_tag(c, ann_ty) != TY_DICT():
+                return cerr(c, "an empty dict literal needs an annotation: d: dict[int] = {}")
+            vty = ann_ty
+        else:
+            c = check_expr(c, value)
+            if c.err == 1:
+                return c
+            vty = c.r_ty
+        if ty_tag(c, vty) == TY_VOID():
+            return cerr(c, "cannot bind a void expression to '" + name + "'")
+        c2 = scope_lookup(c, name)
+        if c2.res_ok == 1:
+            # re-assignment keeps the DECLARED type when a branch narrowed it
+            dy = c2.r_ty
+            c = c2
+            declared = dy
+            ng = nar_get(c, name)
+            if ng.res_ok == 1:
+                declared = ng.r_ty
+            if ann_ty != -1:
+                if ty_eq(c, ann_ty, declared) == 0:
+                    return cerr(c, "cannot re-declare '" + name + "' as " + ty_display(c, ann_ty) + ": it is already " + ty_display(c, declared))
+            if assignable(c, declared, vty) == 0:
+                return cerr(c, "cannot assign a value of type " + ty_display(c, vty) + " to '" + name + ": " + ty_display(c, declared) + "'")
+            ng2 = nar_get(c, name)
+            if ng2.res_ok == 1:
+                if ty_eq(c, vty, ng2.r_ty) == 1:
+                    c = nar_remove(c, name)
+                c = scope_set(c, name, vty)
+            return c
+        # first binding
+        if ann_ty != -1:
+            if assignable(c, ann_ty, vty) == 0:
+                return cerr(c, "cannot initialize '" + name + ": " + ty_display(c, ann_ty) + "' with an expression of type " + ty_display(c, vty))
+            c = scope_push(c, name, ann_ty)
+            c = warn_decl(c, name, vec_get(c.p.n_line, stmt), vec_get(c.p.n_col, stmt))
+            return c
         c = scope_push(c, name, vty)
+        c = warn_decl(c, name, vec_get(c.p.n_line, stmt), vec_get(c.p.n_col, stmt))
         return c
     if t == N_ASSIGN():
         target = node_child(c.p, stmt)
         value = node_next(c.p, target)
-        c = lvalue_ty(c, target)
-        if c.err == 1:
-            return c
-        dty = c.r_ty
+        dty = -1
+        if node_tag(c.p, target) == N_VAR():
+            ng = nar_get(c, node_sval(c.p, target))
+            c = ng
+            if ng.res_ok == 1:
+                dty = ng.r_ty
+        if dty == -1:
+            c = lvalue_ty(c, target)
+            if c.err == 1:
+                return c
+            dty = c.r_ty
         c = check_expr(c, value)
         if c.err == 1:
             return c
-        if ty_eq(c, c.r_ty, dty) == 0:
+        if assignable(c, dty, c.r_ty) == 0:
             return cerr(c, "cannot assign a value of type " + ty_display(c, c.r_ty) + " to a target of type " + ty_display(c, dty))
+        if node_tag(c.p, target) == N_VAR():
+            vname = node_sval(c.p, target)
+            ng2 = nar_get(c, vname)
+            if ng2.res_ok == 1:
+                assigned = c.r_ty
+                if ty_eq(c, assigned, ng2.r_ty) == 1:
+                    c = nar_remove(c, vname)
+                c = scope_set(c, vname, assigned)
         return c
     if t == N_IF():
         cond = node_child(c.p, stmt)
@@ -750,10 +1072,43 @@ def check_stmt(c: CState, stmt: int) -> CState:
             return c
         if ty_tag(c, c.r_ty) != TY_BOOL():
             return cerr(c, "'if' condition must be bool, found " + ty_display(c, c.r_ty))
+        else_b = node_next(c.p, then_b)
+        c = narrow_target(c, cond)
+        n_ok = c.n_ok
+        nname = c.n_name
+        nthen = c.n_then
+        nelse = c.n_else
+        if n_ok == 1:
+            sv = scope_lookup(c, nname)
+            saved = sv.r_ty
+            c = sv
+            ng = nar_get(c, nname)
+            if ng.res_ok == 0:
+                c = nar_set(c, nname, saved)
+            c = scope_set(c, nname, nthen)
+            c = check_block(c, then_b)
+            if c.err == 1:
+                return c
+            c = scope_set(c, nname, saved)
+            then_exits = block_returns_all(c, then_b, 0)
+            if else_b != -1:
+                c = scope_set(c, nname, nelse)
+                c = check_block(c, else_b)
+                if c.err == 1:
+                    return c
+                c = scope_set(c, nname, saved)
+                else_exits = block_returns_all(c, else_b, 0)
+                if then_exits == 1 and else_exits == 0:
+                    c = scope_set(c, nname, nelse)
+                elif else_exits == 1 and then_exits == 0:
+                    c = scope_set(c, nname, nthen)
+            else:
+                if then_exits == 1:
+                    c = scope_set(c, nname, nelse)
+            return c
         c = check_block(c, then_b)
         if c.err == 1:
             return c
-        else_b = node_next(c.p, then_b)
         if else_b != -1:
             c = check_block(c, else_b)
         return c
@@ -794,12 +1149,73 @@ def check_stmt(c: CState, stmt: int) -> CState:
         if ty_eq(c, c.r_ty, rty) == 0:
             return cerr(c, "'return' type mismatch: expected " + ty_display(c, rty) + ", found " + ty_display(c, c.r_ty))
         return c
+    if t == N_RAISE():
+        c = check_expr(c, node_child(c.p, stmt))
+        if c.err == 1:
+            return c
+        if ty_tag(c, c.r_ty) != TY_STR():
+            return cerr(c, "raise requires a string message, found " + ty_display(c, c.r_ty))
+        return c
+    if t == N_TRY():
+        body = node_child(c.p, stmt)
+        handler = node_next(c.p, body)
+        c.try_depth = c.try_depth + 1
+        c = check_block(c, body)
+        c.try_depth = c.try_depth - 1
+        if c.err == 1:
+            return c
+        if node_ival(c.p, stmt) == 1:
+            c = scope_push(c, node_sval(c.p, stmt), c.t_str)
+        c = check_block(c, handler)
+        return c
     if t == N_PASS():
         return c
     if t == N_EXPRSTMT():
         c = check_expr(c, node_child(c.p, stmt))
         return c
     return cerr(c, "unknown statement in the arena (tag " + str(t) + ")")
+
+# `x is None` / `x is not None`: which variable narrows and what each branch
+# sees. Mirrors narrow_target in the Rust checker.
+def narrow_target(c: CState, cond: int) -> CState:
+    c.n_ok = 0
+    c.n_name = ""
+    c.n_then = -1
+    c.n_else = -1
+    if node_tag(c.p, cond) != N_BINARY():
+        return c
+    op = node_ival(c.p, cond)
+    if op != OP_IS() and op != OP_ISNOT():
+        return c
+    lhs = node_child(c.p, cond)
+    rhs = node_next(c.p, lhs)
+    var = -1
+    if node_tag(c.p, rhs) == N_NONE():
+        var = lhs
+    elif node_tag(c.p, lhs) == N_NONE():
+        var = rhs
+    else:
+        return c
+    if node_tag(c.p, var) != N_VAR():
+        return c
+    name = node_sval(c.p, var)
+    sv = scope_lookup(c, name)
+    if sv.res_ok == 0:
+        return c
+    ty = sv.r_ty
+    if ty_tag(c, ty) != TY_OPT():
+        return c
+    inner = ty_elem(c, ty)
+    c = sv
+    c.n_ok = 1
+    c.n_name = name
+    if op == OP_ISNOT():
+        c.n_then = inner
+        c.n_else = c.t_none
+    else:
+        c.n_then = c.t_none
+        c.n_else = inner
+    return c
 
 def check_for(c: CState, stmt: int) -> CState:
     var = node_sval(c.p, stmt)
@@ -826,9 +1242,13 @@ def check_for(c: CState, stmt: int) -> CState:
         c = check_expr(c, arr)
         if c.err == 1:
             return c
-        if ty_tag(c, c.r_ty) != TY_ARRAY():
-            return cerr(c, "'for' can only iterate over arrays, found " + ty_display(c, c.r_ty))
-        var_ty = ty_elem(c, c.r_ty)
+        if ty_tag(c, c.r_ty) == TY_DICT():
+            # iterating a dict walks its KEYS in insertion order
+            var_ty = c.t_str
+        elif ty_tag(c, c.r_ty) == TY_ARRAY():
+            var_ty = ty_elem(c, c.r_ty)
+        else:
+            return cerr(c, "'for' can only iterate over arrays or dicts, found " + ty_display(c, c.r_ty))
     # loop variable may already exist (reuse rules)
     c2 = scope_lookup(c, var)
     if c2.res_ok == 1:
@@ -853,6 +1273,8 @@ def lvalue_ty(c: CState, e: int) -> CState:
     t = node_tag(c.p, e)
     if t == N_VAR():
         c = scope_lookup(c, node_sval(c.p, e))
+        if c.res_ok == 1:
+            c = warn_read(c, node_sval(c.p, e))
         if c.res_ok == 0:
             return cerr(c, "assignment to undeclared variable '" + node_sval(c.p, e) + "'")
         return c
@@ -861,6 +1283,15 @@ def lvalue_ty(c: CState, e: int) -> CState:
         idx = node_next(c.p, arr)
         c = check_expr(c, arr)
         if c.err == 1:
+            return c
+        if ty_tag(c, c.r_ty) == TY_DICT():
+            val = ty_elem(c, c.r_ty)
+            c = check_expr(c, idx)
+            if c.err == 1:
+                return c
+            if ty_tag(c, c.r_ty) != TY_STR():
+                return cerr(c, "dict key must be a string, found " + ty_display(c, c.r_ty))
+            c.r_ty = val
             return c
         if ty_tag(c, c.r_ty) != TY_ARRAY():
             return cerr(c, "cannot index a value of type " + ty_display(c, c.r_ty))
@@ -891,6 +1322,9 @@ def lvalue_ty(c: CState, e: int) -> CState:
 def check_expr(c: CState, e: int) -> CState:
     if e == -1:
         return cerr(c, "missing expression")
+    if vec_get(c.p.n_line, e) > 0:
+        c.cur_line = vec_get(c.p.n_line, e)
+        c.cur_col = vec_get(c.p.n_col, e)
     t = node_tag(c.p, e)
     if t == N_INT():
         c.r_ty = c.t_int
@@ -904,10 +1338,59 @@ def check_expr(c: CState, e: int) -> CState:
     if t == N_BOOL():
         c.r_ty = c.t_bool
         return c
+    if t == N_NONE():
+        c.r_ty = c.t_none
+        return c
+    if t == N_CAST():
+        inner = node_child(c.p, e)
+        tyn = node_next(c.p, inner)
+        c = check_expr(c, inner)
+        if c.err == 1:
+            return c
+        from = c.r_ty
+        c = resolve_ty_node(c, tyn)
+        if c.err == 1:
+            return c
+        to = c.r_ty
+        ft = ty_tag(c, from)
+        tt = ty_tag(c, to)
+        ok = 0
+        if ft == tt and (ft == TY_INT() or ft == TY_FLOAT() or ft == TY_BOOL() or ft == TY_STR()):
+            ok = 1
+        elif ft == TY_INT() and tt == TY_FLOAT():
+            ok = 1
+        elif ft == TY_FLOAT() and tt == TY_INT():
+            ok = 1
+        elif ft == TY_BOOL() and tt == TY_INT():
+            ok = 1
+        elif ft == TY_INT() and tt == TY_BOOL():
+            ok = 1
+        elif ft == TY_INT() and tt == TY_FN():
+            ok = 1
+        elif ft == TY_FN() and tt == TY_INT():
+            ok = 1
+        if ok == 0:
+            return cerr(c, "invalid cast from " + ty_display(c, from) + " to " + ty_display(c, to))
+        c.r_ty = to
+        return c
     if t == N_VAR():
         c = scope_lookup(c, node_sval(c.p, e))
+        if c.res_ok == 1:
+            c = warn_read(c, node_sval(c.p, e))
         if c.res_ok == 0:
-            return cerr(c, "unknown variable '" + node_sval(c.p, e) + "'")
+            # a bare function name in value position is its address
+            name = node_sval(c.p, e)
+            fni = sig_index(c, name)
+            if fni == -1:
+                return cerr(c, "unknown variable '" + name + "'")
+            params = vec_new()
+            np = vec_get(c.fn_nparam, fni)
+            k = 0
+            while k < np:
+                params = vec_push(params, sig_param_ty(c, fni, k))
+                k = k + 1
+            c = alloc_fn_ty(c, vec_get(c.fn_ret, fni), params)
+            return c
         return c
     if t == N_BINARY():
         return check_binary(c, e)
@@ -919,6 +1402,8 @@ def check_expr(c: CState, e: int) -> CState:
         return lvalue_ty(c, e)
     if t == N_ARRAYLIT():
         return check_arraylit(c, e)
+    if t == N_DICTLIT():
+        return check_dictlit(c, e)
     if t == N_CALL():
         return check_call(c, e)
     return cerr(c, "unknown expression in the arena (tag " + str(t) + ")")
@@ -939,6 +1424,49 @@ def check_binary(c: CState, e: int) -> CState:
     rname = ty_display(c, rt)
     ltag = ty_tag(c, lt)
     rtag = ty_tag(c, rt)
+    # a nullable value has no operators: point at `is None` instead
+    if ltag == TY_OPT() or rtag == TY_OPT():
+        none_test = 0
+        if (op == OP_IS() or op == OP_ISNOT()) and (ltag == TY_NONE() or rtag == TY_NONE()):
+            none_test = 1
+        if none_test == 0:
+            side = "left"
+            if ltag != TY_OPT():
+                side = "right"
+            shown = lt
+            if ltag != TY_OPT():
+                shown = rt
+            return cerr(c, "the " + side + " operand is " + ty_display(c, shown) + ": a nullable value cannot be used here — test it with `is None` / `is not None` first")
+    if op == OP_IS() or op == OP_ISNOT():
+        nullable = 0
+        if ltag == TY_NONE() or ltag == TY_OPT() or rtag == TY_NONE() or rtag == TY_OPT():
+            nullable = 1
+        if nullable == 0:
+            return cerr(c, "'" + op_str(op) + "' compares against None; found (" + lname + ", " + rname + ")")
+        c.r_ty = c.t_bool
+        return c
+    if op == OP_IN() or op == OP_NOTIN():
+        comparable = 0
+        if ltag == TY_INT() or ltag == TY_FLOAT() or ltag == TY_BOOL() or ltag == TY_STR():
+            comparable = 1
+        if comparable == 0:
+            return cerr(c, "'" + op_str(op) + "' needs a comparable left operand, found " + lname + " (structs and arrays have no equality)")
+        if rtag == TY_STR() and ltag == TY_STR():
+            c.r_ty = c.t_bool
+            return c
+        if rtag == TY_ARRAY():
+            elem = ty_elem(c, rt)
+            etag = ty_tag(c, elem)
+            ce = 0
+            if etag == TY_INT() or etag == TY_FLOAT() or etag == TY_BOOL() or etag == TY_STR():
+                ce = 1
+            if ce == 1 and ty_eq(c, lt, elem) == 1:
+                c.r_ty = c.t_bool
+                return c
+        if rtag == TY_DICT() and ltag == TY_STR():
+            c.r_ty = c.t_bool
+            return c
+        return cerr(c, "'" + op_str(op) + "' cannot test a " + lname + " against " + rname + ": a string is searched for the substring, an array for the element, a dict for the key")
     if op == OP_AND() or op == OP_OR():
         if ltag == TY_BOOL() and rtag == TY_BOOL():
             c.r_ty = c.t_bool
@@ -1027,19 +1555,77 @@ def check_arraylit(c: CState, e: int) -> CState:
     c = check_expr(c, first)
     if c.err == 1:
         return c
-    elem = c.r_ty
+    first_ty = c.r_ty
+    elem = first_ty
     n = 1
+    saw_none = 0
+    if ty_tag(c, first_ty) == TY_NONE():
+        saw_none = 1
+        elem = -1
     ch = node_next(c.p, first)
     while ch != -1:
         c = check_expr(c, ch)
         if c.err == 1:
             return c
-        if ty_eq(c, c.r_ty, elem) == 0:
-            return cerr(c, "array literal elements must share one type: found " + ty_display(c, elem) + " and " + ty_display(c, c.r_ty))
+        vt = c.r_ty
+        if ty_tag(c, vt) == TY_NONE():
+            saw_none = 1
+        elif elem == -1:
+            elem = vt
+        elif ty_eq(c, vt, elem) == 0:
+            return cerr(c, "array literal elements must share one type: found " + ty_display(c, elem) + " and " + ty_display(c, vt))
         n = n + 1
         ch = node_next(c.p, ch)
+    if saw_none == 1:
+        if elem == -1:
+            elem = c.t_none
+        else:
+            c = alloc_ty(c, TY_OPT(), elem, 0, "")
+            elem = c.r_ty
     c = alloc_ty(c, TY_ARRAY(), elem, n, "")
     return c
+
+def check_dictlit(c: CState, e: int) -> CState:
+    ent = node_child(c.p, e)
+    if ent == -1:
+        return cerr(c, "an empty dict literal needs an annotation: d: dict[int] = {}")
+    val = -1
+    while ent != -1:
+        key = node_child(c.p, ent)
+        vnode = node_next(c.p, key)
+        c = check_expr(c, key)
+        if c.err == 1:
+            return c
+        if ty_tag(c, c.r_ty) != TY_STR():
+            return cerr(c, "dict keys must be strings, found " + ty_display(c, c.r_ty))
+        c = check_expr(c, vnode)
+        if c.err == 1:
+            return c
+        vt = c.r_ty
+        if ty_tag(c, vt) == TY_VOID():
+            return cerr(c, "a dict cannot hold a void value")
+        if val == -1:
+            val = vt
+        elif ty_eq(c, vt, val) == 0:
+            return cerr(c, "dict values must share one type: found " + ty_display(c, val) + " and " + ty_display(c, vt))
+        ent = node_next(c.p, ent)
+    c = alloc_ty(c, TY_DICT(), val, 0, "")
+    return c
+
+def op_str(op: int) -> string:
+    if op == OP_EQ():
+        return "=="
+    if op == OP_NE():
+        return "!="
+    if op == OP_IS():
+        return "is"
+    if op == OP_ISNOT():
+        return "is not"
+    if op == OP_IN():
+        return "in"
+    if op == OP_NOTIN():
+        return "not in"
+    return "?"
 
 def check_call(c: CState, e: int) -> CState:
     name = node_sval(c.p, e)
@@ -1052,6 +1638,52 @@ def check_call(c: CState, e: int) -> CState:
         a = node_next(c.p, a)
 
     # ---- builtins ----
+    if name == "argc":
+        if nargs != 0:
+            return cerr(c, "argc expects no arguments")
+        c.r_ty = c.t_int
+        return c
+    if name == "arg" or name == "exit":
+        expected = "arg expects exactly 1 positional argument (index: int)"
+        if name == "exit":
+            expected = "exit expects exactly 1 positional argument (code: int)"
+        if nargs != 1:
+            return cerr(c, expected)
+        if node_sval(c.p, arg) != "":
+            return cerr(c, expected)
+        c = check_expr(c, node_child(c.p, arg))
+        if c.err != 0:
+            return c
+        if ty_tag(c, c.r_ty) != TY_INT():
+            if name == "arg":
+                return cerr(c, "arg index must be int, found " + ty_display(c, c.r_ty))
+            return cerr(c, "exit code must be int, found " + ty_display(c, c.r_ty))
+        c.r_ty = c.t_str
+        if name == "exit":
+            c.r_ty = c.t_void
+        return c
+    if name == "assert":
+        expected = "assert expects (condition: bool[, message: string])"
+        if nargs < 1 or nargs > 2:
+            return cerr(c, expected)
+        a = arg
+        while a != -1:
+            if node_sval(c.p, a) != "":
+                return cerr(c, expected)
+            a = node_next(c.p, a)
+        c = check_expr(c, node_child(c.p, arg))
+        if c.err != 0:
+            return c
+        if ty_tag(c, c.r_ty) != TY_BOOL():
+            return cerr(c, "assert condition must be bool, found " + ty_display(c, c.r_ty))
+        if nargs == 2:
+            c = check_expr(c, node_child(c.p, node_next(c.p, arg)))
+            if c.err != 0:
+                return c
+            if ty_tag(c, c.r_ty) != TY_STR():
+                return cerr(c, "assert message must be string, found " + ty_display(c, c.r_ty))
+        c.r_ty = c.t_void
+        return c
     if name == "print":
         if nargs != 1:
             return cerr(c, "print expects exactly 1 positional argument")
@@ -1069,9 +1701,48 @@ def check_call(c: CState, e: int) -> CState:
         if c.err == 1:
             return c
         t = ty_tag(c, c.r_ty)
-        if t != TY_ARRAY() and t != TY_STR():
-            return cerr(c, "len requires an array or string, found " + ty_display(c, c.r_ty))
+        if t != TY_ARRAY() and t != TY_STR() and t != TY_DICT():
+            return cerr(c, "len requires an array, string, or dict, found " + ty_display(c, c.r_ty))
         c.r_ty = c.t_int
+        return c
+    if name == "dict_has" or name == "dict_del":
+        if nargs != 2:
+            return cerr(c, name + " expects (dict, key)")
+        a1 = node_child(c.p, arg)
+        a2 = node_child(c.p, node_next(c.p, arg))
+        if node_sval(c.p, arg) != "" or node_sval(c.p, node_next(c.p, arg)) != "":
+            return cerr(c, name + " expects (dict, key)")
+        c = check_expr(c, a1)
+        if c.err == 1:
+            return c
+        if ty_tag(c, c.r_ty) != TY_DICT():
+            return cerr(c, name + " requires a dict, found " + ty_display(c, c.r_ty))
+        c = check_expr(c, a2)
+        if c.err == 1:
+            return c
+        if ty_tag(c, c.r_ty) != TY_STR():
+            return cerr(c, name + " key must be a string, found " + ty_display(c, c.r_ty))
+        c.r_ty = c.t_bool
+        return c
+    if name == "to_int" or name == "to_float":
+        if nargs != 1:
+            return cerr(c, name + " expects exactly 1 positional argument")
+        a1 = node_child(c.p, arg)
+        if node_sval(c.p, arg) != "":
+            return cerr(c, name + " expects exactly 1 positional argument")
+        c = check_expr(c, a1)
+        if c.err == 1:
+            return c
+        t = c.r_ty
+        if name == "to_int" and ty_tag(c, t) == TY_FN():
+            c.r_ty = c.t_int
+            return c
+        if ty_tag(c, t) != TY_INT() and ty_tag(c, t) != TY_FLOAT() and ty_tag(c, t) != TY_BOOL():
+            return cerr(c, name + "() requires int, float, or bool, found " + ty_display(c, t))
+        if name == "to_int":
+            c.r_ty = c.t_int
+        else:
+            c.r_ty = c.t_float
         return c
     if name == "str":
         if nargs != 1:
@@ -1181,14 +1852,37 @@ def check_call(c: CState, e: int) -> CState:
         c.r_ty = c.t_int
         return c
 
-    # ---- struct construction ----
+    # ---- struct construction / indirect calls ----
     fni = sig_index(c, name)
     if fni == -1:
-        if struct_known(c, name) == 1:
-            return check_struct_lit(c, name, arg, nargs)
         gi = gen_index(c, name)
         if gi != -1:
             return instantiate_call(c, gi, e, arg, nargs)
+        if struct_known(c, name) == 1:
+            return check_struct_lit(c, name, arg, nargs)
+        # indirect call through a function pointer local
+        sv = scope_lookup(c, name)
+        if sv.res_ok == 1:
+            fty = sv.r_ty
+            if ty_tag(c, fty) == TY_FN():
+                np = ty_fn_n(c, fty)
+                if nargs != np:
+                    return cerr(c, "function pointer '" + name + "' expects " + str(np) + " argument(s), found " + str(nargs))
+                k = 0
+                a = arg
+                while a != -1 and c.err == 0:
+                    if node_sval(c.p, a) != "":
+                        return cerr(c, "function pointer '" + name + "' takes positional arguments only")
+                    pty = ty_fn_param(c, fty, k)
+                    c = check_expr(c, node_child(c.p, a))
+                    if c.err == 1:
+                        return c
+                    if assignable(c, pty, c.r_ty) == 0:
+                        return cerr(c, "argument " + str(k + 1) + " of '" + name + "' must be " + ty_display(c, pty) + ", found " + ty_display(c, c.r_ty))
+                    k = k + 1
+                    a = node_next(c.p, a)
+                c.r_ty = ty_fn_ret(c, fty)
+                return c
         return cerr(c, "call to undefined function or struct '" + name + "'")
 
     # ---- user function ----
@@ -1204,7 +1898,7 @@ def check_call(c: CState, e: int) -> CState:
         c = check_expr(c, node_child(c.p, a))
         if c.err == 1:
             return c
-        if ty_eq(c, c.r_ty, pty) == 0:
+        if assignable(c, pty, c.r_ty) == 0:
             return cerr(c, "argument " + str(k + 1) + " of '" + name + "' must be " + ty_display(c, pty) + ", found " + ty_display(c, c.r_ty))
         k = k + 1
         a = node_next(c.p, a)
@@ -1224,7 +1918,7 @@ def check_struct_lit(c: CState, name: string, arg: int, nargs: int) -> CState:
         c = check_expr(c, node_child(c.p, a))
         if c.err == 1:
             return c
-        if ty_eq(c, c.r_ty, fty) == 0:
+        if assignable(c, fty, c.r_ty) == 0:
             return cerr(c, "field '" + fname + "' of '" + name + "' must be " + ty_display(c, fty) + ", found " + ty_display(c, c.r_ty))
         a = node_next(c.p, a)
     if c.err == 1:
@@ -1295,6 +1989,28 @@ def unify(c: CState, declared: int, actual: int) -> CState:
             c.res_ok = 0
             return c
         return unify(c, ty_elem(c, declared), ty_elem(c, actual))
+    if dt == TY_OPT() or dt == TY_DICT():
+        if at != dt:
+            c.res_ok = 0
+            return c
+        return unify(c, ty_elem(c, declared), ty_elem(c, actual))
+    if dt == TY_FN():
+        if at != TY_FN():
+            c.res_ok = 0
+            return c
+        if ty_fn_n(c, declared) != ty_fn_n(c, actual):
+            c.res_ok = 0
+            return c
+        c = unify(c, ty_fn_ret(c, declared), ty_fn_ret(c, actual))
+        if c.res_ok == 0:
+            return c
+        k = 0
+        while k < ty_fn_n(c, declared):
+            c = unify(c, ty_fn_param(c, declared, k), ty_fn_param(c, actual, k))
+            if c.res_ok == 0:
+                return c
+            k = k + 1
+        return c
     if dt != at:
         c.res_ok = 0
         return c
@@ -1315,6 +2031,19 @@ def type_slug(c: CState, ty: int) -> string:
         return "s"
     if t == TY_VOID():
         return "v"
+    if t == TY_NONE():
+        return "z"
+    if t == TY_OPT():
+        return "n" + type_slug(c, ty_elem(c, ty))
+    if t == TY_DICT():
+        return "d" + type_slug(c, ty_elem(c, ty))
+    if t == TY_FN():
+        s = "fn_" + type_slug(c, ty_fn_ret(c, ty))
+        k = 0
+        while k < ty_fn_n(c, ty):
+            s = s + "_" + type_slug(c, ty_fn_param(c, ty, k))
+            k = k + 1
+        return s
     if t == TY_ARRAY():
         return "a" + type_slug(c, ty_elem(c, ty)) + "x" + str(ty_len(c, ty))
     if t == TY_VAR():
@@ -1365,6 +2094,36 @@ def build_ty_node(c: CState, ty: int) -> CState:
         return cnode(c, N_TYSTRING(), "", 0)
     if t == TY_VOID():
         return cnode(c, N_TYVOID(), "", 0)
+    if t == TY_NONE():
+        return cnode(c, N_TYNONE(), "", 0)
+    if t == TY_OPT():
+        c = build_ty_node(c, ty_elem(c, ty))
+        inner = c.r_node
+        c = cnode(c, N_TYOPT(), "", 0)
+        n = c.r_node
+        c = cset_child(c, n, inner)
+        c.r_node = n
+        return c
+    if t == TY_DICT():
+        c = build_ty_node(c, ty_elem(c, ty))
+        inner = c.r_node
+        c = cnode(c, N_TYDICT(), "", 0)
+        n = c.r_node
+        c = cset_child(c, n, inner)
+        c.r_node = n
+        return c
+    if t == TY_FN():
+        c = cnode(c, N_TYFN(), "", ty_fn_n(c, ty))
+        n = c.r_node
+        k = 0
+        while k < ty_fn_n(c, ty):
+            c = build_ty_node(c, ty_fn_param(c, ty, k))
+            c = cappend_child(c, n, c.r_node)
+            k = k + 1
+        c = build_ty_node(c, ty_fn_ret(c, ty))
+        c = cappend_child(c, n, c.r_node)
+        c.r_node = n
+        return c
     if t == TY_STRUCT():
         return cnode(c, N_TYSTRUCT(), ty_sname(c, ty), 0)
     if t == TY_ARRAY():
@@ -1407,6 +2166,8 @@ def clone_subtree(c: CState, old: int, len_name: string) -> CState:
         return cnode(c, N_INT(), str(c.sub_len_val), c.sub_len_val)
     c = cnode(c, t, node_sval(c.p, old), node_ival(c.p, old))
     n = c.r_node
+    vec_set(c.p.n_line, n, vec_get(c.p.n_line, old))
+    vec_set(c.p.n_col, n, vec_get(c.p.n_col, old))
     kid = node_child(c.p, old)
     while kid != -1:
         nxt = node_next(c.p, kid)
@@ -1502,11 +2263,16 @@ def check_fn_body(c: CState, fn_idx: int) -> CState:
     if body == -1:
         return cerr(c, "malformed function body")
     c.cur_ret = vec_get(c.fn_ret, fni)
+    c.wd_name = vec_new()
+    c.wd_line = vec_new()
+    c.wd_col = vec_new()
+    c.wr_name = vec_new()
     c = check_block(c, body)
     if c.err == 1:
         return c
+    c = warn_flush(c)
     rty = c.cur_ret
-    if ty_tag(c, rty) != TY_VOID() and block_returns_all(c, body) == 0:
+    if ty_tag(c, rty) != TY_VOID() and block_returns_all(c, body, 0) == 0:
         return cerr(c, "function '" + fname + "' does not return a value on all paths")
     return c
 

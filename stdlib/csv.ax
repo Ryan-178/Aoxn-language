@@ -1,0 +1,270 @@
+# CSV (RFC 4180) parsing and serialization.
+#
+# Scope, stated honestly: string fields, comma separators, double-quote
+# escaping (`""`), CRLF or LF record ends, quoted commas/newlines, empty
+# fields, blank lines (an empty row, like Python's csv.reader) and a final
+# record without a newline. NOT implemented: Python's dialect parameters,
+# streaming readers/writers, type conversion, and lone-CR record ends (a lone
+# CR stays inside the field).
+#
+# Ownership: every returned string is freshly allocated (strings leak by
+# design in Aoxn); the table owns its row Vec buffers. `csv_free` releases
+# those buffers, not the strings.
+#
+# Errors are VALUES (the stdlib Err channel), never exceptions:
+#   err == 0  ok
+#   err == 1  malformed CSV (msg/line/col identify the byte)
+#   err == 2  file I/O failure (csv_read_file only)
+import * from "./stdlib.ax"
+
+struct CsvTable:
+    rows: VecVec
+    nrows: int
+    ncols: int
+    err: int
+    msg: string
+    line: int
+    col: int
+
+def csv_bad(t: CsvTable, msg: string, line: int, col: int) -> CsvTable:
+    t.err = 1
+    t.msg = msg
+    t.line = line
+    t.col = col
+    return t
+
+def csv_new() -> CsvTable:
+    return CsvTable(rows=vecvec_new(), nrows=0, ncols=0, err=0, msg="", line=0, col=0)
+
+# finish the field currently in `field`, then either the row or the table
+def csv_parse(src: string) -> CsvTable:
+    t = csv_new()
+    n = len(src)
+    if n == 0:
+        return t
+    rows = t.rows
+    row = vec_new()
+    field = sb_new(64)
+    maxcols = 0
+    line = 1
+    col = 1
+    i = 0
+    while i < n and t.err == 0:
+        # ---- one field ----
+        field = sb_new(64)
+        if str_get(src, i) == 34:
+            i = i + 1
+            col = col + 1
+            closed = 0
+            while i < n:
+                c = str_get(src, i)
+                if c == 34:
+                    if i + 1 < n and str_get(src, i + 1) == 34:
+                        field = sb_byte(field, 34)
+                        i = i + 2
+                        col = col + 2
+                    else:
+                        i = i + 1
+                        col = col + 1
+                        closed = 1
+                        break
+                else:
+                    field = sb_byte(field, c)
+                    if c == 10:
+                        line = line + 1
+                        col = 1
+                    else:
+                        col = col + 1
+                    i = i + 1
+            if closed == 0:
+                t = csv_bad(t, "unterminated quoted field", line, col)
+                break
+            if i < n:
+                c = str_get(src, i)
+                if c == 44:
+                    row = vec_push_str(row, sb_text(field))
+                    i = i + 1
+                    col = col + 1
+                    continue
+                if c == 13 and i + 1 < n and str_get(src, i + 1) == 10:
+                    row = vec_push_str(row, sb_text(field))
+                    if row.len > maxcols:
+                        maxcols = row.len
+                    rows = vecvec_push(rows, row)
+                    row = vec_new()
+                    i = i + 2
+                    line = line + 1
+                    col = 1
+                    continue
+                if c == 10:
+                    row = vec_push_str(row, sb_text(field))
+                    if row.len > maxcols:
+                        maxcols = row.len
+                    rows = vecvec_push(rows, row)
+                    row = vec_new()
+                    i = i + 1
+                    line = line + 1
+                    col = 1
+                    continue
+                t = csv_bad(t, "unexpected character after closing quote", line, col)
+                break
+            # EOF closes the quoted field and the record
+            row = vec_push_str(row, sb_text(field))
+            if row.len > maxcols:
+                maxcols = row.len
+            rows = vecvec_push(rows, row)
+            row = vec_new()
+            i = n
+            continue
+        # ---- unquoted field ----
+        while i < n:
+            c = str_get(src, i)
+            if c == 44:
+                break
+            if c == 10:
+                break
+            if c == 13 and i + 1 < n and str_get(src, i + 1) == 10:
+                break
+            if c == 34:
+                t = csv_bad(t, "unexpected quote in unquoted field", line, col)
+                break
+            field = sb_byte(field, c)
+            i = i + 1
+            col = col + 1
+        if t.err == 1:
+            break
+        if i < n:
+            c = str_get(src, i)
+            if c == 44:
+                row = vec_push_str(row, sb_text(field))
+                i = i + 1
+                col = col + 1
+                continue
+            # a record end (LF or CRLF); a completely empty line is an empty row
+            is_blank = 0
+            if field.n == 0 and row.len == 0:
+                is_blank = 1
+            if is_blank == 0:
+                row = vec_push_str(row, sb_text(field))
+            if row.len > maxcols:
+                maxcols = row.len
+            rows = vecvec_push(rows, row)
+            row = vec_new()
+            if c == 13:
+                i = i + 2
+            else:
+                i = i + 1
+            line = line + 1
+            col = 1
+            continue
+        # EOF: finalize the last field and record (unless the input merely
+        # ended with a newline, which the loop above already consumed)
+        row = vec_push_str(row, sb_text(field))
+        if row.len > maxcols:
+            maxcols = row.len
+        rows = vecvec_push(rows, row)
+        row = vec_new()
+        i = n
+    if t.err == 0:
+        if row.len > 0:
+            if row.len > maxcols:
+                maxcols = row.len
+            rows = vecvec_push(rows, row)
+        t.rows = rows
+        t.nrows = rows.len
+        t.ncols = maxcols
+    return t
+
+def csv_read_file(path: string) -> CsvTable:
+    h = fopen(path, "rb")
+    if h == 0:
+        t = csv_new()
+        t.err = 2
+        t.msg = "cannot open '" + path + "'"
+        return t
+    fclose(h)
+    return csv_parse(read_file(path))
+
+def csv_rows(t: CsvTable) -> int:
+    return t.nrows
+
+def csv_cols(t: CsvTable, r: int) -> int:
+    if r < 0 or r >= t.nrows:
+        return 0
+    return vecvec_get(t.rows, r).len
+
+def csv_get(t: CsvTable, r: int, c: int) -> string:
+    if r < 0 or r >= t.nrows:
+        return ""
+    row = vecvec_get(t.rows, r)
+    if c < 0 or c >= row.len:
+        return ""
+    return vec_get_str(row, c)
+
+def csv_max_cols(t: CsvTable) -> int:
+    return t.ncols
+
+def csv_free(t: CsvTable):
+    vecvec_free_deep(t.rows)
+
+# ---- serialization ----
+
+def csv_needs_quote(s: string) -> bool:
+    i = 0
+    while i < len(s):
+        c = str_get(s, i)
+        if c == 44 or c == 34 or c == 10 or c == 13:
+            return True
+        i = i + 1
+    return False
+
+def csv_quote_field(w: StrBuf, s: string) -> StrBuf:
+    if csv_needs_quote(s) == False:
+        return sb_str(w, s)
+    w = sb_byte(w, 34)
+    i = 0
+    while i < len(s):
+        c = str_get(s, i)
+        if c == 34:
+            w = sb_byte(w, 34)
+            w = sb_byte(w, 34)
+        else:
+            w = sb_byte(w, c)
+        i = i + 1
+    return sb_byte(w, 34)
+
+def csv_dumps_eol(t: CsvTable, eol_a: int, eol_b: int) -> string:
+    w = sb_new(256)
+    r = 0
+    while r < t.nrows:
+        row = vecvec_get(t.rows, r)
+        c = 0
+        while c < row.len:
+            if c > 0:
+                w = sb_byte(w, 44)
+            w = csv_quote_field(w, vec_get_str(row, c))
+            c = c + 1
+        if eol_a != 0:
+            w = sb_byte(w, eol_a)
+        if eol_b != 0:
+            w = sb_byte(w, eol_b)
+        r = r + 1
+    return sb_text(w)
+
+# RFC 4180 output uses CRLF after every record (Python's csv writer does too)
+def csv_dumps(t: CsvTable) -> string:
+    return csv_dumps_eol(t, 13, 10)
+
+def csv_dumps_lf(t: CsvTable) -> string:
+    return csv_dumps_eol(t, 10, 0)
+
+# one serialized record (no line ending), for callers building output by hand
+def csv_row_text(fields: Vec) -> string:
+    w = sb_new(128)
+    i = 0
+    while i < fields.len:
+        if i > 0:
+            w = sb_byte(w, 44)
+        w = csv_quote_field(w, vec_get_str(fields, i))
+        i = i + 1
+    return sb_text(w)

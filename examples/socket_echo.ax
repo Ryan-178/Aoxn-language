@@ -1,0 +1,67 @@
+# Minimal TCP echo. Windows: link with `-l ws2_32`.
+#   aoxn run examples/socket_echo.ax -- server 9000
+#   aoxn run examples/socket_echo.ax -- client 9000
+import * from "stdlib/socket.ax"
+
+def server(port: int) -> int:
+    ls = socket_listen(port, 4)
+    if ls.err != 0:
+        print("listen failed: " + ls.msg)
+        return 1
+    print("listening on 127.0.0.1:" + str(port))
+    cs = socket_accept(ls)
+    if cs.err != 0:
+        print("accept failed: " + cs.msg)
+        socket_close(ls)
+        return 1
+    buf = malloc(1024)
+    n = socket_recv_line(cs.fd, buf, 1024)
+    if n >= 0:
+        line = as_string(buf)
+        print("received: " + line)
+        socket_send_str(cs.fd, "echo:" + line + "\n")
+    socket_close(cs)
+    socket_close(ls)
+    return 0
+
+def client(port: int) -> int:
+    s = socket_connect("127.0.0.1", port)
+    if s.err != 0:
+        print("connect failed: " + s.msg)
+        return 1
+    socket_send_str(s.fd, "hello from the Aoxn socket module\n")
+    buf = malloc(1024)
+    n = socket_recv_line(s.fd, buf, 1024)
+    socket_close(s)
+    if n < 0:
+        print("recv failed")
+        return 1
+    print("reply: " + as_string(buf))
+    return 0
+
+def parse_port(s: string) -> int:
+    v = 0
+    i = 0
+    while i < len(s):
+        c = str_get(s, i)
+        if c < 48 or c > 57:
+            return -1
+        v = v * 10 + c - 48
+        i = i + 1
+    return v
+
+def main() -> int:
+    if argc() < 2:
+        print("usage: socket_echo server|client <port>")
+        return 2
+    mode = arg(0)
+    port = parse_port(arg(1))
+    if socket_init() != 0:
+        print("socket_init failed")
+        return 1
+    if mode == "server":
+        return server(port)
+    if mode == "client":
+        return client(port)
+    print("unknown mode '" + mode + "'")
+    return 2

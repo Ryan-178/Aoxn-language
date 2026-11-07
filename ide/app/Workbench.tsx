@@ -16,31 +16,56 @@
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { Editor, ErrorBadge, type EditorProps } from '@/components/Editor'
 import {
-  IconCheck,
-  IconChevron,
-  IconClose,
-  IconFile,
-  IconFiles,
-  IconFolder,
-  IconFolderOpen,
-  IconGear,
-  IconNewFile,
-  IconOutline,
-  IconPackage,
-  IconRefresh,
-  IconRun,
-  IconSave,
-  IconSearch,
-  IconSource,
-  IconStethoscope,
-  IconSymbol,
-  IconWarning,
-} from '@/components/icons'
+  BracesIcon,
+  CheckIcon,
+  CircleAlertIcon,
+  Code2Icon,
+  CommandIcon,
+  FileCode2Icon,
+  FilesIcon,
+  FolderOpenIcon,
+  GitBranchIcon,
+  HammerIcon,
+  ListTreeIcon,
+  MoonIcon,
+  PackageIcon,
+  PanelBottomIcon,
+  PlayIcon,
+  RefreshCwIcon,
+  SearchIcon,
+  SettingsIcon,
+  SparklesIcon,
+  SquareTerminalIcon,
+  SunIcon,
+  WrenchIcon,
+  XIcon,
+} from 'lucide-react'
+import { Editor, type EditorProps } from '@/components/Editor'
+import { ChatPanel } from '@/components/ChatPanel'
+import { DiffView } from '@/components/DiffView'
+import { FileExplorer } from '@/components/FileExplorer'
+import { GitPanel } from '@/components/GitPanel'
+import { PreviewPanel } from '@/components/PreviewPanel'
+import { TerminalPanel } from '@/components/TerminalPanel'
+import { Badge } from '@/components/ui/badge'
+import { Button } from '@/components/ui/button'
+import { Input } from '@/components/ui/input'
+import {
+  ResizableHandle,
+  ResizablePanel,
+  ResizablePanelGroup,
+} from '@/components/ui/resizable'
+import { Separator } from '@/components/ui/separator'
+import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
+import { Kbd } from '@/components/ui/kbd'
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip'
+import { cn } from '@/components/lib/utils'
+import { useTheme } from '@/lib/theme'
 import * as api from '@/lib/bridge'
 import type {
   ExecResult,
+  GitStatus,
   PkgReport,
   SymbolTable,
   ToolchainInfo,
@@ -75,6 +100,17 @@ import {
 
 /** Which sidebar view the activity bar is showing. */
 type SideView = 'files' | 'packages' | 'outline'
+
+/** The bottom dock's tabs, in ZCode order: output, terminal, git, preview. */
+type BottomTab = 'output' | 'terminal' | 'git' | 'preview'
+
+/** A file compared against HEAD, opened in Monaco's diff editor. */
+interface DiffTarget {
+  path: string
+  original: string
+  modified: string
+  binary: boolean
+}
 
 /** What the new-file / new-folder / package prompts can ask for. */
 type PromptMode = 'file' | 'folder' | 'pkgadd' | 'pkgwhy' | 'pkgremove'
@@ -141,6 +177,15 @@ export default function Workbench() {
   /** Why the outline is empty, when it is empty for a reason worth saying. */
   const [symbolError, setSymbolError] = useState<string>('')
 
+  // ---- ZCode shell state ----
+  const { theme, setTheme, resolved } = useTheme()
+  const monacoTheme = resolved === 'dark' ? 'aoxn-zai-dark' : 'aoxn-zai-light'
+  const [showAssistant, setShowAssistant] = useState(true)
+  const [bottomTab, setBottomTab] = useState<BottomTab>('output')
+  const [diff, setDiff] = useState<DiffTarget | null>(null)
+  const [previewPath, setPreviewPath] = useState<string | null>(null)
+  const [git, setGit] = useState<GitStatus | null>(null)
+
   const logSeq = useRef(0)
   /**
    * The toolchain is serialised through a ref, not just the `busy` state:
@@ -156,6 +201,34 @@ export default function Workbench() {
   const say = useCallback((text: string) => {
     setToast(text)
     window.setTimeout(() => setToast((t) => (t === text ? '' : t)), 2600)
+  }, [])
+
+  const refreshGit = useCallback(async () => {
+    try {
+      setGit(await api.gitStatus())
+    } catch {
+      setGit(null)
+    }
+  }, [])
+
+  /** Open one changed file in Monaco's diff editor (HEAD vs working tree). */
+  const openDiff = useCallback(
+    async (path: string) => {
+      try {
+        const target = await api.gitDiff(path)
+        setDiff(target)
+        setPreviewPath(path)
+      } catch (e) {
+        appendLog('err', String(e))
+        say(`Cannot diff ${basename(path)}`)
+      }
+    },
+    [appendLog, say],
+  )
+
+  const showBottom = useCallback((tab: BottomTab) => {
+    setBottomTab(tab)
+    setShowPanel(true)
   }, [])
 
   const refreshToolchain = useCallback(async () => {
@@ -214,6 +287,7 @@ export default function Workbench() {
     void (async () => {
       await refreshToolchain()
       await refreshPkg()
+      void refreshGit()
       try {
         // The root comes from the backend, not from the tree: an EMPTY
         // folder is a legal project, and "no tree rows" must not read as
@@ -228,7 +302,7 @@ export default function Workbench() {
         appendLog('err', String(e))
       }
     })()
-  }, [refreshToolchain, refreshPkg, say, appendLog])
+  }, [refreshToolchain, refreshPkg, refreshGit, say, appendLog])
 
   // ---- documents ----
 
@@ -277,6 +351,8 @@ export default function Workbench() {
         setTabs((prev) => (prev.includes(path) ? prev : [...prev, path]))
         setActive(path)
         setSelected(path)
+        setPreviewPath(path)
+        setDiff(null)
         if (atLine > 0) setJump({ path, line: atLine, column: 1, seq: Date.now() })
       } catch (e) {
         appendLog('err', String(e))
@@ -348,6 +424,7 @@ export default function Workbench() {
         })
         say(`Saved ${basename(path)}`)
         void autoCheck(path)
+        void refreshGit()
         return true
       } catch (e) {
         appendLog('err', String(e))
@@ -355,7 +432,7 @@ export default function Workbench() {
         return false
       }
     },
-    [docs, appendLog, say, autoCheck],
+    [docs, appendLog, say, autoCheck, refreshGit],
   )
 
   const closeTab = useCallback((path: string) => {
@@ -393,7 +470,7 @@ export default function Workbench() {
         await saveFile(path)
       }
       setBusy(true)
-      setShowPanel(true)
+      showBottom('output')
       const verb =
         what === 'check' ? `aoxn check ${basename(path)}` : `aoxn ${what} ${basename(path)}`
       appendLog('cmd', `❯ ${verb}`)
@@ -422,7 +499,7 @@ export default function Workbench() {
         setBusy(false)
       }
     },
-    [docs, saveFile, appendLog, refreshTree],
+    [docs, saveFile, appendLog, refreshTree, showBottom],
   )
 
   // Clicking a diagnostic in the log opens the file it names and puts the
@@ -455,7 +532,7 @@ export default function Workbench() {
     } catch (e) {
       appendLog('err', String(e))
     }
-  }, [appendLog, refreshPkg])
+  }, [appendLog, refreshPkg, refreshGit])
 
   /** Run `aoxn doctor` into the output panel — the toolchain's own
    *  self-check, and the first thing to try when the status bar says the
@@ -467,7 +544,7 @@ export default function Workbench() {
     }
     busyRef.current = true
     setBusy(true)
-    setShowPanel(true)
+    showBottom('output')
     appendLog('cmd', '❯ aoxn doctor')
     try {
       const result = await api.doctor()
@@ -485,7 +562,7 @@ export default function Workbench() {
       busyRef.current = false
       setBusy(false)
     }
-  }, [appendLog, refreshToolchain])
+  }, [appendLog, refreshToolchain, showBottom])
 
   /**
    * Run a whitelisted `aoxn pkg` subcommand from the workspace root. The
@@ -500,7 +577,7 @@ export default function Workbench() {
       }
       busyRef.current = true
       setBusy(true)
-      setShowPanel(true)
+      showBottom('output')
       appendLog('cmd', `❯ aoxn pkg ${sub}${arg ? ` ${arg}` : ''}`)
       try {
         const result = await api.pkgRun(sub, arg)
@@ -522,7 +599,7 @@ export default function Workbench() {
         setBusy(false)
       }
     },
-    [appendLog, refreshPkg, refreshTree],
+    [appendLog, refreshPkg, refreshTree, showBottom],
   )
 
   // ---- creating entries ----
@@ -558,13 +635,14 @@ export default function Workbench() {
       setTree(nodes)
       setExpanded((prev) => new Set(prev).add(dir))
       setSelected(target)
+      void refreshGit()
       if (kind === 'file') {
         const created = nodes.find((n) => !n.isDir && norm(n.path) === norm(target))
         await openFile(created ? created.path : target)
       }
       say(`Created ${name.trim()}`)
     },
-    [openFile, say],
+    [openFile, say, refreshGit],
   )
 
   /** Dispatch a submitted prompt to the action its mode stands for. */
@@ -596,26 +674,6 @@ export default function Workbench() {
   }, [active, diagsByFile])
 
   /**
-   * The rows the explorer should actually draw.
-   *
-   * The tree arrives FLAT with a depth column, so "is this row inside a
-   * collapsed folder" is a single left-to-right pass: track the depth at
-   * which we entered a collapsed folder and skip everything deeper until a
-   * row at or above that depth brings us back out.
-   */
-  const visibleTree = useMemo(() => {
-    const out: TreeNode[] = []
-    let hiddenBelow = -1
-    for (const n of tree) {
-      if (hiddenBelow >= 0 && n.depth > hiddenBelow) continue
-      hiddenBelow = -1
-      out.push(n)
-      if (n.isDir && !expanded.has(n.path)) hiddenBelow = n.depth
-    }
-    return out
-  }, [tree, expanded])
-
-  /**
    * The outline of the file on screen: its own declarations, in order.
    *
    * Derived from the same symbol table that answers "go to definition", so
@@ -626,6 +684,19 @@ export default function Workbench() {
   const outline = useMemo(
     () => (active ? outlineFor(symbols, active) : []),
     [symbols, active],
+  )
+
+  const mainPanelIds = useMemo(
+    () => [
+      ...(showSidebar ? ['sidebar'] : []),
+      'center',
+      ...(showAssistant ? ['assistant'] : []),
+    ],
+    [showSidebar, showAssistant],
+  )
+  const centerPanelIds = useMemo(
+    () => (showPanel ? ['editor', 'bottom'] : ['editor']),
+    [showPanel],
   )
 
   // ---- commands ----
@@ -697,11 +768,42 @@ export default function Workbench() {
         case 'clearlog':
           setLog([])
           break
+        case 'terminal':
+          showBottom('terminal')
+          break
+        case 'git':
+          showBottom('git')
+          break
+        case 'preview':
+          showBottom('preview')
+          break
+        case 'assistant':
+          setShowAssistant((v) => !v)
+          break
+        case 'theme':
+          setTheme(theme === 'zai-dark' ? 'zai-light' : 'zai-dark')
+          break
+        case 'diff':
+          if (active) void openDiff(active)
+          break
         default:
           break
       }
     },
-    [active, runTool, saveFile, startPrompt, runPkg, runDoctor, refreshTree, openFolder],
+    [
+      active,
+      runTool,
+      saveFile,
+      startPrompt,
+      runPkg,
+      runDoctor,
+      refreshTree,
+      openFolder,
+      showBottom,
+      openDiff,
+      setTheme,
+      theme,
+    ],
   )
 
   // ---- keyboard ----
@@ -733,6 +835,15 @@ export default function Workbench() {
       } else if (mod && k === 'j') {
         e.preventDefault()
         setShowPanel((v) => !v)
+      } else if (e.ctrlKey && e.key === '`') {
+        e.preventDefault()
+        showBottom('terminal')
+      } else if (mod && e.shiftKey && k === 'a') {
+        e.preventDefault()
+        setShowAssistant((v) => !v)
+      } else if (mod && e.shiftKey && k === 'g') {
+        e.preventDefault()
+        showBottom('git')
       } else if (mod && k === 's') {
         e.preventDefault()
         if (active) void saveFile(active)
@@ -751,7 +862,7 @@ export default function Workbench() {
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [active, palette, prompt, saveFile, runTool, openFolder])
+  }, [active, palette, prompt, saveFile, runTool, openFolder, showBottom])
 
   // ---- editor callbacks (stable identities keep Monaco's registry sane) ----
 
@@ -790,337 +901,581 @@ export default function Workbench() {
   )
 
   return (
-    <div className="app">
-      <nav className="activity">
-        <div className="activity__brand" title="Aoxn IDE">
-          ax
-        </div>
-        <button
-          className={`activity__item ${showSidebar && view === 'files' ? 'activity__item--on' : ''}`}
-          onClick={() => {
-            setView('files')
-            setShowSidebar(true)
-          }}
-          title="Explorer (Ctrl+B)"
-        >
-          <IconFiles />
-        </button>
-        <button
-          className={`activity__item ${showSidebar && view === 'packages' ? 'activity__item--on' : ''}`}
-          onClick={() => {
-            setView('packages')
-            setShowSidebar(true)
-          }}
-          title="Packages — aoxn.json and aoxn pkg"
-        >
-          <IconPackage />
-        </button>
-        <button
-          className={`activity__item ${showSidebar && view === 'outline' ? 'activity__item--on' : ''}`}
-          onClick={() => {
-            setView('outline')
-            setShowSidebar(true)
-          }}
-          title="Outline — the declarations the compiler found"
-        >
-          <IconOutline />
-        </button>
-        <button
-          className="activity__item"
-          onClick={() => setPalette({ mode: 'file', query: '' })}
-          title="Go to file (Ctrl+P)"
-        >
-          <IconSearch />
-        </button>
-        <button
-          className="activity__item"
-          onClick={() => setPalette({ mode: 'symbol', query: '' })}
-          title="Go to symbol (Ctrl+Shift+O)"
-        >
-          <IconSymbol />
-        </button>
-        <button
-          className="activity__item"
-          onClick={() => setPalette({ mode: 'command', query: '' })}
-          title="Commands (Ctrl+Shift+P)"
-        >
-          <IconSource />
-        </button>
-        <button
-          className="activity__item"
-          onClick={() => void runTool('run', active)}
-          title="Run (F5)"
-        >
-          <IconRun />
-        </button>
-        <div style={{ flex: 1 }} />
-        <button className="activity__item" onClick={() => void openFolder()} title="Open folder (Ctrl+O)">
-          <IconFolderOpen />
-        </button>
-        <button
-          className="activity__item"
-          onClick={() => setPalette({ mode: 'command', query: '' })}
-          title="Commands"
-        >
-          <IconGear />
-        </button>
-      </nav>
+    <TooltipProvider delayDuration={350}>
+      <div className="wb-root">
+        <header className="wb-titlebar">
+          <div className="flex min-w-0 items-center gap-2">
+            <div className="flex size-7 shrink-0 items-center justify-center rounded-lg bg-foreground text-ui-xs font-bold tracking-tight text-background">
+              ax
+            </div>
+            <div className="flex min-w-0 flex-col leading-tight">
+              <span className="text-ui-sm font-semibold text-foreground">Aoxn IDE</span>
+              <span className="max-w-52 truncate text-ui-xs text-foreground-subtlest" title={root}>
+                {root ? basename(root) || root : 'No folder open'}
+              </span>
+            </div>
+            {git?.isRepo ? (
+              <Badge className="ml-1 hidden max-w-36 truncate md:inline-flex" variant="secondary">
+                <GitBranchIcon className="size-2.5" /> {git.branch || 'detached'}
+              </Badge>
+            ) : null}
+          </div>
 
-      <div className="app__body">
-        <aside className="sidebar" hidden={!showSidebar}>
-          {view === 'files' ? (
-            <>
-              <div className="sidebar__title">
-                <span title={root}>{root ? basename(root) || root : 'Explorer'}</span>
-                <span className="sidebar__actions">
-                  <button className="iconbtn" title="New file" onClick={() => startPrompt('file')}>
-                    <IconNewFile />
-                  </button>
-                  <button className="iconbtn" title="New folder" onClick={() => startPrompt('folder')}>
-                    <IconFolder />
-                  </button>
-                  <button className="iconbtn" title="Refresh" onClick={() => void refreshTree()}>
-                    <IconRefresh />
-                  </button>
-                </span>
-              </div>
-              <div className="tree">
-                <div className="tree__label">Explorer</div>
-                {tree.length === 0 ? (
-                  <div className="tree__empty">
-                    No folder open.{'\n'}Click the folder icon in the activity bar to choose one.
-                  </div>
-                ) : (
-                  visibleTree.map((node) => (
-                    <TreeRow
-                      key={node.path}
-                      node={node}
-                      open={expanded.has(node.path)}
-                      selected={selected === node.path}
-                      onToggle={() =>
-                        setExpanded((prev) => {
-                          const next = new Set(prev)
-                          if (next.has(node.path)) next.delete(node.path)
-                          else next.add(node.path)
-                          return next
-                        })
-                      }
-                      onOpen={() => {
-                        if (node.isDir) return
-                        void openFile(node.path)
-                      }}
-                    />
-                  ))
-                )}
-              </div>
-            </>
-          ) : view === 'outline' ? (
-            <OutlinePanel
-              rows={outline}
-              error={symbolError}
-              busy={busy}
-              path={active}
-              onJump={(line) => {
-                if (active) void revealSymbol(active, line, 1)
+          <button
+            className="mx-auto hidden h-7 w-[min(420px,36vw)] items-center gap-2 rounded-lg border border-border bg-surface px-2.5 text-ui-sm text-foreground-subtle transition-colors hover:border-border-hover hover:text-foreground md:flex"
+            onClick={() => setPalette({ mode: 'file', query: '' })}
+            type="button"
+          >
+            <SearchIcon className="size-3.5" />
+            <span className="flex-1 text-left">Search files or commands</span>
+            <Kbd>Ctrl</Kbd>
+            <Kbd>P</Kbd>
+          </button>
+
+          <div className="flex items-center gap-0.5">
+            <ChromeButton label="Type check (F7)" onClick={() => void runTool('check', active)}>
+              <CheckIcon className="size-3.5" />
+            </ChromeButton>
+            <ChromeButton label="Build (F6)" onClick={() => void runTool('build', active)}>
+              <HammerIcon className="size-3.5" />
+            </ChromeButton>
+            <ChromeButton label="Run (F5)" onClick={() => void runTool('run', active)}>
+              <PlayIcon className="size-3.5" />
+            </ChromeButton>
+            <Separator className="mx-1 h-4" orientation="vertical" />
+            <ChromeButton
+              active={showAssistant}
+              label="Assistant (Ctrl+Shift+A)"
+              onClick={() => setShowAssistant((value) => !value)}
+            >
+              <SparklesIcon className="size-3.5" />
+            </ChromeButton>
+            <ChromeButton
+              label="Toggle theme"
+              onClick={() => setTheme(theme === 'zai-dark' ? 'zai-light' : 'zai-dark')}
+            >
+              {resolved === 'dark' ? <SunIcon className="size-3.5" /> : <MoonIcon className="size-3.5" />}
+            </ChromeButton>
+            <ChromeButton
+              label="Command palette (Ctrl+Shift+P)"
+              onClick={() => setPalette({ mode: 'command', query: '' })}
+            >
+              <CommandIcon className="size-3.5" />
+            </ChromeButton>
+          </div>
+        </header>
+
+        <div className="wb-main">
+          <aside className="flex w-11 flex-none flex-col items-center gap-1 border-r border-border bg-header py-2">
+            <RailButton
+              active={showSidebar && view === 'files'}
+              label="Explorer (Ctrl+B)"
+              onClick={() => {
+                setView('files')
+                setShowSidebar(true)
               }}
-              onRefresh={() => void refreshSymbols(active)}
-              onSearch={() => setPalette({ mode: 'symbol', query: '' })}
-            />
-          ) : (
-            <PackagesPanel
-              pkg={pkg}
-              report={pkgInfo}
-              busy={busy}
-              onRun={(sub, arg) => void runPkg(sub, arg)}
-              onAdd={() => startPrompt('pkgadd')}
-              onWhy={() => startPrompt('pkgwhy')}
-              onRemove={() => startPrompt('pkgremove')}
-              onRefresh={() => void refreshPkg()}
-            />
-          )}
-        </aside>
+            >
+              <FilesIcon className="size-4" />
+            </RailButton>
+            <RailButton
+              active={showSidebar && view === 'outline'}
+              label="Outline"
+              onClick={() => {
+                setView('outline')
+                setShowSidebar(true)
+              }}
+            >
+              <ListTreeIcon className="size-4" />
+            </RailButton>
+            <RailButton
+              active={showSidebar && view === 'packages'}
+              label="Packages"
+              onClick={() => {
+                setView('packages')
+                setShowSidebar(true)
+              }}
+            >
+              <PackageIcon className="size-4" />
+            </RailButton>
+            <div className="my-1 h-px w-5 bg-border" />
+            <RailButton label="Search files (Ctrl+P)" onClick={() => setPalette({ mode: 'file', query: '' })}>
+              <SearchIcon className="size-4" />
+            </RailButton>
+            <RailButton
+              label="Go to symbol (Ctrl+Shift+O)"
+              onClick={() => setPalette({ mode: 'symbol', query: '' })}
+            >
+              <BracesIcon className="size-4" />
+            </RailButton>
+            <RailButton
+              active={showPanel && bottomTab === 'git'}
+              label="Source control (Ctrl+Shift+G)"
+              onClick={() => showBottom('git')}
+            >
+              <GitBranchIcon className="size-4" />
+            </RailButton>
+            <RailButton
+              active={showPanel && bottomTab === 'terminal'}
+              label="Terminal (Ctrl+`)"
+              onClick={() => showBottom('terminal')}
+            >
+              <SquareTerminalIcon className="size-4" />
+            </RailButton>
+            <RailButton
+              active={showPanel && bottomTab === 'preview'}
+              label="File preview"
+              onClick={() => showBottom('preview')}
+            >
+              <Code2Icon className="size-4" />
+            </RailButton>
+            <div className="flex-1" />
+            <RailButton label="Run (F5)" onClick={() => void runTool('run', active)}>
+              <PlayIcon className="size-4" />
+            </RailButton>
+            <RailButton label="Open folder (Ctrl+O)" onClick={() => void openFolder()}>
+              <FolderOpenIcon className="size-4" />
+            </RailButton>
+            <RailButton label="Toolchain doctor" onClick={() => void runDoctor()}>
+              <WrenchIcon className="size-4" />
+            </RailButton>
+            <RailButton
+              label="Commands (Ctrl+Shift+P)"
+              onClick={() => setPalette({ mode: 'command', query: '' })}
+            >
+              <SettingsIcon className="size-4" />
+            </RailButton>
+          </aside>
 
-        <div className="app__main">
-          <div className="tabs">
-            {tabs.map((path) => {
-              const d = docs.get(path)
-              if (!d) return null
-              const dirty = d.text !== d.saved
-              return (
-                <div
-                  key={path}
-                  className={`tab ${path === active ? 'tab--on' : ''}`}
-                  onClick={() => setActive(path)}
-                  title={path}
+          <ResizablePanelGroup
+            className="min-w-0 flex-1"
+            defaultLayout={showSidebar && showAssistant ? { sidebar: 18, center: 56, assistant: 26 } : undefined}
+            layoutId="aoxn-workbench-main-zcode"
+            orientation="horizontal"
+            panelIds={mainPanelIds}
+          >
+            {showSidebar ? (
+              <>
+                <ResizablePanel defaultSize="18%" id="sidebar" maxSize="32%" minSize="14%">
+                  <div className="h-full min-h-0">
+                    {view === 'files' ? (
+                      <FileExplorer
+                        expanded={expanded}
+                        onExpandedChange={setExpanded}
+                        onNewFile={() => startPrompt('file')}
+                        onNewFolder={() => startPrompt('folder')}
+                        onOpenFolder={() => void openFolder()}
+                        onRefresh={() => void refreshTree()}
+                        onSearch={() => setPalette({ mode: 'file', query: '' })}
+                        onSelect={(path, isDir) => {
+                          setSelected(path)
+                          if (!isDir) void openFile(path)
+                        }}
+                        root={root}
+                        selected={selected}
+                        tree={tree}
+                      />
+                    ) : view === 'outline' ? (
+                      <OutlinePanel
+                        busy={busy}
+                        error={symbolError}
+                        onJump={(line) => {
+                          if (active) void revealSymbol(active, line, 1)
+                        }}
+                        onRefresh={() => void refreshSymbols(active)}
+                        onSearch={() => setPalette({ mode: 'symbol', query: '' })}
+                        path={active}
+                        rows={outline}
+                      />
+                    ) : (
+                      <PackagesPanel
+                        busy={busy}
+                        onAdd={() => startPrompt('pkgadd')}
+                        onRefresh={() => void refreshPkg()}
+                        onRemove={() => startPrompt('pkgremove')}
+                        onRun={(sub, arg) => void runPkg(sub, arg)}
+                        onWhy={() => startPrompt('pkgwhy')}
+                        pkg={pkg}
+                        report={pkgInfo}
+                      />
+                    )}
+                  </div>
+                </ResizablePanel>
+                <ResizableHandle />
+              </>
+            ) : null}
+
+            <ResizablePanel id="center" minSize="30%">
+              <div className="flex h-full min-h-0 flex-col bg-panel">
+                <div className="flex h-9 flex-none items-center gap-1 border-b border-border bg-header px-1.5">
+                  {diff ? (
+                    <div className="flex h-7 max-w-64 items-center gap-1.5 rounded-md bg-tab-active px-2 text-ui-sm text-foreground">
+                      <Code2Icon className="size-3.5 text-brand" />
+                      <span className="truncate">Diff · {basename(diff.path)}</span>
+                      <button
+                        className="ml-1 rounded-sm p-0.5 text-foreground-subtle hover:bg-surface-hover hover:text-foreground"
+                        onClick={() => setDiff(null)}
+                        title="Close diff"
+                        type="button"
+                      >
+                        <XIcon className="size-3" />
+                      </button>
+                    </div>
+                  ) : (
+                    <>
+                      {tabs.map((path) => {
+                        const doc = docs.get(path)
+                        if (!doc) return null
+                        const dirty = doc.text !== doc.saved
+                        return (
+                          <div
+                            className={cn(
+                              'group flex h-7 max-w-56 items-center gap-1.5 rounded-md px-2 text-ui-sm transition-colors',
+                              path === active
+                                ? 'bg-tab-active text-foreground'
+                                : 'text-foreground-subtle hover:bg-surface-hover hover:text-foreground',
+                            )}
+                            key={path}
+                            onClick={() => {
+                              setActive(path)
+                              setDiff(null)
+                            }}
+                            title={path}
+                          >
+                            <FileCode2Icon className="size-3.5 shrink-0 text-brand" />
+                            <span className="truncate">{basename(path)}</span>
+                            {dirty ? (
+                              <span
+                                className="size-1.5 shrink-0 rounded-full bg-brand"
+                                onClick={(event) => {
+                                  event.stopPropagation()
+                                  void saveFile(path)
+                                }}
+                                title="Unsaved — click to save"
+                              />
+                            ) : null}
+                            <button
+                              className="rounded-sm p-0.5 opacity-0 hover:bg-surface-hover group-hover:opacity-100"
+                              onClick={(event) => {
+                                event.stopPropagation()
+                                closeTab(path)
+                              }}
+                              title="Close"
+                              type="button"
+                            >
+                              <XIcon className="size-3" />
+                            </button>
+                          </div>
+                        )
+                      })}
+                      <button
+                        aria-label="New file"
+                        className="flex size-7 items-center justify-center rounded-md text-foreground-subtle hover:bg-surface-hover hover:text-foreground"
+                        onClick={() => startPrompt('file')}
+                        type="button"
+                      >
+                        <FilesIcon className="size-3.5" />
+                      </button>
+                    </>
+                  )}
+                  <div className="flex-1" />
+                  <ChromeButton label="Run (F5)" onClick={() => void runTool('run', active)}>
+                    <PlayIcon className="size-3.5" />
+                  </ChromeButton>
+                </div>
+
+                <ResizablePanelGroup
+                  className="min-h-0 flex-1"
+                  defaultLayout={showPanel ? { editor: 72, bottom: 28 } : undefined}
+                  layoutId="aoxn-workbench-center-zcode"
+                  orientation="vertical"
+                  panelIds={centerPanelIds}
                 >
-                  <span className="tab__name">{basename(path)}</span>
-                  {dirty ? (
-                    <span
-                      className="tab__dirty"
-                      title="Unsaved — click to save"
-                      onClick={(e) => {
-                        e.stopPropagation()
-                        void saveFile(path)
-                      }}
-                    />
+                  <ResizablePanel id="editor" minSize="30%">
+                    <div className="wb-editor-surface h-full">
+                      {diff ? (
+                        <DiffView
+                          modified={diff.modified}
+                          original={diff.original}
+                          path={diff.path}
+                          theme={monacoTheme}
+                        />
+                      ) : activeDoc ? (
+                        <Editor
+                          diagnostics={activeDiags}
+                          jump={jump}
+                          onChange={onEditorChange}
+                          onCursor={onEditorCursor}
+                          onGoToDefinition={onGoToDefinition}
+                          onSave={onEditorSave}
+                          path={activeDoc.path}
+                          text={activeDoc.text}
+                          theme={monacoTheme}
+                        />
+                      ) : (
+                        <div className="wb-empty">
+                          <div className="max-w-xl text-center">
+                            <div className="mx-auto mb-4 flex size-14 items-center justify-center rounded-2xl bg-accent text-brand">
+                              <SparklesIcon className="size-6" />
+                            </div>
+                            <h1 className="text-ui-xl font-semibold text-foreground">Aoxn IDE</h1>
+                            <p className="mt-1 text-ui-sm text-foreground-subtle">
+                              An editor and build runner for the Aoxn language, with a ZCode-style
+                              assistant and workspace panels.
+                            </p>
+                            <div className="mt-5 grid grid-cols-2 gap-x-6 gap-y-1.5 text-left text-ui-sm">
+                              <span className="text-foreground-subtle">Files</span>
+                              <span className="flex justify-end gap-1"><Kbd>Ctrl</Kbd><Kbd>P</Kbd></span>
+                              <span className="text-foreground-subtle">Commands</span>
+                              <span className="flex justify-end gap-1"><Kbd>Ctrl</Kbd><Kbd>Shift</Kbd><Kbd>P</Kbd></span>
+                              <span className="text-foreground-subtle">Run · Build · Check</span>
+                              <span className="flex justify-end gap-1"><Kbd>F5</Kbd><Kbd>F6</Kbd><Kbd>F7</Kbd></span>
+                              <span className="text-foreground-subtle">Terminal · Assistant</span>
+                              <span className="flex justify-end gap-1"><Kbd>Ctrl</Kbd><Kbd>`</Kbd><Kbd>Ctrl</Kbd><Kbd>Shift</Kbd><Kbd>A</Kbd></span>
+                            </div>
+                            <div className="mt-5 flex justify-center gap-2">
+                              <Button onClick={() => void openFolder()} type="button">
+                                Open folder
+                              </Button>
+                              <Button
+                                onClick={() => setPalette({ mode: 'command', query: '' })}
+                                type="button"
+                                variant="outline"
+                              >
+                                Commands
+                              </Button>
+                            </div>
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  </ResizablePanel>
+
+                  {showPanel ? (
+                    <>
+                      <ResizableHandle />
+                      <ResizablePanel defaultSize="28%" id="bottom" maxSize="65%" minSize="12%">
+                        <div className="h-full min-h-0">
+                          <Tabs
+                            className="flex h-full min-h-0 flex-col gap-0"
+                            onValueChange={(value) => setBottomTab(value as BottomTab)}
+                            value={bottomTab}
+                          >
+                            <div className="flex h-8 flex-none items-center border-b border-border bg-header px-2">
+                              <TabsList className="h-7 bg-transparent p-0" variant="line">
+                                <TabsTrigger value="output">Output</TabsTrigger>
+                                <TabsTrigger value="terminal">Terminal</TabsTrigger>
+                                <TabsTrigger value="git">
+                                  Source Control
+                                  {git && git.changes.length > 0 ? (
+                                    <Badge className="ml-1 h-4 px-1.5 text-ui-2xs" variant="secondary">
+                                      {git.changes.length}
+                                    </Badge>
+                                  ) : null}
+                                </TabsTrigger>
+                                <TabsTrigger value="preview">Preview</TabsTrigger>
+                              </TabsList>
+                              <div className="flex-1" />
+                              {bottomTab === 'output' ? (
+                                <Button
+                                  aria-label="Clear output"
+                                  disabled={log.length === 0}
+                                  onClick={() => setLog([])}
+                                  size="icon-xs"
+                                  type="button"
+                                  variant="ghost"
+                                >
+                                  <XIcon className="size-3" />
+                                </Button>
+                              ) : null}
+                              <Button
+                                aria-label="Hide panel"
+                                onClick={() => setShowPanel(false)}
+                                size="icon-xs"
+                                type="button"
+                                variant="ghost"
+                              >
+                                <PanelBottomIcon className="size-3" />
+                              </Button>
+                            </div>
+                            <div className="min-h-0 flex-1">
+                              <TabsContent className="m-0 h-full min-h-0" value="output">
+                                <OutputPanel log={log} onJump={jumpToLogLine} />
+                              </TabsContent>
+                              <TabsContent
+                                className="m-0 h-full min-h-0 data-[state=inactive]:hidden"
+                                forceMount
+                                value="terminal"
+                              >
+                                <TerminalPanel root={root} />
+                              </TabsContent>
+                              <TabsContent className="m-0 h-full min-h-0" value="git">
+                                <GitPanel
+                                  onOpenDiff={(path) => void openDiff(path)}
+                                  onStatus={setGit}
+                                />
+                              </TabsContent>
+                              <TabsContent className="m-0 h-full min-h-0" value="preview">
+                                {previewPath || active ? (
+                                  <PreviewPanel
+                                    path={(previewPath ?? active) as string}
+                                    text={
+                                      activeDoc && (previewPath ?? active) === activeDoc.path
+                                        ? activeDoc.text
+                                        : undefined
+                                    }
+                                  />
+                                ) : (
+                                  <div className="wb-empty">
+                                    <div className="text-ui-sm text-foreground-subtle">
+                                      Open a file to preview it.
+                                    </div>
+                                  </div>
+                                )}
+                              </TabsContent>
+                            </div>
+                          </Tabs>
+                        </div>
+                      </ResizablePanel>
+                    </>
                   ) : null}
-                  <button
-                    className="tab__close"
-                    title="Close"
-                    onClick={(e) => {
-                      e.stopPropagation()
-                      closeTab(path)
-                    }}
-                  >
-                    <IconClose />
-                  </button>
-                </div>
-              )
-            })}
-          </div>
-
-          <div className="editor">
-            {activeDoc ? (
-              <Editor
-                path={activeDoc.path}
-                text={activeDoc.text}
-                diagnostics={activeDiags}
-                jump={jump}
-                onChange={onEditorChange}
-                onCursor={onEditorCursor}
-                onSave={onEditorSave}
-                onGoToDefinition={onGoToDefinition}
-              />
-            ) : (
-              <div className="editor__placeholder">
-                <div>
-                  <div style={{ fontSize: 16, marginBottom: 12, color: 'var(--fg-dim)', letterSpacing: 1 }}>
-                    Aoxn IDE
-                  </div>
-                  <div>
-                    <kbd>Ctrl</kbd>+<kbd>P</kbd> go to file · <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>P</kbd>{' '}
-                    commands · <kbd>Ctrl</kbd>+<kbd>O</kbd> open folder
-                  </div>
-                  <div style={{ marginTop: 4 }}>
-                    <kbd>F5</kbd> run · <kbd>F6</kbd> build · <kbd>F7</kbd> type check ·{' '}
-                    <kbd>Ctrl</kbd>+<kbd>S</kbd> save
-                  </div>
-                </div>
+                </ResizablePanelGroup>
               </div>
-            )}
-          </div>
+            </ResizablePanel>
 
-          <OutputPanel
-            hidden={!showPanel}
-            log={log}
-            onClear={() => setLog([])}
-            onClose={() => setShowPanel(false)}
-            onJump={jumpToLogLine}
-          />
+            {showAssistant ? (
+              <>
+                <ResizableHandle />
+                <ResizablePanel defaultSize="26%" id="assistant" maxSize="45%" minSize="18%">
+                  <div className="h-full min-h-0 border-l border-border">
+                    <ChatPanel activePath={activeDoc?.path ?? null} activeText={activeDoc?.text ?? ''} />
+                  </div>
+                </ResizablePanel>
+              </>
+            ) : null}
+          </ResizablePanelGroup>
         </div>
-      </div>
 
-      <StatusBar
-        toolchain={toolchain}
-        busy={busy}
-        errorCount={diagnostics.length}
-        active={activeDoc}
-        showPanel={showPanel}
-        onTogglePanel={() => setShowPanel((v) => !v)}
-        onCheck={() => void runTool('check', active)}
-        onBuild={() => void runTool('build', active)}
-        onRun={() => void runTool('run', active)}
-        onSave={() => active && void saveFile(active)}
-        onDoctor={() => void runDoctor()}
-        onOpenFolder={() => void openFolder()}
-      />
-
-      {palette ? (
-        <CommandPalette
-          mode={palette.mode}
-          query={palette.query}
-          tree={tree}
-          symbols={symbols}
+        <StatusBar
+          active={activeDoc}
           busy={busy}
-          onQuery={(q) => setPalette({ ...palette, query: q })}
-          onClose={() => setPalette(null)}
-          onPickFile={(p) => {
-            setPalette(null)
-            void openFile(p)
-          }}
-          onPickSymbol={(p, line, col) => {
-            setPalette(null)
-            void revealSymbol(p, line, col)
-          }}
-          onCommand={(id) => {
-            setPalette(null)
-            runCommand(id)
-          }}
+          errorCount={diagnostics.length}
+          onBuild={() => void runTool('build', active)}
+          onCheck={() => void runTool('check', active)}
+          onDoctor={() => void runDoctor()}
+          onOpenFolder={() => void openFolder()}
+          onRun={() => void runTool('run', active)}
+          onSave={() => active && void saveFile(active)}
+          onTogglePanel={() => setShowPanel((value) => !value)}
+          showPanel={showPanel}
+          toolchain={toolchain}
         />
-      ) : null}
 
-      {prompt ? (
-        <PromptDialog
-          mode={prompt.mode}
-          dir={prompt.dir}
-          onCancel={() => setPrompt(null)}
-          onConfirm={(name) => confirmPrompt(prompt.mode, prompt.dir, name)}
-        />
-      ) : null}
+        {palette ? (
+          <CommandPalette
+            busy={busy}
+            mode={palette.mode}
+            onClose={() => setPalette(null)}
+            onCommand={(id) => {
+              setPalette(null)
+              runCommand(id)
+            }}
+            onPickFile={(path) => {
+              setPalette(null)
+              void openFile(path)
+            }}
+            onPickSymbol={(path, line, column) => {
+              setPalette(null)
+              void revealSymbol(path, line, column)
+            }}
+            onQuery={(query) => setPalette({ ...palette, query })}
+            query={palette.query}
+            symbols={symbols}
+            tree={tree}
+          />
+        ) : null}
 
-      {toast ? (
-        <div
-          role="status"
-          style={{
-            position: 'fixed',
-            bottom: 34,
-            left: '50%',
-            transform: 'translateX(-50%)',
-            background: 'var(--bg-active)',
-            border: '1px solid var(--border-strong)',
-            borderRadius: 5,
-            padding: '6px 14px',
-            zIndex: 60,
-          }}
-        >
-          {toast}
-        </div>
-      ) : null}
-    </div>
+        {prompt ? (
+          <PromptDialog
+            dir={prompt.dir}
+            mode={prompt.mode}
+            onCancel={() => setPrompt(null)}
+            onConfirm={(name) => confirmPrompt(prompt.mode, prompt.dir, name)}
+          />
+        ) : null}
+
+        {toast ? (
+          <div className="fixed bottom-7 left-1/2 z-[70] -translate-x-1/2 rounded-lg border border-border bg-popover px-3.5 py-2 text-ui-sm text-popover-foreground shadow-md">
+            {toast}
+          </div>
+        ) : null}
+      </div>
+    </TooltipProvider>
   )
 }
 
-// ---- explorer row ----
+// ---- chrome buttons ----
 
-function TreeRow({
-  node,
-  open,
-  selected,
-  onToggle,
-  onOpen,
+function RailButton({
+  active = false,
+  label,
+  onClick,
+  children,
 }: {
-  node: TreeNode
-  open: boolean
-  selected: boolean
-  onToggle(): void
-  onOpen(): void
+  active?: boolean
+  label: string
+  onClick(): void
+  children: React.ReactNode
 }) {
   return (
-    <div
-      className={`tree__row ${selected ? 'tree__row--on' : ''}`}
-      style={{ paddingLeft: 8 + node.depth * 12 }}
-      onClick={() => (node.isDir ? onToggle() : onOpen())}
-      title={node.path}
-      role="treeitem"
-      aria-expanded={node.isDir ? open : undefined}
-      aria-selected={selected}
-    >
-      <span className={`tree__twisty ${open ? 'tree__twisty--open' : ''}`}>
-        {node.isDir ? <IconChevron /> : null}
-      </span>
-      {node.isDir ? <IconFolder /> : <IconFile />}
-      <span className="tree__name">{node.name}</span>
-    </div>
+    <Tooltip>
+      <TooltipTrigger asChild>
+        <button
+          aria-label={label}
+          aria-pressed={active}
+          className={cn(
+            'flex size-8 items-center justify-center rounded-lg transition-colors',
+            active
+              ? 'bg-selected text-foreground'
+              : 'text-foreground-subtle hover:bg-surface-hover hover:text-foreground',
+          )}
+          onClick={onClick}
+          type="button"
+        >
+          {children}
+        </button>
+      </TooltipTrigger>
+      <TooltipContent side="right">{label}</TooltipContent>
+    </Tooltip>
+  )
+}
+
+function ChromeButton({
+  active = false,
+  label,
+  onClick,
+  children,
+}: {
+  active?: boolean
+  label: string
+  onClick(): void
+  children: React.ReactNode
+}) {
+  return (
+    <Tooltip>
+      <TooltipTrigger asChild>
+        <button
+          aria-label={label}
+          aria-pressed={active}
+          className="wb-chrome-button"
+          data-active={active}
+          onClick={onClick}
+          type="button"
+        >
+          {children}
+        </button>
+      </TooltipTrigger>
+      <TooltipContent side="bottom">{label}</TooltipContent>
+    </Tooltip>
   )
 }
 
@@ -1160,59 +1515,58 @@ function OutlinePanel({
   onSearch(): void
 }) {
   return (
-    <div className="tree">
-      <div className="sidebar__title">
-        <span title={path ?? ''}>{path ? basename(path) : 'Outline'}</span>
-        <span className="sidebar__actions">
-          <button
-            className="iconbtn"
-            title="Search declarations (Ctrl+Shift+O)"
-            onClick={onSearch}
-          >
-            <IconSymbol />
-          </button>
-          <button className="iconbtn" title="Re-read the declarations" onClick={onRefresh}>
-            <IconRefresh />
-          </button>
+    <div className="flex h-full min-h-0 flex-col bg-sidebar">
+      <div className="flex h-9 flex-none items-center gap-1.5 border-b border-border px-2.5">
+        <BracesIcon className="size-3.5 text-foreground-subtle" />
+        <span className="min-w-0 flex-1 truncate text-ui-sm font-semibold" title={path ?? ''}>
+          {path ? basename(path) : 'Outline'}
         </span>
+        <Button aria-label="Search declarations" onClick={onSearch} size="icon-xs" type="button" variant="ghost">
+          <SearchIcon className="size-3.5" />
+        </Button>
+        <Button aria-label="Refresh outline" onClick={onRefresh} size="icon-xs" type="button" variant="ghost">
+          <RefreshCwIcon className={cn('size-3.5', busy && 'animate-spin')} />
+        </Button>
       </div>
-      <div className="tree__label">Outline</div>
-      {!path ? (
-        <div className="tree__empty">Open a file to see what it declares.</div>
-      ) : error ? (
-        <>
-          <div className="pkg__error">{error}</div>
-          <div className="tree__empty">
-            The compiler could not read this file, so there is no outline. The message
-            above is its own.
+      <div className="min-h-0 flex-1 overflow-auto p-1.5">
+        {!path ? (
+          <div className="px-2 py-6 text-center text-ui-sm text-foreground-subtle">
+            Open a file to see what it declares.
           </div>
-        </>
-      ) : rows.length === 0 ? (
-        <div className="tree__empty">
-          {busy ? 'Asking the compiler…' : 'No top-level declarations in this file.'}
-        </div>
-      ) : (
-        rows.map(({ symbol }) => (
-          <div
-            key={`${symbol.file}:${symbol.line}:${symbol.name}`}
-            className="tree__row outline__row"
-            onClick={() => onJump(symbol.line)}
-            title={symbol.signature}
-            // `listitem`, not `treeitem`: the outline is a flat list of the
-            // current file's declarations, not a tree, and sharing the
-            // explorer's role makes the two indistinguishable to assistive
-            // technology and to anything selecting by role.
-            role="listitem"
-          >
-            <span className="outline__kind">{symbol.kind === 'struct' ? 'S' : 'ƒ'}</span>
-            <span className="tree__name">{symbol.name}</span>
-            <span className="outline__sig">
-              {symbol.signature.replace(/^(extern )?def /, '').replace(/^struct /, '')}
-            </span>
-            <span className="outline__line">{symbol.line}</span>
+        ) : error ? (
+          <div className="m-1 flex items-start gap-2 rounded-lg border border-destructive/30 bg-destructive-surface px-2.5 py-2 text-ui-sm text-destructive-surface-foreground">
+            <CircleAlertIcon className="mt-0.5 size-3.5 shrink-0" />
+            <span>{error}</span>
           </div>
-        ))
-      )}
+        ) : rows.length === 0 ? (
+          <div className="px-2 py-6 text-center text-ui-sm text-foreground-subtle">
+            {busy ? 'Asking the compiler…' : 'No top-level declarations in this file.'}
+          </div>
+        ) : (
+          <div className="flex flex-col gap-0.5" role="list">
+            {rows.map(({ symbol }) => (
+              <button
+                className="flex w-full items-center gap-2 rounded-md px-2 py-1 text-left transition-colors hover:bg-surface-hover"
+                key={`${symbol.file}:${symbol.line}:${symbol.name}`}
+                onClick={() => onJump(symbol.line)}
+                role="listitem"
+                title={symbol.signature}
+                type="button"
+              >
+                <span className="flex size-4 shrink-0 items-center justify-center rounded-sm bg-surface font-mono text-ui-2xs text-foreground-subtle">
+                  {symbol.kind === 'struct' ? 'S' : 'ƒ'}
+                </span>
+                <span className="min-w-0 flex-1 truncate text-ui-sm text-foreground">
+                  {symbol.name}
+                </span>
+                <span className="shrink-0 font-mono text-ui-xs text-foreground-subtlest">
+                  {symbol.line}
+                </span>
+              </button>
+            ))}
+          </div>
+        )}
+      </div>
     </div>
   )
 }
@@ -1220,62 +1574,43 @@ function OutlinePanel({
 // ---- output panel ----
 
 function OutputPanel({
-  hidden,
   log,
-  onClear,
-  onClose,
   onJump,
 }: {
-  hidden: boolean
   log: LogEntry[]
-  onClear(): void
-  onClose(): void
   onJump(raw: string): void
 }) {
   return (
-    <section className="panel" hidden={hidden}>
-      <div className="panel__head">
-        <span className="panel__tab panel__tab--on">Output</span>
-        <span className="panel__spacer" />
-        <button className="iconbtn" title="Clear" onClick={onClear}>
-          <IconClose />
-        </button>
-        <button className="iconbtn" title="Hide panel (Ctrl+J)" onClick={onClose}>
-          <IconChevron />
-        </button>
-      </div>
-      <div className="panel__body">
+    <div className="flex h-full min-h-0 flex-col bg-terminal-bg">
+      <div className="min-h-0 flex-1 overflow-auto px-3 py-2 font-mono text-ui-sm leading-relaxed">
         {log.length === 0 ? (
-          <div className="logempty">
+          <div className="text-ui-sm text-foreground-subtlest">
             Nothing yet — F5 runs the current file, F7 type-checks it without invoking clang.
           </div>
         ) : (
-          log.map((e) => {
-            const d = parseDiagnostic(e.text)
-            const clickable = d !== null && d.file.length > 0
+          log.map((entry) => {
+            const diagnostic = parseDiagnostic(entry.text)
+            const clickable = diagnostic !== null && diagnostic.file.length > 0
             return (
-              <span
-                key={e.id}
-                className={
-                  e.kind === 'cmd'
-                    ? 'logline logline--cmd'
-                    : e.kind === 'err'
-                      ? 'logline logline--err'
-                      : e.kind === 'meta'
-                        ? 'logline logline--meta'
-                        : 'logline'
-                }
-                style={clickable ? { cursor: 'pointer', textDecoration: 'underline dotted' } : undefined}
+              <div
+                className={cn(
+                  'whitespace-pre-wrap break-words',
+                  entry.kind === 'cmd' && 'font-semibold text-foreground',
+                  entry.kind === 'err' && 'text-destructive',
+                  entry.kind === 'meta' && 'text-foreground-subtle',
+                  clickable && 'cursor-pointer underline decoration-dotted underline-offset-2',
+                )}
+                key={entry.id}
+                onClick={clickable ? () => onJump(entry.text) : undefined}
                 title={clickable ? 'Go to this line' : undefined}
-                onClick={clickable ? () => onJump(e.text) : undefined}
               >
-                {e.text}
-              </span>
+                {entry.text}
+              </div>
             )
           })
         )}
       </div>
-    </section>
+    </div>
   )
 }
 
@@ -1300,65 +1635,103 @@ function StatusBar(props: {
   const dirty = active ? active.text !== active.saved : false
 
   return (
-    <footer className="status">
-      <span className="status__group">
+    <footer className="wb-statusbar">
+      <span className="flex items-center gap-1">
         {busy ? (
-          <span className="status__item">
-            <IconRefresh className="spin" /> working
+          <span className="flex items-center gap-1 px-1">
+            <RefreshCwIcon className="size-3 animate-spin" /> working
           </span>
         ) : (
-          <span className="status__item">ready</span>
+          <span className="px-1">ready</span>
         )}
         {dirty ? (
-          <button className="status__item" onClick={props.onSave} title="Save (Ctrl+S)">
-            <IconSave /> unsaved
+          <button
+            className="flex items-center gap-1 rounded-sm px-1 py-0.5 hover:bg-surface-hover"
+            onClick={props.onSave}
+            title="Save (Ctrl+S)"
+            type="button"
+          >
+            <span className="size-1.5 rounded-full bg-brand" /> unsaved
           </button>
         ) : null}
-        <ErrorBadge count={errorCount} />
+        {errorCount > 0 ? (
+          <button
+            className="flex items-center gap-1 rounded-sm px-1 py-0.5 text-destructive hover:bg-surface-hover"
+            onClick={props.onCheck}
+            title="Show the problems in the current file"
+            type="button"
+          >
+            <CircleAlertIcon className="size-3" /> {errorCount}
+          </button>
+        ) : null}
       </span>
 
-      <span className="status__group status__group--push">
+      <span className="flex-1" />
+
+      <span className="flex items-center gap-1">
         {active ? (
-          <span className="status__item">
+          <span className="px-1">
             Ln {active.cursor.line}, Col {active.cursor.column}
           </span>
         ) : null}
         {active ? (
-          <span className="status__item">
+          <span className="hidden px-1 sm:inline">
             {lines} {lines === 1 ? 'line' : 'lines'}
           </span>
         ) : null}
-        <button className="status__item" onClick={props.onCheck} title="Type check (F7)">
+        <button
+          className="rounded-sm px-1 py-0.5 hover:bg-surface-hover"
+          onClick={props.onCheck}
+          title="Type check (F7)"
+          type="button"
+        >
           Check
         </button>
-        <button className="status__item" onClick={props.onBuild} title="Build (F6)">
+        <button
+          className="rounded-sm px-1 py-0.5 hover:bg-surface-hover"
+          onClick={props.onBuild}
+          title="Build (F6)"
+          type="button"
+        >
           Build
         </button>
-        <button className="status__item" onClick={props.onRun} title="Run (F5)">
+        <button
+          className="rounded-sm px-1 py-0.5 hover:bg-surface-hover"
+          onClick={props.onRun}
+          title="Run (F5)"
+          type="button"
+        >
           Run
         </button>
-        <button className="status__item" onClick={props.onTogglePanel} title="Toggle panel (Ctrl+J)">
-          Output {showPanel ? '▾' : '▸'}
+        <button
+          className="rounded-sm px-1 py-0.5 hover:bg-surface-hover"
+          onClick={props.onTogglePanel}
+          title="Toggle panel (Ctrl+J)"
+          type="button"
+        >
+          Panel {showPanel ? '▾' : '▸'}
         </button>
         {toolchain && !toolchain.compilerFound ? (
           <button
-            className="status__item status__item--warn"
+            className="flex items-center gap-1 rounded-sm px-1 py-0.5 text-warning hover:bg-surface-hover"
             onClick={props.onDoctor}
             title="Run aoxn doctor — the toolchain's own self-check"
+            type="button"
           >
-            <IconWarning /> compiler not found
+            <CircleAlertIcon className="size-3" /> compiler not found
           </button>
         ) : toolchain && !toolchain.clangFound ? (
           <button
-            className="status__item status__item--warn"
+            className="flex items-center gap-1 rounded-sm px-1 py-0.5 text-warning hover:bg-surface-hover"
             onClick={props.onDoctor}
             title="Run aoxn doctor — builds fail without clang"
+            type="button"
           >
-            <IconWarning /> clang not found
+            <CircleAlertIcon className="size-3" /> clang not found
           </button>
         ) : toolchain ? (
-          <span className="status__item" title={toolchain.version || toolchain.compiler}>
-            <IconCheck /> {toolchain.compiler}
+          <span className="flex items-center gap-1 px-1" title={toolchain.version || toolchain.compiler}>
+            <CheckIcon className="size-3 text-success" /> {toolchain.compiler}
           </span>
         ) : null}
       </span>
@@ -1386,8 +1759,14 @@ const COMMANDS: { id: string; title: string }[] = [
   { id: 'doctor', title: 'Run aoxn doctor (toolchain self-check)' },
   { id: 'refresh', title: 'Refresh the explorer' },
   { id: 'openfolder', title: 'Open folder…' },
-  { id: 'togglepanel', title: 'Toggle the output panel' },
+  { id: 'togglepanel', title: 'Toggle the bottom panel' },
   { id: 'clearlog', title: 'Clear the output panel' },
+  { id: 'terminal', title: 'Show the terminal' },
+  { id: 'git', title: 'Show source control' },
+  { id: 'preview', title: 'Show the file preview' },
+  { id: 'assistant', title: 'Toggle the assistant panel' },
+  { id: 'diff', title: 'Diff the current file against HEAD' },
+  { id: 'theme', title: 'Toggle the light / dark theme' },
 ]
 
 function CommandPalette({
@@ -1443,14 +1822,33 @@ function CommandPalette({
   useEffect(() => setIndex(0), [query, mode])
 
   return (
-    <div className="scrim" onMouseDown={onClose}>
-      <div className="palette" onMouseDown={(e) => e.stopPropagation()}>
+    <div
+      className="fixed inset-0 z-[60] flex items-start justify-center bg-black/30 pt-[12vh] backdrop-blur-[1px]"
+      onMouseDown={onClose}
+    >
+      <div
+        className="w-[min(680px,92vw)] overflow-hidden rounded-xl border border-border bg-popover shadow-xl"
+        onMouseDown={(event) => event.stopPropagation()}
+      >
         <input
-          className="palette__input"
           // eslint-disable-next-line jsx-a11y/no-autofocus -- a quick-open has to take focus
           autoFocus
-          value={query}
-          spellCheck={false}
+          className="h-11 w-full border-b border-border bg-transparent px-3.5 text-ui-base text-foreground outline-none placeholder:text-foreground-subtlest"
+          onChange={(event) => onQuery(event.target.value)}
+          onKeyDown={(event) => {
+            if (event.key === 'ArrowDown') {
+              event.preventDefault()
+              setIndex((current) => Math.min(rows.length - 1, current + 1))
+            } else if (event.key === 'ArrowUp') {
+              event.preventDefault()
+              setIndex((current) => Math.max(0, current - 1))
+            } else if (event.key === 'Enter') {
+              event.preventDefault()
+              rows[index]?.pick()
+            } else if (event.key === 'Escape') {
+              onClose()
+            }
+          }}
           placeholder={
             mode === 'file'
               ? 'Search files by name…'
@@ -1458,38 +1856,38 @@ function CommandPalette({
                 ? 'Search declarations by name…'
                 : 'Type a command…'
           }
-          onChange={(e) => onQuery(e.target.value)}
-          onKeyDown={(e) => {
-            if (e.key === 'ArrowDown') {
-              e.preventDefault()
-              setIndex((i) => Math.min(rows.length - 1, i + 1))
-            } else if (e.key === 'ArrowUp') {
-              e.preventDefault()
-              setIndex((i) => Math.max(0, i - 1))
-            } else if (e.key === 'Enter') {
-              e.preventDefault()
-              rows[index]?.pick()
-            } else if (e.key === 'Escape') {
-              onClose()
-            }
-          }}
+          spellCheck={false}
+          value={query}
         />
-        <div className="palette__list">
-          {rows.length === 0 ? <div className="palette__hint">No matches.</div> : null}
-          {rows.map((r, i) => (
+        <div className="max-h-[50vh] overflow-auto p-1.5">
+          {rows.length === 0 ? (
+            <div className="px-3 py-4 text-center text-ui-sm text-foreground-subtle">No matches.</div>
+          ) : null}
+          {rows.map((row, i) => (
             <div
-              key={r.key}
-              className={`palette__row ${i === index ? 'palette__row--on' : ''}`}
+              className={cn(
+                'flex cursor-pointer items-center gap-2 rounded-md px-2 py-1.5 text-ui-sm',
+                i === index ? 'bg-selected text-foreground' : 'text-foreground-subtle',
+              )}
+              key={row.key}
+              onClick={row.pick}
               onMouseEnter={() => setIndex(i)}
-              onClick={r.pick}
             >
-              {mode === 'file' ? <IconFile /> : mode === 'symbol' ? <IconSymbol /> : <IconSource />}
-              <span className="palette__label">{r.label}</span>
-              {r.hint ? <span className="palette__origin">{r.hint}</span> : null}
+              {mode === 'file' ? (
+                <FileCode2Icon className="size-3.5 shrink-0 text-brand" />
+              ) : mode === 'symbol' ? (
+                <BracesIcon className="size-3.5 shrink-0 text-icon-purple" />
+              ) : (
+                <CommandIcon className="size-3.5 shrink-0 text-foreground-subtle" />
+              )}
+              <span className="min-w-0 flex-1 truncate">{row.label}</span>
+              {row.hint ? (
+                <span className="shrink-0 text-ui-xs text-foreground-subtlest">{row.hint}</span>
+              ) : null}
             </div>
           ))}
         </div>
-        <div className="palette__hint">
+        <div className="border-t border-border px-3 py-1.5 text-ui-xs text-foreground-subtlest">
           {mode === 'file'
             ? 'Enter opens the file'
             : mode === 'symbol'
@@ -1577,31 +1975,36 @@ function PromptDialog({
   }
 
   return (
-    <div className="scrim" onMouseDown={onCancel}>
-      <div className="palette" onMouseDown={(e) => e.stopPropagation()}>
-        <div className="palette__title">{spec.title(dir)}</div>
-        <input
-          className="palette__input"
+    <div
+      className="fixed inset-0 z-[60] flex items-start justify-center bg-black/30 pt-[18vh] backdrop-blur-[1px]"
+      onMouseDown={onCancel}
+    >
+      <div
+        className="w-[min(520px,92vw)] rounded-xl border border-border bg-popover p-4 shadow-xl"
+        onMouseDown={(event) => event.stopPropagation()}
+      >
+        <div className="mb-3 text-ui-base font-semibold text-foreground">{spec.title(dir)}</div>
+        <Input
           // eslint-disable-next-line jsx-a11y/no-autofocus -- a prompt has to take focus
           autoFocus
-          value={value}
-          spellCheck={false}
-          placeholder={spec.placeholder}
-          onChange={(e) => {
-            setValue(e.target.value)
+          onChange={(event) => {
+            setValue(event.target.value)
             setError('')
           }}
-          onKeyDown={(e) => {
-            if (e.key === 'Enter') {
-              e.preventDefault()
+          onKeyDown={(event) => {
+            if (event.key === 'Enter') {
+              event.preventDefault()
               void submit()
-            } else if (e.key === 'Escape') {
+            } else if (event.key === 'Escape') {
               onCancel()
             }
           }}
+          placeholder={spec.placeholder}
+          spellCheck={false}
+          value={value}
         />
-        {error ? <div className="palette__hint palette__hint--err">{error}</div> : null}
-        <div className="palette__hint">{spec.hint}</div>
+        {error ? <div className="mt-2 text-ui-sm text-destructive">{error}</div> : null}
+        <div className="mt-2 text-ui-xs text-foreground-subtlest">{spec.hint}</div>
       </div>
     </div>
   )
@@ -1634,142 +2037,160 @@ function PackagesPanel({
   onRemove(): void
   onRefresh(): void
 }) {
-  if (!pkg) {
-    return (
-      <div className="tree">
-        <div className="tree__label">Packages</div>
-        <div className="tree__empty">
-          Not read yet.{'\n'}Use the ↻ button to read aoxn.json.
-        </div>
-      </div>
-    )
-  }
-  if (!pkg.hasManifest) {
-    return (
-      <div className="tree">
-        <div className="tree__label">Packages</div>
-        <div className="tree__empty">
-          No aoxn.json in this folder.{'\n'}Init one to start tracking dependencies.
-        </div>
-        <div className="pkg__actions">
-          <button className="pkgbtn" disabled={busy} onClick={() => onRun('init')}>
-            Init
-          </button>
-          <button className="pkgbtn" title="Re-read aoxn.json" onClick={onRefresh}>
-            <IconRefresh />
-          </button>
-        </div>
-      </div>
-    )
-  }
   return (
-    <div className="tree">
-      <div className="tree__label">Packages</div>
-      <div className="pkg__head">
-        <span className="pkg__name" title="package name">
-          {pkg.name || '(unnamed)'}
-        </span>
-        {pkg.version ? <span className="pkg__req">v{pkg.version}</span> : null}
-        <span className={`pkg__badge ${pkg.hasLockfile ? '' : 'pkg__badge--dim'}`}>
-          {pkg.hasLockfile ? 'aoxn.lock ✓' : 'no lockfile'}
-        </span>
+    <div className="flex h-full min-h-0 flex-col bg-sidebar">
+      <div className="flex h-9 flex-none items-center gap-1.5 border-b border-border px-2.5">
+        <PackageIcon className="size-3.5 text-foreground-subtle" />
+        <span className="min-w-0 flex-1 truncate text-ui-sm font-semibold">Packages</span>
+        <Button aria-label="Re-read aoxn.json" onClick={onRefresh} size="icon-xs" type="button" variant="ghost">
+          <RefreshCwIcon className="size-3.5" />
+        </Button>
       </div>
-
-      {pkg.parseError ? (
-        <div className="pkg__error">{pkg.parseError}</div>
-      ) : null}
-
-      <div className="pkg__section">Dependencies</div>
-      {pkg.dependencies.length === 0 ? (
-        <div className="tree__empty">None yet — Add one below.</div>
-      ) : (
-        pkg.dependencies.map((d) => (
-          <div key={`${d.name}`} className="pkg__row" title={formatDep(d)}>
-            <span className="pkg__name">{d.name}</span>
-            <span className="pkg__req">{d.req}</span>
-            {d.dev ? <span className="pkg__badge">dev</span> : null}
+      <div className="min-h-0 flex-1 overflow-auto p-2">
+        {!pkg ? (
+          <div className="px-2 py-6 text-center text-ui-sm text-foreground-subtle">
+            Not read yet.
           </div>
-        ))
-      )}
-
-      {/*
-        The RESOLVED inventory, from `aoxn list --json` — not the directory
-        names above it. This is the section that answers "what is actually
-        installed", and an upgrade marker sits next to a package whose
-        registry has something newer. When the report could not be read, the
-        panel says so instead of showing an empty list that reads like
-        "nothing is installed".
-      */}
-      {report?.error ? <div className="pkg__error">{report.error}</div> : null}
-      <div className="pkg__section">
-        Installed ({report ? report.installed.length : 0})
-      </div>
-      {!report ? (
-        <div className="tree__empty">Reading the lockfile…</div>
-      ) : report.installed.length === 0 ? (
-        <div className="tree__empty">Nothing installed — run Install.</div>
-      ) : (
-        withUpgrades(report).map((p) => {
-          const arrow = formatUpgrade(p.version, p.upgrade ?? '')
-          return (
-            <div key={p.name} className="pkg__row" title={formatInstalled(p, p.upgrade)}>
-              <span className="pkg__name">{p.name}</span>
-              <span className="pkg__req">{p.version}</span>
-              {p.scope === 'dev' ? <span className="pkg__badge">dev</span> : null}
-              {arrow ? <span className="pkg__upgrade">{arrow}</span> : null}
+        ) : !pkg.hasManifest ? (
+          <div className="flex flex-col items-center gap-3 px-3 py-8 text-center">
+            <div className="text-ui-sm text-foreground-subtle">
+              No aoxn.json in this folder. Init one to start tracking dependencies.
             </div>
-          )
-        })
-      )}
-
-      {report && report.outdated.length > 0 ? (
-        <>
-          <div className="pkg__section">Upgradable ({report.outdated.length})</div>
-          {report.outdated.map((o) => (
-            <div key={o.name} className="pkg__row" title={o.note || undefined}>
-              <span className="pkg__name">{o.name}</span>
-              <span className="pkg__upgrade">
-                {formatUpgrade(o.locked, o.newest)}
+            <Button disabled={busy} onClick={() => onRun('init')} size="sm" type="button" variant="outline">
+              Init
+            </Button>
+          </div>
+        ) : (
+          <div className="flex flex-col gap-3">
+            <div className="flex items-center gap-1.5">
+              <span className="min-w-0 truncate text-ui-sm font-semibold" title="package name">
+                {pkg.name || '(unnamed)'}
               </span>
+              {pkg.version ? (
+                <span className="text-ui-xs text-foreground-subtlest">v{pkg.version}</span>
+              ) : null}
+              <span className="flex-1" />
+              <Badge variant={pkg.hasLockfile ? 'secondary' : 'outline'}>
+                {pkg.hasLockfile ? 'aoxn.lock' : 'no lockfile'}
+              </Badge>
             </div>
-          ))}
-        </>
-      ) : null}
 
-      <div className="pkg__actions">
-        <button className="pkgbtn" disabled={busy} onClick={onAdd}>
-          Add…
-        </button>
-        <button className="pkgbtn" disabled={busy} onClick={() => onRun('install')} title="aoxn pkg install">
-          Install
-        </button>
-        <button className="pkgbtn" disabled={busy} onClick={() => onRun('update')} title="aoxn pkg update">
-          Update
-        </button>
-        <button className="pkgbtn" disabled={busy} onClick={() => onRun('outdated')} title="aoxn pkg outdated">
-          Outdated
-        </button>
-      </div>
-      <div className="pkg__actions">
-        <button className="pkgbtn" disabled={busy} onClick={() => onRun('tree')} title="aoxn pkg tree">
-          Tree
-        </button>
-        <button className="pkgbtn" disabled={busy} onClick={() => onRun('audit')} title="aoxn pkg audit">
-          Audit
-        </button>
-        <button className="pkgbtn" disabled={busy} onClick={onWhy} title="aoxn pkg why <name>">
-          Why…
-        </button>
-        <button className="pkgbtn" disabled={busy} onClick={onRemove} title="aoxn pkg remove <name>">
-          Remove…
-        </button>
-        <button className="pkgbtn" title="Re-read aoxn.json" onClick={onRefresh}>
-          <IconRefresh />
-        </button>
-      </div>
-      <div className="pkg__note">
-        Commands run the real <code>aoxn pkg</code> in this folder; publish /
-        yank / cache are deliberately not offered here.
+            {pkg.parseError ? (
+              <div className="rounded-lg border border-destructive/30 bg-destructive-surface px-2.5 py-2 text-ui-sm text-destructive-surface-foreground">
+                {pkg.parseError}
+              </div>
+            ) : null}
+
+            <div>
+              <div className="mb-1 px-1 text-ui-xs font-medium uppercase tracking-wide text-foreground-subtlest">
+                Dependencies
+              </div>
+              {pkg.dependencies.length === 0 ? (
+                <div className="px-1 py-2 text-ui-sm text-foreground-subtle">None yet.</div>
+              ) : (
+                <div className="flex flex-col gap-0.5">
+                  {pkg.dependencies.map((dep) => (
+                    <div
+                      className="flex items-center gap-1.5 rounded-md px-2 py-1"
+                      key={dep.name}
+                      title={formatDep(dep)}
+                    >
+                      <span className="min-w-0 flex-1 truncate text-ui-sm">{dep.name}</span>
+                      <span className="text-ui-xs text-foreground-subtlest">{dep.req}</span>
+                      {dep.dev ? <Badge variant="outline">dev</Badge> : null}
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+
+            {report?.error ? (
+              <div className="rounded-lg border border-destructive/30 bg-destructive-surface px-2.5 py-2 text-ui-sm text-destructive-surface-foreground">
+                {report.error}
+              </div>
+            ) : null}
+
+            <div>
+              <div className="mb-1 px-1 text-ui-xs font-medium uppercase tracking-wide text-foreground-subtlest">
+                Installed ({report ? report.installed.length : 0})
+              </div>
+              {!report ? (
+                <div className="px-1 py-2 text-ui-sm text-foreground-subtle">Reading the lockfile…</div>
+              ) : report.installed.length === 0 ? (
+                <div className="px-1 py-2 text-ui-sm text-foreground-subtle">Nothing installed.</div>
+              ) : (
+                <div className="flex flex-col gap-0.5">
+                  {withUpgrades(report).map((item) => {
+                    const arrow = formatUpgrade(item.version, item.upgrade ?? '')
+                    return (
+                      <div
+                        className="flex items-center gap-1.5 rounded-md px-2 py-1"
+                        key={item.name}
+                        title={formatInstalled(item, item.upgrade)}
+                      >
+                        <span className="min-w-0 flex-1 truncate text-ui-sm">{item.name}</span>
+                        <span className="text-ui-xs text-foreground-subtlest">{item.version}</span>
+                        {item.scope === 'dev' ? <Badge variant="outline">dev</Badge> : null}
+                        {arrow ? <Badge variant="secondary">{arrow}</Badge> : null}
+                      </div>
+                    )
+                  })}
+                </div>
+              )}
+            </div>
+
+            {report && report.outdated.length > 0 ? (
+              <div>
+                <div className="mb-1 px-1 text-ui-xs font-medium uppercase tracking-wide text-foreground-subtlest">
+                  Upgradable ({report.outdated.length})
+                </div>
+                <div className="flex flex-col gap-0.5">
+                  {report.outdated.map((item) => (
+                    <div
+                      className="flex items-center gap-1.5 rounded-md px-2 py-1"
+                      key={item.name}
+                      title={item.note || undefined}
+                    >
+                      <span className="min-w-0 flex-1 truncate text-ui-sm">{item.name}</span>
+                      <Badge variant="secondary">{formatUpgrade(item.locked, item.newest)}</Badge>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            ) : null}
+
+            <div className="grid grid-cols-2 gap-1">
+              <Button disabled={busy} onClick={onAdd} size="sm" type="button" variant="outline">
+                Add…
+              </Button>
+              <Button disabled={busy} onClick={() => onRun('install')} size="sm" type="button" variant="outline">
+                Install
+              </Button>
+              <Button disabled={busy} onClick={() => onRun('update')} size="sm" type="button" variant="outline">
+                Update
+              </Button>
+              <Button disabled={busy} onClick={() => onRun('outdated')} size="sm" type="button" variant="outline">
+                Outdated
+              </Button>
+              <Button disabled={busy} onClick={() => onRun('tree')} size="sm" type="button" variant="outline">
+                Tree
+              </Button>
+              <Button disabled={busy} onClick={() => onRun('audit')} size="sm" type="button" variant="outline">
+                Audit
+              </Button>
+              <Button disabled={busy} onClick={onWhy} size="sm" type="button" variant="outline">
+                Why…
+              </Button>
+              <Button disabled={busy} onClick={onRemove} size="sm" type="button" variant="outline">
+                Remove…
+              </Button>
+            </div>
+            <div className="px-1 text-ui-xs leading-relaxed text-foreground-subtlest">
+              Commands run the real <code className="font-mono">aoxn pkg</code> in this folder;
+              publish / yank / cache are not offered here.
+            </div>
+          </div>
+        )}
       </div>
     </div>
   )

@@ -3351,6 +3351,26 @@ fn none_optional_round_trip() {
     assert_eq!(out, "true\nfalse\n8\n");
 }
 
+/// A mixed `[1, None, 3]` literal joins to `[int | None; 3]`. The codegen
+/// type hint used to read only the first element, so binding it panicked on
+/// the let-binding type-drift assertion (a genuine language bug).
+#[test]
+fn array_literal_with_none_infers_nullable_elements() {
+    let out = build_and_run(
+        r#"
+        def main() -> int:
+            a = [1, None, 3]
+            if a[1] is None:
+                print("none")
+            x = a[2]
+            if x is not None:
+                print(x + 1)
+            return 0
+        "#,
+    );
+    assert_eq!(out, "none\n4\n");
+}
+
 /// a raise unwinds to the nearest handler, across frames; the normal path
 /// still works afterwards
 #[test]

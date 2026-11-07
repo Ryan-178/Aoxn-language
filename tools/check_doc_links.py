@@ -19,7 +19,8 @@ HISTORICAL_REPORTS = frozenset({
     "docs/llvm-independence-report.md",  # backend migration record
 })
 SKIP_DIRS = frozenset({".git", "target", "node_modules", "wiki", "__pycache__",
-                       ".zcode", "LLVM", "third-party-package-in-the-making"})
+                       ".zcode", ".zcode-src", "LLVM",
+                       "third-party-package-in-the-making"})
 CATEGORIES = ("missing-path", "historical-path", "command-drift")
 LINK = re.compile(r"!?\[[^\]\n]*\]\(\s*(<[^>\n]*>|(?:[^\s()]|\([^()]*\))*)(?:\s+\"[^\"\n]*\"|\s+'[^'\n]*')?\s*\)")
 DEFINITION = re.compile(r"^\s{0,3}\[([^\]]+)\]:\s*(<[^>]+>|\S+)", re.M)

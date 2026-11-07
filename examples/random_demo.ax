@@ -1,0 +1,27 @@
+import * from "stdlib/random.ax"
+
+def main() -> int:
+    r = random_seed(12345)
+    print("seed 12345, six values:")
+    i = 0
+    while i < 6:
+        r = random_next(r)
+        print(r.value)
+        i = i + 1
+    print("uniform [0, 100):")
+    r = random_seed(7)
+    i = 0
+    while i < 6:
+        r = random_below(r, 100)
+        print(r.value)
+        i = i + 1
+    r = random_range(r, 10, 20)
+    print("range [10, 20]: " + str(r.value))
+    r = random_seed(42)
+    r = random_float_next(r)
+    print("float [0,1): " + str(r.fval))
+    r = random_seed(42)
+    r = random_float_range(r, 5.0, 10.0)
+    print("float [5,10): " + str(r.fval))
+    print("This generator is NOT cryptographically secure.")
+    return 0

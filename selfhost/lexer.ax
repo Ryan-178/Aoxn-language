@@ -213,6 +213,25 @@ def TK_SHL() -> int:
 def TK_SHR() -> int:
     return 69
 
+# v0.40.0 exceptions, None and dict literals; `{`/`}` also suspend layout
+def TK_NONE() -> int:
+    return 70
+
+def TK_RAISE() -> int:
+    return 71
+
+def TK_TRY() -> int:
+    return 72
+
+def TK_EXCEPT() -> int:
+    return 73
+
+def TK_LBRACE() -> int:
+    return 74
+
+def TK_RBRACE() -> int:
+    return 75
+
 # ---- helpers ----
 
 def chr_str(c: int) -> string:
@@ -282,6 +301,10 @@ struct LexState:
     paren_depth: int
     at_line_start: int      # 0 / 1
     error: int              # 0 / 1
+    err_line: int
+    err_col: int
+    tok_line: int           # start of the token being scanned
+    tok_col: int
     indents: Vec
     kinds: Vec
     lines: Vec
@@ -300,6 +323,10 @@ def lex_state_new(src: string) -> LexState:
         paren_depth=0,
         at_line_start=1,
         error=0,
+        err_line=0,
+        err_col=0,
+        tok_line=1,
+        tok_col=1,
         indents=vec_push(vec_new(), 0),
         kinds=vec_new(),
         lines=vec_new(),
@@ -310,8 +337,8 @@ def lex_state_new(src: string) -> LexState:
 
 def emit(st: LexState, kind: int, ival: int, sval: string) -> LexState:
     st.kinds = vec_push(st.kinds, kind)
-    st.lines = vec_push(st.lines, st.line)
-    st.cols = vec_push(st.cols, st.col)
+    st.lines = vec_push(st.lines, st.tok_line)
+    st.cols = vec_push(st.cols, st.tok_col)
     st.ivals = vec_push(st.ivals, ival)
     st.svals = vec_push(st.svals, as_ptr(sval))
     return st
@@ -407,6 +434,14 @@ def keyword_kind(word: string) -> int:
         return TK_TYSTRING()
     if word == "void":
         return TK_TYVOID()
+    if word == "none" or word == "None":
+        return TK_NONE()
+    if word == "raise":
+        return TK_RAISE()
+    if word == "try":
+        return TK_TRY()
+    if word == "except":
+        return TK_EXCEPT()
     return -1
 
 # ---- the main lexer loop ----
@@ -416,6 +451,8 @@ def lex_all(st0: LexState) -> LexState:
     st = st0
 
     while st.error == 0:
+        st.tok_line = st.line
+        st.tok_col = st.col
         # ---- line start: measure indentation ----
         if st.at_line_start == 1 and st.paren_depth == 0:
             indent = 0
@@ -452,6 +489,9 @@ def lex_all(st0: LexState) -> LexState:
                         st = emit(st, TK_ERROR(), 0, "unindent does not match any outer indentation level")
                         st.error = 1
                 st.at_line_start = 0
+                # the first real token starts after the indentation
+                st.tok_line = st.line
+                st.tok_col = st.col
                 if st.error == 1:
                     break
 
@@ -607,15 +647,17 @@ def lex_all(st0: LexState) -> LexState:
             continue
 
         # ---- punctuation / operators ----
-        if c == 40 or c == 91:
+        if c == 40 or c == 91 or c == 123:
             st.paren_depth = st.paren_depth + 1
             if c == 40:
                 st = emit(st, TK_LPAREN(), 0, "")
-            else:
+            elif c == 91:
                 st = emit(st, TK_LBRACKET(), 0, "")
+            else:
+                st = emit(st, TK_LBRACE(), 0, "")
             st = bump(st)
             continue
-        if c == 41 or c == 93:
+        if c == 41 or c == 93 or c == 125:
             st.paren_depth = st.paren_depth - 1
             if st.paren_depth < 0:
                 st = emit(st, TK_ERROR(), 0, "unmatched closing bracket")
@@ -623,8 +665,10 @@ def lex_all(st0: LexState) -> LexState:
                 break
             if c == 41:
                 st = emit(st, TK_RPAREN(), 0, "")
-            else:
+            elif c == 93:
                 st = emit(st, TK_RBRACKET(), 0, "")
+            else:
+                st = emit(st, TK_RBRACE(), 0, "")
             st = bump(st)
             continue
         if c == 44:
@@ -780,6 +824,9 @@ def lex_all(st0: LexState) -> LexState:
             st = emit(st, TK_DEDENT(), 0, "")
         st = emit(st, TK_EOF(), 0, "")
 
+    if st.error == 1:
+        st.err_line = st.line
+        st.err_col = st.col
     return st
 
 # the token-kind printer used by the demo / tests

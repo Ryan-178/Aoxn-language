@@ -18,12 +18,104 @@
 > subset and pins known gaps separately. Neither test proves all-feature
 > equivalence. See [`c-compatibility.md`](c-compatibility.md) for the current
 > C/ABI contract and [`platform-support.md`](platform-support.md) for
-> Windows/Linux support. Stage-2 still lacks dict/None/function-pointer/
-> exception and argv support; the production CLI remains Rust.
-> The [wiki](../wiki/Self-Hosting.md) is frozen historical material, not the
-> authority for current status.
+> Windows/Linux support. **The stage-2 front end now supports `None`, `T | None`,
+> `dict[V]`, function pointers and `raise`/`try`/`except`** with C that matches
+> `src/codegen_c.rs` byte-for-byte on the parity corpus; the fixed point and the
+> direct-emitter comparison still answer different questions. The selfhost CLI
+> covers `help/version/check/c/build/run/symbols/doctor`, but package commands,
+> CSS assets/Tailwind and namespace/selective imports remain unsupported. The
+> production CLI remains Rust. The [wiki](../wiki/Self-Hosting.md) is frozen
+> historical material, not the authority for current status.
 
-## Original assessment
+## Current implementation status (2026-11-07)
+
+**Language features.** `selfhost/lexer.ax`, `parser.ax`, `typecheck.ax` and
+`codegen.ax` now implement the v0.40.0 surface:
+
+- `None` / `T | None`: annotation parsing, implicit `T`→`T | None` widening for
+  bindings/arguments/struct fields/array elements, `is` / `is not`, branch-local
+  narrowing with early-return propagation, array literal joins (`[1, None, 3]`
+  is `[int | None; 3]`), and the same nullable operator rejection messages.
+  `return` stays strict like the Rust checker (a bare `T` is not widened by a
+  return).
+- Function pointers: bare function names in value position, `fn(...) -> T`
+  annotations, indirect calls, `as` casts int↔fn-ptr, `to_int(fn)`, complete C
+  declarators (including function-pointer returns and parameters), and the
+  original `extern def` restrictions (no fn-pointer parameters).
+- `dict[V]`: annotation-only empty literal, string-keyed shared heap handle,
+  read/write/delete/`dict_has`/`len`, insertion-order `for k in d`, alias
+  visibility, growth; a missing key raises through the exception slot.
+- `raise` / `try` / `except`: one catch-all handler with an optional `as e`
+  string binding, pending-error statics, may-raise fixpoint over calls (a
+  call through a function pointer counts), per-statement propagation checks,
+  raises in handlers propagating outward, and the uncaught report + exit 1.
+  Programs without exceptions/dicts keep their previous C byte-for-byte.
+
+The parser also tracks token START line/column and statement positions for
+diagnostics; the lexer previously recorded end columns.
+
+**CLI.** `selfhost/cli.ax` implements:
+
+- `help`, `version`, `check`, `c`, `build`, `run`, `symbols`, `doctor`.
+- `run` uses a real argv vector (Windows CRT `_spawnvp`, POSIX
+  fork/execvp) with CRT quoting on Windows, so empty strings, spaces and shell
+  metacharacters survive; the child exit code is propagated. No shell is used.
+- Options `-o`, `--O0..--O3`, `-l/-L`, `--cpu`, `--backend c`, `--clang-arg`,
+  `-g`, `--cc-warnings`, `--json` reach codegen/link through the same argv
+  channel. `AOXN_CLANG`, `AOXN_CPU`, `AOXN_CLANG_ARGS` and
+  `AOXN_CC_WARNINGS` provide defaults; unsafe clang arguments are rejected.
+- JSON diagnostics on stderr carry `stage`, `severity`, `code`, `file`, `line`,
+  `col` and `message`, plus W001 warnings (`{"ok":...,"errors":[...],
+  "warnings":[...]}`). stdout stays reserved for the C text, symbols, the build
+  path, or the child program.
+- `symbols` reports top-level functions/structs (text and JSON) from the
+  loader's merged AST. `doctor` checks version/platform/executable/stdlib/clang
+  and optionally runs a compile-only smoke test; `--no-smoke` skips it.
+- A content-keyed `run` cache hashes the entry, every transitive import, the
+  compiler executable and all codegen options. `AOXN_NO_CACHE`,
+  `AOXN_CACHE_DIR` work. A dependency edit or an option change misses; an
+  unchanged tree hits without rebuilding.
+- The loader resolves `stdlib` / `stdlib/<module>` through `AOXN_STDLIB`, then
+  `AOXN_HOME/lib/stdlib`, then a cwd-relative `stdlib/`.
+
+**Known gaps (not hidden, not forwarded):**
+
+- Package-manager commands (`pkg` and the direct aliases) are **rejected
+  explicitly**; the selfhost CLI never invokes the Rust package manager.
+- CSS assets, `--emit-assets` and `--tailwind` are rejected explicitly.
+- Namespace bindings (`import m`, `m.f`) and selective imports are not
+  implemented by the selfhost loader/parser.
+- `build` is not cached (only `run`); the cache has no LRU/pruning.
+- Imported symbols are reported against the entry path because the loader keeps
+  no file registry; JSON positions are statement/expression approximations, not
+  a full diagnostic-span model.
+- Doctor lacks the installed-root/examples rows, reports no CPU architecture in
+  `platform`, and its smoke test compiles/links but does not capture the child's
+  output.
+- `-o` is rejected by `run` (Rust accepts and ignores it); `c --json` is
+  rejected (Rust emits both report and C).
+- Linux: the compiler/CLI logic is portable, and the POSIX socket branch is
+  implemented, but this round executed only on Windows with clang 23.1.2. No
+  Linux-native result is claimed from this workspace.
+
+**Evidence (Windows, clang 23.1.2):** `tests/c_emitter_parity.rs` compares full
+C bytes for the new fixtures (nullable, dict, fn-pointer, raise/try) and the
+existing corpus, and pins new rejection messages; `tests/selfhost_cli.rs`
+builds stage-1 with Rust and stage-2 with stage-1, then differentially exercises
+arguments, options, JSON, symbols, doctor, cache invalidation and output paths;
+`selfhost_driver_self_compiles` remains the independent fixed point. stdlib CSV
+(`tests/csv.rs`, including a Python differential), random (`tests/random.rs`) and
+socket (`tests/socket.rs`, real loopback) also build/run through the selfhost
+CLI where applicable. Final Windows run: **357 root + 105 package = 462 passed,
+0 failed/ignored** (clang 23.1.2, full log `target/final-test.log`).
+`cargo check --workspace --tests --target x86_64-unknown-linux-gnu` passed;
+Linux native execution was not run this round.
+
+## Original assessment (historical v0.19-era)
+
+All sections below preserve the original assumptions, estimates and LLVM-era
+progress descriptions; their uses of "today", "now" and "remaining" refer to that
+historical assessment, not the unreleased batch or current supported surface.
 
 > Can Aoxn be rewritten in Aoxn? Short answer: **yes — and stages 1–3 are
 > underway**: the Aoxn lexer, parser and type checker written in Aoxn live in

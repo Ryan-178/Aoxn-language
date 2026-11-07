@@ -1,0 +1,735 @@
+# The self-hosted command line. Supported commands are implemented here on
+# top of the self-hosted driver -- nothing is forwarded to the Rust CLI.
+#
+# Unsupported, and rejected rather than approximated: package-manager
+# commands, CSS assets / --emit-assets, --tailwind, and selective/namespace
+# imports in the loader. See docs/selfhost.md.
+import * from "../stdlib/stdlib.ax"
+import * from "./driver.ax"
+import * from "./symbols.ax"
+
+# Fixed-arity C output, not printf(text): generated C contains '%' directives
+# and must reach stdout byte-for-byte without print's extra newline.
+extern def putchar(c: int) -> int
+extern def __acrt_iob_func(i: int) -> int
+extern def fdopen(fd: int, mode: string) -> int
+extern def fflush(f: int) -> int
+extern def remove(path: string) -> int
+extern def rename(old: string, new: string) -> int
+extern def _mkdir(path: string) -> int
+extern def mkdir(path: string, mode: int) -> int
+
+def cli_version() -> string:
+    return "0.55.0"
+
+def cli_stdout(text: string):
+    n = len(text)
+    i = 0
+    while i < n:
+        putchar(load_u8(text, i))
+        i = i + 1
+
+def cli_stderr() -> int:
+    if target_os() == "windows":
+        return __acrt_iob_func(2)
+    return fdopen(2, "w")
+
+def cli_stderr_text(text: string):
+    h = cli_stderr()
+    if h != 0:
+        fwrite(as_ptr(text), 1, len(text), h)
+        fflush(h)
+
+def cli_help():
+    print("Usage: aoxn-selfhost <command> [options] <source.ax>")
+    print("  check <source.ax>            type-check only")
+    print("  c <source.ax>                print the generated C")
+    print("  build <source.ax> [-o out]   compile to a native executable")
+    print("  run <source.ax> [-- args]    compile and run (child argv is exact)")
+    print("  symbols <source.ax> [--json] top-level declarations")
+    print("  doctor [--json] [--no-smoke] toolchain self-check")
+    print("  version | help")
+    print("Options: -o, --O0..--O3, -l NAME, -L DIR, --cpu C, --backend c,")
+    print("         --clang-arg A, -g, --cc-warnings, --json")
+    print("Unsupported here: pkg, --emit-assets, --tailwind (documented gaps).")
+
+def cli_usage(message: string) -> int:
+    cli_stderr_text("error: " + message + "\n")
+    cli_help()
+    return 2
+
+def cli_default_output(source: string) -> string:
+    end = len(source)
+    dot = -1
+    i = 0
+    while i < end:
+        b = load_u8(source, i)
+        if b == 47 or b == 92:
+            dot = -1
+        elif b == 46:
+            dot = i
+        i = i + 1
+    if dot > 0:
+        if not is_sep(load_u8(source, dot - 1)):
+            end = dot
+    return str_sub(source, 0, end) + exe_suffix()
+
+# ---- JSON helpers ----
+
+def js_str(s: string) -> string:
+    out = "\""
+    i = 0
+    while i < len(s):
+        b = str_get(s, i)
+        if b == 34:
+            out = out + "\\\""
+        elif b == 92:
+            out = out + "\\\\"
+        elif b == 10:
+            out = out + "\\n"
+        elif b == 13:
+            out = out + "\\r"
+        elif b == 9:
+            out = out + "\\t"
+        elif b < 32:
+            out = out + " "
+        else:
+            out = out + str_chr(b)
+        i = i + 1
+    return out + "\""
+
+def cli_warnings_json(names: Vec, lines: Vec, cols: Vec, file: string) -> string:
+    out = "["
+    i = 0
+    while i < names.len:
+        if i > 0:
+            out = out + ","
+        nm = as_string(vec_get(names, i))
+        out = out + "{\"stage\":\"type\",\"severity\":\"warning\",\"code\":\"W001\""
+        out = out + ",\"file\":" + js_str(file) + ",\"line\":" + str(vec_get(lines, i)) + ",\"col\":" + str(vec_get(cols, i))
+        out = out + ",\"message\":" + js_str("unused variable '" + nm + "' (assigned but never read)") + "}"
+        i = i + 1
+    return out + "]"
+
+def cli_warnings_text(names: Vec, lines: Vec, cols: Vec, file: string):
+    i = 0
+    while i < names.len:
+        nm = as_string(vec_get(names, i))
+        cli_stderr_text("[type] " + file + ":" + str(vec_get(lines, i)) + ":" + str(vec_get(cols, i)) + ": unused variable '" + nm + "' (assigned but never read)
+")
+        i = i + 1
+
+def cli_ok_json(warn: string) -> string:
+    return "{\"ok\":true,\"errors\":[],\"warnings\":" + warn + "}"
+
+def cli_err_json(stage: string, file: string, line: int, col: int, message: string, warn: string) -> string:
+    obj = "{\"stage\":" + js_str(stage) + ",\"severity\":\"error\",\"code\":null"
+    obj = obj + ",\"file\":" + js_str(file) + ",\"line\":" + str(line) + ",\"col\":" + str(col)
+    obj = obj + ",\"message\":" + js_str(message) + "}"
+    return "{\"ok\":false,\"errors\":[" + obj + "],\"warnings\":" + warn + "}"
+
+def cli_error_stage(stage: string) -> string:
+    if stage != "":
+        return stage
+    return "internal"
+
+def cli_emit_error(stage: string, file: string, line: int, col: int, message: string, json: int, warn: string):
+    if json == 1:
+        cli_stderr_text(cli_err_json(cli_error_stage(stage), file, line, col, message, warn) + "\n")
+        return
+    loc = file
+    if line > 0:
+        loc = file + ":" + str(line) + ":" + str(col)
+    cli_stderr_text("[" + cli_error_stage(stage) + "] " + loc + ": " + message + "\n")
+
+# ---- option parsing ----
+
+struct CliOpts:
+    command: string
+    source: string
+    output: string
+    opt_level: int
+    level_flags: int
+    json: int
+    cc_warnings: int
+    cpu: string
+    extra: Vec
+    libs: Vec
+    libdirs: Vec
+    passthrough: Vec
+    no_smoke: int
+    err: int
+    errmsg: string
+
+def cli_opts_new(command: string) -> CliOpts:
+    return CliOpts(
+        command=command,
+        source="",
+        output="",
+        opt_level=3,
+        level_flags=0,
+        json=0,
+        cc_warnings=0,
+        cpu="",
+        extra=vec_new(),
+        libs=vec_new(),
+        libdirs=vec_new(),
+        passthrough=vec_new(),
+        no_smoke=0,
+        err=0,
+        errmsg="",
+    )
+
+def cli_opt_err(o: CliOpts, msg: string) -> CliOpts:
+    if o.err == 0:
+        o.err = 1
+        o.errmsg = msg
+    return o
+
+def cli_parse_opts(command: string) -> CliOpts:
+    o = cli_opts_new(command)
+    n = argc()
+    i = 1
+    while i < n and o.err == 0:
+        v = arg(i)
+        if v == "--":
+            i = i + 1
+            while i < n:
+                o.passthrough = vec_push(o.passthrough, as_ptr(arg(i)))
+                i = i + 1
+            i = n
+        elif v == "-o":
+            if i + 1 >= n:
+                return cli_opt_err(o, "missing output after -o")
+            if o.output != "":
+                return cli_opt_err(o, "duplicate -o")
+            i = i + 1
+            o.output = arg(i)
+            if o.output == "":
+                return cli_opt_err(o, "empty output path")
+            i = i + 1
+        elif v == "--O0" or v == "-O0":
+            o.opt_level = 0
+            o.level_flags = o.level_flags + 1
+            i = i + 1
+        elif v == "--O1" or v == "-O1":
+            o.opt_level = 1
+            o.level_flags = o.level_flags + 1
+            i = i + 1
+        elif v == "--O2" or v == "-O2":
+            o.opt_level = 2
+            o.level_flags = o.level_flags + 1
+            i = i + 1
+        elif v == "--O3" or v == "-O3":
+            o.opt_level = 3
+            o.level_flags = o.level_flags + 1
+            i = i + 1
+        elif v == "-l":
+            if i + 1 >= n:
+                return cli_opt_err(o, "missing name after -l")
+            i = i + 1
+            o.libs = vec_push(o.libs, as_ptr(arg(i)))
+            i = i + 1
+        elif v == "-L":
+            if i + 1 >= n:
+                return cli_opt_err(o, "missing directory after -L")
+            i = i + 1
+            o.libdirs = vec_push(o.libdirs, as_ptr(arg(i)))
+            i = i + 1
+        elif v == "--cpu":
+            if i + 1 >= n:
+                return cli_opt_err(o, "missing cpu after --cpu")
+            i = i + 1
+            o.cpu = arg(i)
+            i = i + 1
+        elif v == "--backend":
+            if i + 1 >= n:
+                return cli_opt_err(o, "missing backend after --backend")
+            i = i + 1
+            b = arg(i)
+            if b != "c":
+                return cli_opt_err(o, "--backend must be 'c' (got '" + b + "'); the C-emitting backend is the only backend")
+            i = i + 1
+        elif v == "--json":
+            o.json = 1
+            i = i + 1
+        elif v == "--clang-arg":
+            if i + 1 >= n:
+                return cli_opt_err(o, "missing argument after --clang-arg")
+            i = i + 1
+            o.extra = vec_push(o.extra, as_ptr(arg(i)))
+            i = i + 1
+        elif v == "-g":
+            o.extra = vec_push(o.extra, as_ptr("-g"))
+            i = i + 1
+        elif v == "--cc-warnings":
+            o.cc_warnings = 1
+            i = i + 1
+        elif v == "--no-smoke":
+            o.no_smoke = 1
+            i = i + 1
+        elif v == "--emit-assets":
+            return cli_opt_err(o, "--emit-assets is not implemented by the self-hosted CLI (CSS assets are a stage-1 feature)")
+        elif v == "--tailwind":
+            return cli_opt_err(o, "--tailwind is not implemented by the self-hosted CLI")
+        elif len(v) > 0 and load_u8(v, 0) == 45:
+            return cli_opt_err(o, "unsupported option '" + v + "'")
+        elif o.source == "":
+            o.source = v
+            i = i + 1
+        else:
+            return cli_opt_err(o, "expected exactly one source path")
+    if o.level_flags > 1:
+        return cli_opt_err(o, "at most one of --O0/--O1/--O2/--O3 may be given")
+    return o
+
+# options that affect codegen/link, with environment defaults
+def cli_driver_opts(o: CliOpts) -> DriverOpts:
+    clang = env_str("AOXN_CLANG", "clang")
+    cpu = o.cpu
+    if cpu == "":
+        cpu = env_str("AOXN_CPU", "")
+    ccw = o.cc_warnings
+    if ccw == 0:
+        if env_str("AOXN_CC_WARNINGS", "") == "1":
+            ccw = 1
+    extra = o.extra
+    if extra.len == 0:
+        extra = split_lines(env_str("AOXN_CLANG_ARGS", ""))
+    return DriverOpts(
+        opt_level=o.opt_level,
+        cc_warnings=ccw,
+        cpu=cpu,
+        clang_exe=clang,
+        extra_clang=extra,
+        libs=o.libs,
+        libdirs=o.libdirs,
+    )
+
+# ---- cache ----
+
+def cli_mix(h: int, b: int) -> int:
+    return (h * 131 + b + 7) % 2147483647
+
+def cli_mix2(h: int, b: int) -> int:
+    return (h * 65599 + b + 11) % 2147483629
+
+def cli_hash_text(h1: int, h2: int, s: string) -> Vec:
+    out = vec_new()
+    n = len(s)
+    i = 0
+    while i < n:
+        b = str_get(s, i)
+        h1 = cli_mix(h1, b)
+        h2 = cli_mix2(h2, b)
+        i = i + 1
+    h1 = cli_mix(h1, n % 251)
+    h2 = cli_mix2(h2, n % 251)
+    out = vec_push(out, h1)
+    out = vec_push(out, h2)
+    return out
+
+def cli_file_seed(path: string, h1: int, h2: int) -> Vec:
+    out = vec_new()
+    r = cli_hash_text(h1, h2, path)
+    h1 = vec_get(r, 0)
+    h2 = vec_get(r, 1)
+    r2 = cli_hash_text(h1, h2, read_file(path))
+    out = vec_push(out, vec_get(r2, 0))
+    out = vec_push(out, vec_get(r2, 1))
+    return out
+
+def cli_vec_has(v: Vec, s: string) -> int:
+    i = 0
+    while i < v.len:
+        if as_string(vec_get(v, i)) == s:
+            return 1
+        i = i + 1
+    return 0
+
+def cli_opt_string(o: CliOpts) -> string:
+    cpu = o.cpu
+    if cpu == "":
+        cpu = env_str("AOXN_CPU", "")
+    ccw = o.cc_warnings
+    if ccw == 0:
+        if env_str("AOXN_CC_WARNINGS", "") == "1":
+            ccw = 1
+    s = "O" + str(o.opt_level) + "|w" + str(ccw) + "|cpu=" + cpu
+    s = s + "|clang=" + env_str("AOXN_CLANG", "clang") + "|extra="
+    i = 0
+    while i < o.extra.len:
+        s = s + as_string(vec_get(o.extra, i)) + ";"
+        i = i + 1
+    s = s + "|libs="
+    i = 0
+    while i < o.libs.len:
+        s = s + as_string(vec_get(o.libs, i)) + ";"
+        i = i + 1
+    s = s + "|L="
+    i = 0
+    while i < o.libdirs.len:
+        s = s + as_string(vec_get(o.libdirs, i)) + ";"
+        i = i + 1
+    return s
+
+def cli_cache_key(source: string, o: CliOpts) -> string:
+    ls = load_program(source)
+    if ls.err != 0:
+        return ""
+    h1 = 7
+    h2 = 11
+    i = 0
+    while i < ls.files.len:
+        r = cli_file_seed(as_string(vec_get(ls.files, i)), h1, h2)
+        h1 = vec_get(r, 0)
+        h2 = vec_get(r, 1)
+        i = i + 1
+    r = cli_hash_text(h1, h2, cli_opt_string(o))
+    h1 = vec_get(r, 0)
+    h2 = vec_get(r, 1)
+    # compiler identity: the running executable's prefix and size
+    exe = exe_path()
+    h = fopen(exe, "rb")
+    if h != 0:
+        fseek(h, 0, 2)
+        sz = ftell(h)
+        fclose(h)
+        r = cli_file_seed(exe, h1, h2)
+        h1 = vec_get(r, 0)
+        h2 = vec_get(r, 1)
+        r = cli_hash_text(h1, h2, str(sz))
+        h1 = vec_get(r, 0)
+        h2 = vec_get(r, 1)
+    return str(h1) + "-" + str(h2)
+
+def cli_cache_root() -> string:
+    d = env_str("AOXN_CACHE_DIR", "")
+    if d != "":
+        return d
+    return "target/cache"
+
+def cli_trim_sep(p: string) -> string:
+    while len(p) > 0:
+        b = load_u8(p, len(p) - 1)
+        if b == 47 or b == 92:
+            p = str_sub(p, 0, len(p) - 1)
+        else:
+            return p
+    return p
+
+def cli_mkdir_plain(p: string):
+    if target_os() == "windows":
+        _mkdir(p)
+    else:
+        mkdir(p, 511)
+
+# create every path segment (`a/b/c`) best-effort
+def cli_mkdirs(path: string):
+    p = cli_trim_sep(path)
+    acc = ""
+    i = 0
+    while i < len(p):
+        b = load_u8(p, i)
+        if b == 47 or b == 92:
+            if acc != "":
+                cli_mkdir_plain(acc)
+        acc = acc + str_chr(b)
+        i = i + 1
+    if acc != "":
+        cli_mkdir_plain(acc)
+
+def cli_file_exists(path: string) -> int:
+    h = fopen(path, "rb")
+    if h == 0:
+        return 0
+    fclose(h)
+    return 1
+
+# ---- commands ----
+
+def cli_check(o: CliOpts) -> int:
+    if o.source == "":
+        return cli_usage("missing source path")
+    g = driver_generate_opts(o.source, cli_driver_opts(o))
+    warn = cli_warnings_json(g.w_name, g.w_line, g.w_col, o.source)
+    if g.err != 0:
+        cli_emit_error(g.err_stage, o.source, g.err_line, g.err_col, g.err_raw, o.json, warn)
+        return 1
+    if o.json == 1:
+        cli_stderr_text(cli_ok_json(warn) + "\n")
+    else:
+        cli_warnings_text(g.w_name, g.w_line, g.w_col, o.source)
+    return 0
+
+def cli_c(o: CliOpts) -> int:
+    if o.source == "":
+        return cli_usage("missing source path")
+    if o.output != "":
+        return cli_usage("-o is only supported by build")
+    g = driver_generate_opts(o.source, cli_driver_opts(o))
+    warn = cli_warnings_json(g.w_name, g.w_line, g.w_col, o.source)
+    if g.err != 0:
+        cli_emit_error(g.err_stage, o.source, g.err_line, g.err_col, g.err_raw, o.json, warn)
+        return 1
+    cli_warnings_text(g.w_name, g.w_line, g.w_col, o.source)
+    cli_stdout(gen_c_text(g))
+    return 0
+
+def cli_build(o: CliOpts) -> int:
+    if o.source == "":
+        return cli_usage("missing source path")
+    output = o.output
+    if output == "":
+        output = cli_default_output(o.source)
+    if normalize_path(output) == normalize_path(o.source) or normalize_path(output + ".obj") == normalize_path(o.source) or normalize_path(output + ".obj.c") == normalize_path(o.source):
+        cli_stderr_text("error: output would overwrite the source\n")
+        return 1
+    d = compile_file_opts(o.source, output + ".obj", output, cli_driver_opts(o))
+    warn = cli_warnings_json(d.w_name, d.w_line, d.w_col, o.source)
+    if d.err != 0:
+        msg = d.raw
+        if msg == "":
+            msg = d.errmsg
+        cli_emit_error(d.stage, o.source, d.line, d.col, msg, o.json, warn)
+        return 1
+    if o.json == 1:
+        cli_stderr_text(cli_ok_json(warn) + "\n")
+    else:
+        cli_warnings_text(d.w_name, d.w_line, d.w_col, o.source)
+    print(output)
+    return 0
+
+def cli_run(o: CliOpts) -> int:
+    if o.source == "":
+        return cli_usage("missing source path")
+    if o.output != "":
+        return cli_usage("-o is not supported by run")
+    root = cli_cache_root()
+    cli_mkdirs(root)
+    key = cli_cache_key(o.source, o)
+    nocache = 0
+    if env_str("AOXN_NO_CACHE", "") == "1":
+        nocache = 1
+    if key == "":
+        key = "nokey"
+        nocache = 1
+    exe = root + "/" + key + exe_suffix()
+    if nocache == 1:
+        exe = root + "/" + key + ".run" + exe_suffix()
+    if nocache == 0 and cli_file_exists(exe) == 1:
+        if o.json == 1:
+            cli_stderr_text(cli_ok_json("[]") + "\n")
+        return run_process(exe, o.passthrough)
+    # never let a stale executable satisfy a failed rebuild
+    remove(exe)
+    d = compile_file_opts(o.source, exe + ".obj", exe, cli_driver_opts(o))
+    warn = cli_warnings_json(d.w_name, d.w_line, d.w_col, o.source)
+    if d.err != 0:
+        msg = d.raw
+        if msg == "":
+            msg = d.errmsg
+        cli_emit_error(d.stage, o.source, d.line, d.col, msg, o.json, warn)
+        return 1
+    if o.json == 1:
+        cli_stderr_text(cli_ok_json(warn) + "\n")
+    else:
+        cli_warnings_text(d.w_name, d.w_line, d.w_col, o.source)
+    code = run_process(exe, o.passthrough)
+    if nocache == 1:
+        remove(exe)
+    return code
+
+def cli_symbols(o: CliOpts) -> int:
+    if o.source == "":
+        return cli_usage("missing source path")
+    if o.json == 1:
+        text = symbols_json(o.source)
+        if starts_with(text, "error: ") == 1:
+            cli_stderr_text(text)
+            return 1
+        cli_stdout(text + "\n")
+        return 0
+    text = symbols_text(o.source)
+    if starts_with(text, "error: ") == 1:
+        cli_stderr_text(text)
+        return 1
+    cli_stdout(text)
+    return 0
+
+def cli_clang_works() -> int:
+    explicit = env_str("AOXN_CLANG", "")
+    if explicit != "":
+        return cli_file_exists(explicit)
+    if target_os() == "windows":
+        if system("where clang >NUL 2>&1") == 0:
+            return 1
+        return 0
+    if system("command -v clang >/dev/null 2>&1") == 0:
+        return 1
+    return 0
+
+def cli_doctor_json(clang_ok: int, stdlib_ok: int, smoke: int, smoke_out: string, problems: Vec) -> string:
+    out = "{\"ok\":"
+    if problems.len == 0:
+        out = out + "true"
+    else:
+        out = out + "false"
+    out = out + ",\"checks\":["
+    out = out + "{\"name\":\"version\",\"value\":" + js_str(cli_version()) + ",\"ok\":null},"
+    out = out + "{\"name\":\"platform\",\"value\":" + js_str(target_os() + " (target_os() = " + target_os() + ")") + ",\"ok\":null},"
+    out = out + "{\"name\":\"executable\",\"value\":" + js_str(exe_path()) + ",\"ok\":null},"
+    val = "not found"
+    okv = "false"
+    if src_stdlib_exists() == 1:
+        val = stdlib_dir()
+        okv = "true"
+    out = out + "{\"name\":\"stdlib\",\"value\":" + js_str(val) + ",\"ok\":" + okv + "},"
+    val = "not found — install a C toolchain or set AOXN_CLANG"
+    okv = "false"
+    if clang_ok == 1:
+        val = env_str("AOXN_CLANG", "clang")
+        okv = "true"
+    out = out + "{\"name\":\"clang\",\"value\":" + js_str(val) + ",\"ok\":" + okv + "},"
+    if smoke == 0:
+        out = out + "{\"name\":\"smoke test\",\"value\":\"skipped\",\"ok\":null}"
+    elif smoke == 1:
+        out = out + "{\"name\":\"smoke test\",\"value\":" + js_str(smoke_out) + ",\"ok\":true}"
+    else:
+        out = out + "{\"name\":\"smoke test\",\"value\":" + js_str(smoke_out) + ",\"ok\":false}"
+    out = out + "],\"smoke\":"
+    if smoke == 0:
+        out = out + "null"
+    else:
+        okb = "false"
+        if smoke == 1:
+            okb = "true"
+        out = out + "{\"ok\":" + okb + ",\"output\":" + js_str(smoke_out) + "}"
+    out = out + ",\"problems\":["
+    i = 0
+    while i < problems.len:
+        if i > 0:
+            out = out + ","
+        out = out + js_str(as_string(vec_get(problems, i)))
+        i = i + 1
+    return out + "]}"
+
+def src_stdlib_exists() -> int:
+    return cli_file_exists(cli_trim_sep(stdlib_dir()) + "/stdlib.ax")
+
+def cli_doctor_smoke(root: string) -> Vec:
+    # (status, output): 0 skipped, 1 ok, 2 failed
+    out = vec_new()
+    src = root + "/doctor-smoke.ax"
+    if not write_file(src, "def main():\n    assert(1 + 1 == 2)\n"):
+        out = vec_push(out, 2)
+        out = vec_push(out, as_ptr("cannot write the smoke source"))
+        return out
+    exe = root + "/doctor-smoke" + exe_suffix()
+    d = compile_file_opts(src, exe + ".obj", exe, driver_opts_default())
+    if d.err != 0:
+        out = vec_push(out, 2)
+        out = vec_push(out, as_ptr(d.errmsg))
+        return out
+    out = vec_push(out, 1)
+    out = vec_push(out, as_ptr("compiled and linked (child output not captured by the selfhost doctor)"))
+    return out
+
+def cli_doctor(o: CliOpts) -> int:
+    root = cli_cache_root()
+    cli_mkdirs(root)
+    clang_ok = cli_clang_works()
+    stdlib_ok = src_stdlib_exists()
+    smoke = 0
+    smoke_out = ""
+    problems = vec_new()
+    if clang_ok == 0:
+        problems = vec_push(problems, as_ptr("clang not found: the C backend needs it to compile and link native code"))
+    if stdlib_ok == 0:
+        problems = vec_push(problems, as_ptr("standard library sources not found (set AOXN_STDLIB or AOXN_HOME)"))
+    if o.no_smoke == 0 and clang_ok == 1:
+        r = cli_doctor_smoke(root)
+        smoke = vec_get(r, 0)
+        smoke_out = as_string(vec_get(r, 1))
+        if smoke == 2:
+            problems = vec_push(problems, as_ptr("smoke test failed: " + smoke_out))
+    if o.json == 1:
+        cli_stdout(cli_doctor_json(clang_ok, stdlib_ok, smoke, smoke_out, problems) + "\n")
+    else:
+        print("Aoxn " + cli_version() + " doctor")
+        print("  [    ] version      " + cli_version())
+        print("  [    ] platform     " + target_os() + " (target_os() = " + target_os() + ")")
+        print("  [    ] executable   " + exe_path())
+        if stdlib_ok == 1:
+            print("  [ok  ] stdlib       " + stdlib_dir())
+        else:
+            print("  [FAIL] stdlib       not found (set AOXN_STDLIB or AOXN_HOME)")
+        if clang_ok == 1:
+            print("  [ok  ] clang        " + env_str("AOXN_CLANG", "clang"))
+        else:
+            print("  [FAIL] clang        not found — install a C toolchain or set AOXN_CLANG")
+        if smoke == 0:
+            print("  [    ] smoke test   skipped")
+        elif smoke == 1:
+            print("  [ok  ] smoke test   " + smoke_out)
+        else:
+            print("  [FAIL] smoke test   " + smoke_out)
+        print("  [    ] cache dir    " + root)
+        print("")
+        if problems.len == 0:
+            print("status: ok — `run <file.ax>` is ready to use.")
+        else:
+            print("status: problems found:")
+            i = 0
+            while i < problems.len:
+                print("  - " + as_string(vec_get(problems, i)))
+                i = i + 1
+            print("")
+            print("See docs/install.md, or run this again after fixing the items above.")
+    if problems.len == 0:
+        return 0
+    return 1
+
+def cli_pkg_command(name: string) -> int:
+    if name == "pkg" or name == "init" or name == "add" or name == "remove" or name == "install" or name == "update" or name == "outdated" or name == "list" or name == "freeze" or name == "tree" or name == "why" or name == "publish" or name == "yank" or name == "audit" or name == "trust" or name == "cache" or name == "npm-import":
+        return 1
+    return 0
+
+def main() -> int:
+    n = argc()
+    if n == 0:
+        cli_help()
+        return 2
+    command = arg(0)
+    if cli_pkg_command(command) == 1:
+        return cli_usage("package-manager command '" + command + "' is not implemented by the self-hosted CLI; use the Rust CLI for pkg (see docs/selfhost.md)")
+    if command == "help" or command == "--help" or command == "-h":
+        if n != 1:
+            return cli_usage("help does not accept arguments")
+        cli_help()
+        return 0
+    if command == "version" or command == "--version" or command == "-V":
+        if n != 1:
+            return cli_usage("version does not accept arguments")
+        print("aoxn " + cli_version())
+        return 0
+    if command != "check" and command != "c" and command != "build" and command != "run" and command != "symbols" and command != "doctor":
+        return cli_usage("unsupported command '" + command + "'")
+    o = cli_parse_opts(command)
+    if o.err != 0:
+        return cli_usage(o.errmsg)
+    if o.passthrough.len != 0 and command != "run":
+        return cli_usage("'--' program arguments are only meaningful for run")
+    if command == "check":
+        return cli_check(o)
+    if command == "c":
+        if o.json == 1:
+            return cli_usage("--json is not supported by c (the output is C text)")
+        return cli_c(o)
+    if command == "build":
+        return cli_build(o)
+    if command == "run":
+        return cli_run(o)
+    if command == "symbols":
+        return cli_symbols(o)
+    return cli_doctor(o)

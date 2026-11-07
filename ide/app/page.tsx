@@ -11,7 +11,7 @@ import type * as Monaco from 'monaco-editor'
 const Workbench = dynamic(() => import('./Workbench'), {
   ssr: false,
   loading: () => (
-    <div className="editor__placeholder" style={{ height: '100vh' }}>
+    <div className="wb-placeholder" style={{ height: '100vh' }}>
       Starting the Aoxn IDE…
     </div>
   ),

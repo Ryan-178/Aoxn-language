@@ -1,4 +1,4 @@
-# The Aoxn standard library (v0.44.0)
+# The Aoxn standard library (v0.44.0 batch + CSV/random/socket)
 
 The v0.44.0 batch landed the first thirteen modules of the stdlib roadmap
 (`docs/stdlib-todo.md` §6's items 1–6 plus the bisect/heapq pair): every
@@ -7,6 +7,11 @@ module is its own file under `stdlib/`, imported BY NAME —
 `stdlib/stdlib.ax` (the self-host critical path) or broke the fixed point.
 This file is the reference for the batch; the roadmap that produced it lives
 in `docs/stdlib-todo.md`.
+
+The unreleased batch after that added `stdlib/csv.ax`, `stdlib/random.ax` and
+`stdlib/socket.ax` (see the sections at the end). They follow the same rule:
+standalone files, never imported by `stdlib/stdlib.ax`, and compiled/run by
+the self-hosted CLI in the tests.
 
 All modules are **plain Aoxn** except `hmac.ax` (function pointers, marked
 `selfhost 尚不可编译` in its header). No module needs a `-l` flag: the Win32
@@ -427,3 +432,110 @@ already existed). Generic STRUCT containers remain impossible (no
 address-of-struct, no `sizeof`), so heterogeneous records still go through
 the tagged-slab pattern (`stdlib/json.ax`); `collections`/`itertools` (P2)
 can now build on the slot views.
+
+## csv
+
+`import * from "stdlib/csv.ax"` — RFC 4180 string tables. It is NOT a Python
+`csv` clone: dialect parameters (`delimiter`, `quotechar`, `escapechar`,
+`skipinitialspace`), QUOTE_ALL/NONE variants, streaming readers/writers and
+type conversion do not exist.
+
+```aoxn
+t = csv_parse("name,note\r\nAlice,\"likes, commas\"\r\n")
+print(csv_rows(t))             # 2
+print(csv_get(t, 1, 1))        # likes, commas
+print(csv_dumps(t))            # CRLF after every record
+if csv_parse("a,\"unterminated").err != 0:
+    print("malformed")
+```
+
+| API | meaning |
+|---|---|
+| `csv_parse(src) -> CsvTable` | parse one string; the table owns its rows |
+| `csv_read_file(path)` | `err = 2` on I/O failure, `1` on malformed input |
+| `csv_rows(t)` / `csv_cols(t, r)` / `csv_get(t, r, c)` | access; `csv_get` out of range answers `""` |
+| `csv_max_cols(t)` | maximum row width |
+| `csv_dumps(t)` / `csv_dumps_lf(t)` | serialize with CRLF (RFC/Python writer) or LF |
+| `csv_row_text(fields)` | one serialized record, no line ending |
+| `csv_free(t)` | free row buffers (strings still leak by design) |
+
+Rules and Python deltas:
+
+- Commas delimit, `""` inside a quoted field is a literal quote, quoted
+  fields may contain commas/CR/LF, and unquoted quotes are an error.
+- CRLF and LF end records. A lone CR is NOT a record end (it stays in the
+  field); Python's reader with `newline=''` behaves the same way.
+- A blank line is a row with ZERO fields (Python `csv.reader` yields `[]`).
+  `""` on a line is one row with ONE empty field.
+- Empty fields and a trailing comma produce empty strings; a final record
+  without a newline is accepted.
+- Errors are values: `err = 1`, `msg`, and 1-based `line`/`col`. Nothing
+  raises, so a caller can inspect the position.
+- Serialization quotes a field only when it contains `,`, `"`, CR or LF
+  (`QUOTE_MINIMAL`); a trailing CRLF is written after every row.
+- `tests/csv.rs` compares the parsed field matrix AND the serialized bytes
+  with Python's `csv` module for a fixture corpus when Python is available,
+  plus a pinned Python-independent subset and the selfhost-built CLI.
+
+## random
+
+`import * from "stdlib/random.ax"` — deterministic, documented,
+NON-CRYPTOGRAPHIC Park–Miller MINSTD (multiplier 16807, modulus 2^31−1).
+There is deliberately no system-entropy API and no time seed: a time seed
+pretending to be secure is worse than no API. Same seed → same sequence on
+every OS and process; the algorithm is not Python's Mersenne Twister.
+
+```aoxn
+r = random_seed(42)
+r = random_next(r)          # r.value in 1..2147483646
+r = random_below(r, 100)    # uniform [0, 100), rejection-sampled
+r = random_range(r, 10, 20) # uniform [10, 20] inclusive
+r = random_float_next(r)    # r.fval in [0.0, 1.0)
+r = random_float_range(r, 5.0, 10.0)   # r.fval in [5.0, 10.0)
+```
+
+- `random_below` rejects the tail (`limit = M - M % bound`) so there is no
+  modulo bias.
+- An invalid bound (`<= 0`, `> 2147483646`, inverted range, empty float
+  range) sets `error = 1` and does NOT advance the state.
+- `random_float(r)` returns a bare float from the current `r.value` (call
+  `random_next` first); `random_float_next`/`random_float_range` return the
+  state because a float return cannot carry an error, with the value in
+  `.fval`.
+- `tests/random.rs` pins the seed-42 vector, range edges, error-without-
+  advance, and cross-process determinism.
+
+## socket
+
+`import * from "stdlib/socket.ax"` — minimal blocking IPv4 TCP. NO DNS
+(literal addresses only), UDP, IPv6, TLS, timeouts or non-blocking modes.
+Windows links `-l ws2_32`; Linux needs no extra flag.
+
+```aoxn
+s = socket_listen(9000, 4)          # all interfaces; NO SO_REUSEADDR
+c = socket_accept(s)
+buf = malloc(256)
+n = socket_recv_line(c.fd, buf, 256)
+socket_send_str(c.fd, "echo:" + as_string(buf) + "\n")
+socket_close(c)
+socket_close(s)
+```
+
+| API | notes |
+|---|---|
+| `socket_init()` | Winsock WSAStartup on Windows; no-op on Linux |
+| `socket_connect("127.0.0.1", port)` | `Sock{fd,err,msg}`; DNS is rejected |
+| `socket_listen(port, backlog)` / `socket_accept(ls)` | value errors, no reuse-address |
+| `socket_send_bytes(fd, ptr, n)` / `socket_send_str` | loops partial sends |
+| `socket_recv(fd, buf, cap)` | one read: bytes, 0 EOF, -1 error |
+| `socket_recv_all` / `socket_recv_line` | loop/EOF and newline helpers |
+| `socket_close(s)` | closesocket / close |
+
+Platform discipline: every Windows and POSIX call is made inside a function
+guarded by `target_os()`; `sk_i32` maps zero-extended Windows `int` returns;
+`__errno_location` is used only on POSIX. Windows default listeners avoid
+`SO_REUSEADDR` (it would allow listener hijacking). `tests/socket.rs` runs
+real loopback traffic in both directions (Aoxn server + Rust client, Rust
+server + Aoxn client), a refused connection and a bind conflict. Those runs
+are on Windows in this workspace; the Linux branch is implemented and has
+not been executed natively here.

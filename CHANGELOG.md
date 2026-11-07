@@ -3,7 +3,85 @@
 Notable changes to the Aoxn compiler and language. Aoxn follows semver-ish
 minor bumps while pre-1.0: each minor version is a language milestone.
 
-## [Unreleased]
+## [0.55.0-snapshot-4] - 2026-11-07
+
+**Snapshot 4** combines the ZCode-based IDE workbench rebuild with the
+self-host language, CLI and stdlib batch. The compiler version stays 0.55.0;
+this is a pre-release tag, not a new minor.
+
+### IDE: ZCode workbench rebuild
+
+- Rebuild the workbench on ZCode v3.17.2's Zai design system: Tailwind 4
+  tokens, shadcn/Radix primitives and the `ai-elements` conversation/file-tree
+  shells, with concrete hex palettes for the Zai Light/Dark Monaco themes.
+- New shell: title bar, activity rail, resizable explorer/editor/assistant
+  split, Output/Terminal/Source Control/Preview dock and status bar.
+- New panes and commands: assistant chat through OpenAI-compatible or Anthropic
+  providers (`ide_ai_chat`), terminal runner (`ide_terminal_exec`), git status
+  and Monaco HEAD diff (`ide_git_status`/`ide_git_diff`), and image/PDF/markdown
+  preview. The compiler, package-manager, Monaco language service and workspace
+  bridge remain the source of truth.
+- Add pure Rust tests for the git porcelain parser and the preview MIME map,
+  third-party notices for ZCode and vercel/ai-elements, and doc-link pruning for
+  the gitignored `.zcode-src` reference tree.
+- Validated in the IDE bench: 64/64 frontend tests, 43 Rust tests,
+  `pnpm typecheck`, `pnpm build`, `pnpm audit` (no known advisories) and the
+  doc-link tool tests (11/11).
+
+### Self-host language parity, CLI and stdlib modules
+
+- Port the v0.40.0 language surface into `selfhost/`: `None`/`T | None`
+  (widening, `is`/`is not`, branch-scoped narrowing with early-return
+  propagation, mixed array-literal joins), `dict[V]` (shared heap handle,
+  annotation-only empty literal, read/write/delete/`dict_has`/`len`,
+  insertion-order iteration, missing-key raise), function pointers (values,
+  `fn(...) -> T` annotations, indirect calls, int↔fn casts/`to_int`, full C
+  declarators including fn-pointer returns) and `raise`/`try`/`except`
+  (pending-error slot, may-raise fixpoint, per-statement hops, handler
+  re-raise, uncaught exit). Programs without these features keep their previous
+  C byte-for-byte.
+- Extend the parity corpus with nullable/dict/fn-pointer/exception fixtures and
+  rejection-message fixtures; every accepted fixture compares complete C bytes
+  against `src/codegen_c.rs`. The independent
+  `selfhost_driver_self_compiles` fixed point remains separate.
+- Fix the Rust emitter's array-literal type hint: `[1, None, 3]` now joins to
+  `[int | None; 3]` in the hint path too, instead of panicking on the
+  let-binding type-drift assertion. Pinned in `tests/pipeline.rs`.
+- Record token START columns (the lexer used to store end columns) and statement
+  start positions, so diagnostics, W001 warnings and `symbols` report the same
+  line/column shape as the Rust compiler for the covered cases.
+- Implement the selfhost CLI beyond the earlier subset: `run` with a real argv
+  vector (Windows CRT `_spawnvp`, POSIX fork/execvp; CRT quoting on Windows, no
+  shell), child exit-code propagation, `-o`, `--O0..--O3`, `-l/-L`, `--cpu`,
+  `--backend c`, `--clang-arg`, `-g`, `--cc-warnings`, `--json`,
+  `AOXN_CLANG/AOXN_CPU/AOXN_CLANG_ARGS/AOXN_CC_WARNINGS`, W001 warnings,
+  structured JSON diagnostics on stderr, `symbols` (text+JSON), `doctor`
+  (`--no-smoke`, JSON), `version`, and a content-keyed `run` cache over the
+  entry, transitive imports, compiler executable and codegen options
+  (`AOXN_NO_CACHE`/`AOXN_CACHE_DIR`). The loader resolves
+  `stdlib`/`stdlib/<module>` through `AOXN_STDLIB`/`AOXN_HOME`.
+- Add `stdlib/csv.ax` (RFC 4180 parse/serialize, value errors with positions,
+  Python-differential tests), `stdlib/random.ax` (documented non-crypto MINSTD,
+  rejection sampling, error-without-state-advance, float range in `.fval`) and
+  `stdlib/socket.ax` (Windows Winsock/Linux POSIX blocking IPv4 TCP, guarded
+  platform calls, partial-send/recv helpers, no SO_REUSEADDR; real Windows
+  loopback tests in both directions). None is imported by
+  `stdlib/stdlib.ax`; CSV and random build/run through the selfhost CLI in
+  tests.
+- Known gaps, documented rather than approximated: package-manager commands are
+  explicitly rejected (never forwarded to Rust); CSS assets/`--emit-assets`/
+  `--tailwind` unsupported; namespace/selective imports unimplemented; `build`
+  caching, full doctor rows, imported-symbol file attribution and exact
+  diagnostic spans are incomplete; Linux socket/CLI logic is implemented but
+  this round ran only on Windows with clang 23.1.2. No semver bump; the release
+  is tagged `v0.55.0-snapshot-4`.
+- Final Windows validation (2026-11-07, clang 23.1.2): **357 root + 105 package
+  = 462 passed, 0 failed/ignored** (complete log `target/final-test.log`);
+  includes 19 full-C comparison inputs, 22 rejection cases, three pinned known
+  gaps, the original fixed point, four ABI tests, both CLI stages, real socket
+  loopback in both directions, random cross-process vectors and the Python
+  `csv` differential. `cargo check --workspace --tests --target
+  x86_64-unknown-linux-gnu` passed; no Linux-native run is claimed.
 
 ### C compatibility verification
 
@@ -20,8 +98,9 @@ minor bumps while pre-1.0: each minor version is a language milestone.
 - Add C ABI tests with separately compiled, explicitly typed C helper functions,
   alongside Aoxn aggregate-copy and indirect-call tests and rejected extern shapes.
 - Document the tested C mappings, intentional language differences and self-host
-  subset limits in `docs/c-compatibility.md`. No C source importer, variadic
-  extern support or newer-language-feature self-host port is introduced.
+  subset limits in `docs/c-compatibility.md`. That compatibility-verification
+  batch introduced no C source importer, variadic extern support or
+  newer-language-feature selfhost port; the CLI batch above is separate.
 
 ### Repository maintenance and validation
 
